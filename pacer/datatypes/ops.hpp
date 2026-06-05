@@ -21,7 +21,7 @@ namespace pacer {
 template <typename Concrete, typename T, size_t N> struct LinearOperators {
   bool operator==(const Concrete &rhs) const {
     for (size_t i = 0; i < N; ++i)
-      if (static_cast<Concrete &>(*this)[i] != rhs[i])
+      if (static_cast<const Concrete &>(*this)[i] != rhs[i])
         return false;
     return true;
   }

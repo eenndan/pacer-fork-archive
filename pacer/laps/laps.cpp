@@ -14,7 +14,13 @@ void pacer::Laps::Update() {
   laps_.clear();
   sectors_.clear();
 
-  PointInTime<GPSSample> previous;
+  if (points_.empty())
+    return;
+
+  // Seed `previous` with the first real point. Using a default-constructed
+  // (null-island) sentinel here used to make the very first segment spuriously
+  // cross any timing line, producing a phantom leading lap.
+  PointInTime<GPSSample> previous = points_[0];
 
   int sector_index = -1;
   auto sector_line = [&] {
@@ -29,7 +35,7 @@ void pacer::Laps::Update() {
                    .second = {gps_second.lon, gps_second.lat}};
   };
 
-  for (size_t i = 0; i < points_.size(); ++i) {
+  for (size_t i = 1; i < points_.size(); ++i) {
     PointInTime<GPSSample> current = points_[i];
 
     auto lap_split = Split(to_global(sectors.start_line), previous, current);
