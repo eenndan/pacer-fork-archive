@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstddef>
 
 namespace pacer {
@@ -25,12 +26,7 @@ template <typename Concrete, typename T, size_t N> struct LinearOperators {
     return true;
   }
 
-  bool operator!=(const Concrete &rhs) const {
-    for (size_t i = 0; i < N; ++i)
-      if (static_cast<Concrete &>(*this)[i] == rhs[i])
-        return false;
-    return true;
-  }
+  bool operator!=(const Concrete &rhs) const { return !(*this == rhs); }
 
   Concrete &operator+=(const Concrete &other) {
     for (size_t i = 0; i < N; ++i) {
@@ -83,7 +79,9 @@ template <typename Concrete, typename T, size_t N> struct LinearOperators {
     return lhs.Scalar(rhs);
   }
 
-  T Norm() const {
+  /// Squared Euclidean magnitude (no sqrt). Cheaper when only comparing
+  /// magnitudes or normalizing; use Norm() for the actual length.
+  T SquaredNorm() const {
     T result = static_cast<const Concrete &>(*this)[0] *
                static_cast<const Concrete &>(*this)[0];
     for (size_t i = 1; i < N; ++i) {
@@ -92,6 +90,9 @@ template <typename Concrete, typename T, size_t N> struct LinearOperators {
     }
     return result;
   }
+
+  /// Euclidean magnitude (length).
+  T Norm() const { return std::sqrt(SquaredNorm()); }
 };
 
 /// Provides pointwise operator

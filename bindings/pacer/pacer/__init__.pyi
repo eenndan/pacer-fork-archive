@@ -442,7 +442,7 @@ class LapsDisplay:
         """Auto-generated default constructor with named params"""
         pass
 
-class DeltaLapsComparision:
+class DeltaLapsComparison:
     reference_lap: Lap
     cs: CoordinateSystem
 

@@ -121,7 +121,7 @@ int main(int, char **) {
   auto laps = full_laps;
 
   auto laps_display = pacer::LapsDisplay{&laps};
-  pacer::DeltaLapsComparision delta;
+  pacer::DeltaLapsComparison delta;
 
   float duration =
             laps.GetPoint(laps.PointCount() - 1).time - laps.GetPoint(0).time,

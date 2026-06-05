@@ -27,7 +27,7 @@ struct LapsDisplay {
   bool DisplayTable();
 };
 
-struct DeltaLapsComparision {
+struct DeltaLapsComparison {
   Lap reference_lap;
   CoordinateSystem cs;
 

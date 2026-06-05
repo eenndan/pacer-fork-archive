@@ -43,9 +43,9 @@ void pacer::LapsDisplay::DisplayMap() {
     laps->SetCoordinateSystem(cs);
     laps->sectors.start_line = laps->PickRandomStart();
     auto min_ =
-        cs.Local(GPSSample{.lon = bounds.first.x, .lat = bounds.first.y});
+        cs.Local(GPSSample{.lat = bounds.first.y, .lon = bounds.first.x});
     auto max_ =
-        cs.Local(GPSSample{.lon = bounds.second.x, .lat = bounds.second.y});
+        cs.Local(GPSSample{.lat = bounds.second.y, .lon = bounds.second.x});
     bounds = {{min_[0], min_[1]}, {max_[0], max_[1]}};
 
     // ImPlot::SetupAxisLimits(ImAxis_X1, min_[0], max_[0]);
@@ -186,7 +186,7 @@ bool pacer::LapsDisplay::DisplayTable() {
   return true;
 }
 ImPlotPoint SampleToPoint(int index, void *data) {
-  auto &s = *reinterpret_cast<pacer::DeltaLapsComparision *>(data);
+  auto &s = *reinterpret_cast<pacer::DeltaLapsComparison *>(data);
   auto p = s.cs.Local(s.reference_lap.points[index].point);
   return {p[0], p[1]};
 }
@@ -195,18 +195,18 @@ ImPlotPoint Vec3fToPoint(int index, void *data) {
   return {s[0], s[1]};
 }
 
-void pacer::DeltaLapsComparision::DrawSlider() {
+void pacer::DeltaLapsComparison::DrawSlider() {
   ImGui::SliderFloat("Width", &reference_lap.width, 0, 10);
 }
 
-void pacer::DeltaLapsComparision::PlotSticks() {
+void pacer::DeltaLapsComparison::PlotSticks() {
   for (size_t i = 1; i + 1 < reference_lap.Count(); ++i) {
     Vec3f prev = cs.Local(reference_lap.points[i - 1].point),
           curr = cs.Local(reference_lap.points[i].point),
           next = cs.Local(reference_lap.points[i + 1].point);
 
     Vec3f dir = (next - prev);
-    dir /= std::sqrt(dir.Norm());
+    dir /= dir.Norm();
     Vec3f norm = Vec3f{dir[1], -dir[0], 0};
     Vec3f line[2] = {curr - norm * reference_lap.width,
                      curr + norm * reference_lap.width};
@@ -215,7 +215,7 @@ void pacer::DeltaLapsComparision::PlotSticks() {
 }
 
 // std::optional<float>
-void pacer::DeltaLapsComparision::Display(const Laps &laps) {
+void pacer::DeltaLapsComparison::Display(const Laps &laps) {
   if (reference_lap.points.size() < 1) {
     return;
   }

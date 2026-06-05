@@ -432,12 +432,12 @@ void py_init_module_pacer(nb::module_ &m) {
       ;
 
 
-  auto pyClassDeltaLapsComparision =
-      nb::class_<pacer::DeltaLapsComparision>
-          (m, "DeltaLapsComparision", "")
-      .def("__init__", [](pacer::DeltaLapsComparision * self, Lap reference_lap = Lap(), CoordinateSystem cs = CoordinateSystem(), std::unordered_set<int> selected_laps = {})
+  auto pyClassDeltaLapsComparison =
+      nb::class_<pacer::DeltaLapsComparison>
+          (m, "DeltaLapsComparison", "")
+      .def("__init__", [](pacer::DeltaLapsComparison * self, Lap reference_lap = Lap(), CoordinateSystem cs = CoordinateSystem(), std::unordered_set<int> selected_laps = {})
       {
-          new (self) pacer::DeltaLapsComparision();  // placement new
+          new (self) pacer::DeltaLapsComparison();  // placement new
           auto r_ctor_ = self;
           r_ctor_->reference_lap = reference_lap;
           r_ctor_->cs = cs;
@@ -445,15 +445,15 @@ void py_init_module_pacer(nb::module_ &m) {
       },
       nb::arg("reference_lap") = Lap(), nb::arg("cs") = CoordinateSystem(), nb::arg("selected_laps") = std::unordered_set<int>{}
       )
-      .def_rw("reference_lap", &pacer::DeltaLapsComparision::reference_lap, "")
-      .def_rw("cs", &pacer::DeltaLapsComparision::cs, "")
+      .def_rw("reference_lap", &pacer::DeltaLapsComparison::reference_lap, "")
+      .def_rw("cs", &pacer::DeltaLapsComparison::cs, "")
       .def("plot_sticks",
-          &pacer::DeltaLapsComparision::PlotSticks)
+          &pacer::DeltaLapsComparison::PlotSticks)
       .def("draw_slider",
-          &pacer::DeltaLapsComparision::DrawSlider)
-      .def_rw("selected_laps", &pacer::DeltaLapsComparision::selected_laps, "{19, 24, 28, 35, 36};")
+          &pacer::DeltaLapsComparison::DrawSlider)
+      .def_rw("selected_laps", &pacer::DeltaLapsComparison::selected_laps, "{19, 24, 28, 35, 36};")
       .def("display",
-          &pacer::DeltaLapsComparision::Display, nb::arg("laps"))
+          &pacer::DeltaLapsComparison::Display, nb::arg("laps"))
       ;
   ////////////////////    </generated_from:laps-display.hpp>    ////////////////////
 
