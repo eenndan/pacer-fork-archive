@@ -44,9 +44,15 @@ pacer::Point pacer::Interpolate(Point from, Point to, double ratio) {
 
 pacer::GPSSample pacer::Interpolate(GPSSample from, GPSSample to,
                                     double ratio) {
-  // ratio is an interpolation factor in [0,1]. NaN is tolerated: a degenerate
-  // timing-line segment can yield NaN and the result is then unused.
+  // ratio is an interpolation factor in [0,1]. A degenerate timing-line segment
+  // can yield NaN; in that case we fall back to `from` (the double fields just
+  // become NaN, but a NaN->int64_t cast for timestamp_ms would be UB).
   assert(std::isnan(ratio) || (ratio >= 0 && ratio <= 1));
+  int64_t timestamp_ms =
+      std::isnan(ratio)
+          ? from.timestamp_ms
+          : from.timestamp_ms +
+                (int64_t)((to.timestamp_ms - from.timestamp_ms) * ratio);
   // Fields are in declaration order (avoids -Wreorder-init-list) and
   // timestamp_ms is interpolated too (previously dropped -> always 0).
   return {
@@ -55,8 +61,7 @@ pacer::GPSSample pacer::Interpolate(GPSSample from, GPSSample to,
       .altitude = from.altitude * (1 - ratio) + to.altitude * ratio,
       .full_speed = from.full_speed * (1 - ratio) + to.full_speed * ratio,
       .ground_speed = from.ground_speed * (1 - ratio) + to.ground_speed * ratio,
-      .timestamp_ms = from.timestamp_ms +
-                      (int64_t)((to.timestamp_ms - from.timestamp_ms) * ratio),
+      .timestamp_ms = timestamp_ms,
   };
 }
 

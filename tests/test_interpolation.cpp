@@ -2,6 +2,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
+#include <stdexcept>
 #include <vector>
 
 #include <pacer/datatypes/datatypes.hpp>
@@ -82,6 +83,19 @@ TEST_CASE("InterpolationLoss spacing term vanishes for the parametric model",
   for (size_t i = 0; i < n; ++i)
     t[i] = static_cast<double>(i) / 4.0; // exactly within the band
   CHECK(InterpolationLoss(in, t) == Catch::Approx(0.0).margin(1e-12));
+}
+
+TEST_CASE("InterpolateTimestamps rejects mismatched-length inputs",
+          "[interp]") {
+  pacer::InterpolationInput in;
+  in.floor = {0.0, 1.0, 2.0};
+  in.ceil = {0.5, 1.5}; // shorter than floor
+  in.di = {1.0, 1.0, 1.0};
+  REQUIRE_THROWS_AS(InterpolateTimestamps(in, 1.0), std::invalid_argument);
+
+  in.ceil = {0.5, 1.5, 2.5};
+  std::vector<double> t = {0.0, 1.0}; // shorter than floor
+  REQUIRE_THROWS_AS(InterpolationLoss(in, t), std::invalid_argument);
 }
 
 TEST_CASE("ComputeDi sets di[0]=1 and a positive rough frequency", "[interp]") {

@@ -2,10 +2,19 @@
 
 #include <cmath>
 #include <set>
+#include <stdexcept>
 
 namespace pacer {
 
 namespace {
+
+// floor/ceil/di must be co-indexable; the public entry points are callable from
+// Python, so a mismatch must raise rather than read out of bounds.
+void ValidateInput(const InterpolationInput &in) {
+  if (in.floor.size() != in.ceil.size() || in.floor.size() != in.di.size())
+    throw std::invalid_argument(
+        "pacer interpolation: floor, ceil and di must have equal length");
+}
 
 // cumsum(di) - 1, so element 0 is always 0.
 std::vector<double> CumStep(const std::vector<double> &di) {
@@ -31,6 +40,10 @@ double Mean(const std::vector<double> &v) {
 
 double InterpolationLoss(const InterpolationInput &in,
                          const std::vector<double> &t) {
+  ValidateInput(in);
+  if (t.size() != in.floor.size())
+    throw std::invalid_argument(
+        "pacer interpolation: t must match floor/ceil/di length");
   const size_t n = t.size();
 
   // Spacing: variance of the di-normalized inter-sample time deltas.
@@ -62,6 +75,7 @@ double InterpolationLoss(const InterpolationInput &in,
 InterpolationResult InterpolateTimestamps(const InterpolationInput &in,
                                           double initial_frequency,
                                           const AdamOptions &opts) {
+  ValidateInput(in);
   InterpolationResult res;
   const size_t n = in.floor.size();
   if (n == 0)
@@ -106,11 +120,14 @@ InterpolationResult InterpolateTimestamps(const InterpolationInput &in,
       double gp = 0, gf = 0;
       const double inv_f2 = 1.0 / (freq * freq);
       for (size_t i = 0; i < n; ++i) {
-        double dconstr_dt = 0; // d(constraints)/dt_i
+        // d(constraints)/dt_i: both clip branches can contribute (matches the
+        // loss p_i = clip(floor-t,0) + clip(t-ceil,0); only relevant if a band
+        // is inverted, but kept exact).
+        double dconstr_dt = 0;
         if (t[i] < in.floor[i])
-          dconstr_dt = -inv_n2 * (in.floor[i] - t[i]);
-        else if (t[i] > in.ceil[i])
-          dconstr_dt = inv_n2 * (t[i] - in.ceil[i]);
+          dconstr_dt -= inv_n2 * (in.floor[i] - t[i]);
+        if (t[i] > in.ceil[i])
+          dconstr_dt += inv_n2 * (t[i] - in.ceil[i]);
         gp += dconstr_dt;                    // dt_i/dphase == 1
         gf += dconstr_dt * (-C[i] * inv_f2); // dt_i/dfreq == -C[i]/f^2
       }
@@ -133,6 +150,9 @@ InterpolationResult InterpolateTimestamps(const InterpolationInput &in,
 DiResult ComputeDi(const std::vector<GPSSample> &samples,
                    const std::vector<std::pair<double, double>> &spans,
                    const CoordinateSystem &cs) {
+  if (samples.size() != spans.size())
+    throw std::invalid_argument(
+        "pacer interpolation: samples and spans must have equal length");
   DiResult out;
   const size_t n = samples.size();
   if (n == 0)
@@ -163,6 +183,9 @@ InterpolationResult
 InterpolateTimestamps(const std::vector<GPSSample> &samples,
                       const std::vector<std::pair<double, double>> &spans,
                       const CoordinateSystem &cs, const AdamOptions &opts) {
+  if (samples.size() != spans.size())
+    throw std::invalid_argument(
+        "pacer interpolation: samples and spans must have equal length");
   InterpolationInput in;
   const size_t n = samples.size();
   in.floor.resize(n);
