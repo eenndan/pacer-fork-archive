@@ -33,6 +33,7 @@
 #include <pacer/datatypes/datatypes.hpp>
 #include <pacer/geometry/geometry.hpp>
 #include <pacer/gps-source/gps-source.hpp>
+#include <pacer/interpolation/interpolation.hpp>
 #include <pacer/laps-display/laps-display.hpp>
 #include <pacer/laps/laps.hpp>
 
@@ -63,6 +64,7 @@ struct InputConfig {
   std::vector<std::string> gpmf_files; // GoPro .MP4 (GPMF) inputs, in order
   std::string dat_file;                // optional u-blox .dat input
   pacer::DatVersion dat_version = pacer::DatVersion::WITH_TIMESTAMP;
+  bool interpolate = true; // recover GPMF timestamps via gradient descent
 };
 
 bool EndsWithCI(const std::string &s, const std::string &suffix) {
@@ -98,6 +100,8 @@ InputConfig LoadConfigFile(const std::string &path) {
       cfg.dat_file = j.at("dat_file").get<std::string>();
     if (j.contains("dat_version"))
       cfg.dat_version = ParseDatVersion(j.at("dat_version").get<std::string>());
+    if (j.contains("interpolate"))
+      cfg.interpolate = j.at("interpolate").get<bool>();
   } catch (const std::exception &e) {
     std::cerr << "pacer: failed to parse '" << path << "': " << e.what()
               << "\n";
@@ -168,15 +172,38 @@ void ReadInput(pacer::Laps *plaps, const InputConfig &cfg) {
   if (!cfg.gpmf_files.empty()) {
     GpsSourceChain chain = BuildGpmfChain(cfg.gpmf_files);
     pacer::RawGPSSource *m = chain.head;
-    for (m->Seek(0); !m->IsEnd(); m->Next()) {
-      auto [start, end] = m->CurrentTimeSpan();
-      m->Samples([&](GPSSample s, size_t current, size_t total) {
-        if (s.full_speed > 1e-6) {
-          // Naive per-frame linear timestamp; replaced by gradient-descent
-          // interpolation once that lands (see pacer/interpolation).
-          laps.AddPoint(s, start + (end - start) / total * current);
-        }
-      });
+
+    if (cfg.interpolate) {
+      // Collect each sample with its frame's [start, end] span, then recover
+      // accurate per-sample timestamps via gradient descent instead of the
+      // naive even-spread-within-frame heuristic (see pacer/interpolation).
+      std::vector<GPSSample> samples;
+      std::vector<std::pair<double, double>> spans;
+      for (m->Seek(0); !m->IsEnd(); m->Next()) {
+        auto [start, end] = m->CurrentTimeSpan();
+        m->Samples([&](GPSSample s, size_t, size_t) {
+          if (s.full_speed > 1e-6) {
+            samples.push_back(s);
+            spans.emplace_back(start, end);
+          }
+        });
+      }
+      if (samples.empty())
+        return;
+      pacer::CoordinateSystem cs(samples.front());
+      auto res = pacer::InterpolateTimestamps(samples, spans, cs);
+      for (size_t i = 0; i < samples.size(); ++i)
+        laps.AddPoint(samples[i], res.timestamps[i]);
+    } else {
+      // Naive fallback: assume samples are evenly spread across each frame
+      // span.
+      for (m->Seek(0); !m->IsEnd(); m->Next()) {
+        auto [start, end] = m->CurrentTimeSpan();
+        m->Samples([&](GPSSample s, size_t current, size_t total) {
+          if (s.full_speed > 1e-6)
+            laps.AddPoint(s, start + (end - start) / total * current);
+        });
+      }
     }
   } else if (!cfg.dat_file.empty()) {
     pacer::ReadDatFile(

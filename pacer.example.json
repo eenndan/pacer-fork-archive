@@ -5,5 +5,6 @@
     "/absolute/path/to/GH020001.MP4"
   ],
   "dat_file": "",
-  "dat_version": "with_timestamp"
+  "dat_version": "with_timestamp",
+  "interpolate": true
 }

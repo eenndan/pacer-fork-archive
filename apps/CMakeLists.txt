@@ -4,6 +4,7 @@ target_link_libraries(timeline PRIVATE
     pacer::laps
     pacer::gps-source
     pacer::laps-display
+    pacer::interpolation
 )
 
 # nlohmann/json is vendored inside hello_imgui; use it for the input config.
