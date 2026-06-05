@@ -117,9 +117,13 @@ InputConfig ResolveConfig(int argc, char **argv) {
       InputConfig file_cfg = LoadConfigFile(arg);
       cfg.gpmf_files.insert(cfg.gpmf_files.end(), file_cfg.gpmf_files.begin(),
                             file_cfg.gpmf_files.end());
-      if (cfg.dat_file.empty())
+      if (cfg.dat_file.empty()) {
+        // Keep dat_version tied to whichever config actually supplied dat_file,
+        // so a json that omits dat_version doesn't clobber it.
         cfg.dat_file = file_cfg.dat_file;
-      cfg.dat_version = file_cfg.dat_version;
+        cfg.dat_version = file_cfg.dat_version;
+      }
+      cfg.interpolate = file_cfg.interpolate;
     } else if (EndsWithCI(arg, ".mp4")) {
       cfg.gpmf_files.push_back(arg);
     } else if (EndsWithCI(arg, ".dat")) {
