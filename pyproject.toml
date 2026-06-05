@@ -22,6 +22,7 @@ pacer = { path = "bindings/pacer", editable = true }
 configure = "cmake -S . -B build/Release -G Ninja"
 build = { cmd = "cmake --build build/Release", depends-on = ["configure"] }
 test = { cmd = "ctest --test-dir build/Release --output-on-failure", depends-on = ["build"] }
+test-py = { cmd = "python tests/test_interpolation_parity.py", depends-on = ["build"] }
 gen-bindings = "python bindings/pacer/generate-bindings.py"
 timeline = { cmd = "./build/Release/apps/timeline.app/Contents/MacOS/timeline", depends-on = ["build"] }
 fmt = "git ls-files '*.cpp' '*.hpp' '*.h' '*.c' | xargs clang-format -i"

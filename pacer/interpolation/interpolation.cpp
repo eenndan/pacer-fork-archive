@@ -79,12 +79,14 @@ InterpolationResult InterpolateTimestamps(const InterpolationInput &in,
     return t;
   };
 
-  // Adam state for the two parameters {phase, frequency}.
-  double m_p = 0, v_p = 0, m_f = 0, v_f = 0;
-  int step = 0;
   const double b1 = opts.beta1, b2 = opts.beta2, eps = opts.epsilon;
   const double inv_n2 = 2.0 / static_cast<double>(n);
 
+  // Adam state for the two parameters {phase, frequency}. Reset per learning
+  // rate to mirror the notebook, which creates a fresh torch.optim.Adam (and
+  // therefore zeroes momentum and the bias-correction step) for each rate.
+  double m_p, v_p, m_f, v_f;
+  int step;
   auto adam = [&](double g, double &m, double &v, double &param, double lr) {
     m = b1 * m + (1 - b1) * g;
     v = b2 * v + (1 - b2) * g * g;
@@ -94,6 +96,8 @@ InterpolationResult InterpolateTimestamps(const InterpolationInput &in,
   };
 
   for (double lr : opts.learning_rates) {
+    m_p = v_p = m_f = v_f = 0;
+    step = 0;
     for (int it = 0; it < opts.iterations_per_rate; ++it) {
       std::vector<double> t = compute_t(phase, freq);
 

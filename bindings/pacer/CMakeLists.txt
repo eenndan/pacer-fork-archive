@@ -18,6 +18,7 @@ add_library(pacer INTERFACE)
 target_link_libraries(pacer INTERFACE
   pacer::datatypes
   pacer::geometry
+  pacer::interpolation
   pacer::laps
   pacer::gps-source
   pacer::laps-display
