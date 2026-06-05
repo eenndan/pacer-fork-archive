@@ -16,6 +16,7 @@
 #include <pacer/datatypes/datatypes.hpp>
 #include <pacer/geometry/geometry.hpp>
 #include <pacer/gps-source/gps-source.hpp>
+#include <pacer/interpolation/interpolation.hpp>
 #include <pacer/laps-display/laps-display.hpp>
 #include <pacer/laps/laps.hpp>
 
@@ -85,13 +86,13 @@ void py_init_module_pacer(nb::module_ &m) {
       .def("__init__", [](pacer::GPSSample * self, double lat = double(), double lon = double(), double altitude = double(), double full_speed = double(), double ground_speed = double(), int64_t timestamp_ms = int64_t())
       {
           new (self) pacer::GPSSample();  // placement new
-          auto r = self;
-          r->lat = lat;
-          r->lon = lon;
-          r->altitude = altitude;
-          r->full_speed = full_speed;
-          r->ground_speed = ground_speed;
-          r->timestamp_ms = timestamp_ms;
+          auto r_ctor_ = self;
+          r_ctor_->lat = lat;
+          r_ctor_->lon = lon;
+          r_ctor_->altitude = altitude;
+          r_ctor_->full_speed = full_speed;
+          r_ctor_->ground_speed = ground_speed;
+          r_ctor_->timestamp_ms = timestamp_ms;
       },
       nb::arg("lat") = double(), nb::arg("lon") = double(), nb::arg("altitude") = double(), nb::arg("full_speed") = double(), nb::arg("ground_speed") = double(), nb::arg("timestamp_ms") = int64_t()
       )
@@ -110,9 +111,9 @@ void py_init_module_pacer(nb::module_ &m) {
       .def("__init__", [](pacer::PointInTime<GPSSample> * self, pacer::GPSSample point = pacer::GPSSample(), double time = double())
       {
           new (self) pacer::PointInTime<GPSSample>();  // placement new
-          auto r = self;
-          r->point = point;
-          r->time = time;
+          auto r_ctor_ = self;
+          r_ctor_->point = point;
+          r_ctor_->time = time;
       },
       nb::arg("point") = pacer::GPSSample(), nb::arg("time") = double()
       )
@@ -176,9 +177,9 @@ void py_init_module_pacer(nb::module_ &m) {
       .def("__init__", [](pacer::Segment * self, pacer::Point first = pacer::Point(), pacer::Point second = pacer::Point())
       {
           new (self) pacer::Segment();  // placement new
-          auto r = self;
-          r->first = first;
-          r->second = second;
+          auto r_ctor_ = self;
+          r_ctor_->first = first;
+          r_ctor_->second = second;
       },
       nb::arg("first") = pacer::Point(), nb::arg("second") = pacer::Point()
       )
@@ -220,6 +221,106 @@ void py_init_module_pacer(nb::module_ &m) {
   ////////////////////    </generated_from:geometry.hpp>    ////////////////////
 
 
+  ////////////////////    <generated_from:interpolation.hpp>    ////////////////////
+  auto pyClassAdamOptions =
+      nb::class_<pacer::AdamOptions>
+          (m, "AdamOptions", "Gradient-descent (Adam) options for timestamp interpolation.")
+      .def("__init__", [](pacer::AdamOptions * self, std::vector<double> learning_rates = {1e-1, 1e-2, 1e-3}, int iterations_per_rate = 100, double beta1 = 0.9, double beta2 = 0.999, double epsilon = 1e-8)
+      {
+          new (self) pacer::AdamOptions();  // placement new
+          auto r_ctor_ = self;
+          r_ctor_->learning_rates = learning_rates;
+          r_ctor_->iterations_per_rate = iterations_per_rate;
+          r_ctor_->beta1 = beta1;
+          r_ctor_->beta2 = beta2;
+          r_ctor_->epsilon = epsilon;
+      },
+      nb::arg("learning_rates") = std::vector<double>{1e-1, 1e-2, 1e-3}, nb::arg("iterations_per_rate") = 100, nb::arg("beta1") = 0.9, nb::arg("beta2") = 0.999, nb::arg("epsilon") = 1e-8
+      )
+      .def_rw("learning_rates", &pacer::AdamOptions::learning_rates, "")
+      .def_rw("iterations_per_rate", &pacer::AdamOptions::iterations_per_rate, "")
+      .def_rw("beta1", &pacer::AdamOptions::beta1, "")
+      .def_rw("beta2", &pacer::AdamOptions::beta2, "")
+      .def_rw("epsilon", &pacer::AdamOptions::epsilon, "")
+      ;
+
+
+  auto pyClassInterpolationInput =
+      nb::class_<pacer::InterpolationInput>
+          (m, "InterpolationInput", " Per-sample inputs to the optimizer. All three vectors have the same length N.\n   floor[i], ceil[i] : the time interval the i-th sample must fall within\n                       (e.g. a video frame's [start, end] span).\n   di[i]             : expected number of sampling steps between sample i-1\n                       and i (di[0] == 1). Drives the spacing model.")
+      .def("__init__", [](pacer::InterpolationInput * self, std::vector<double> floor = std::vector<double>(), std::vector<double> ceil = std::vector<double>(), std::vector<double> di = std::vector<double>())
+      {
+          new (self) pacer::InterpolationInput();  // placement new
+          auto r_ctor_ = self;
+          r_ctor_->floor = floor;
+          r_ctor_->ceil = ceil;
+          r_ctor_->di = di;
+      },
+      nb::arg("floor") = std::vector<double>(), nb::arg("ceil") = std::vector<double>(), nb::arg("di") = std::vector<double>()
+      )
+      .def_rw("floor", &pacer::InterpolationInput::floor, "")
+      .def_rw("ceil", &pacer::InterpolationInput::ceil, "")
+      .def_rw("di", &pacer::InterpolationInput::di, "")
+      ;
+
+
+  auto pyClassInterpolationResult =
+      nb::class_<pacer::InterpolationResult>
+          (m, "InterpolationResult", "")
+      .def("__init__", [](pacer::InterpolationResult * self, std::vector<double> timestamps = std::vector<double>(), double phase = 0, double frequency = 0, double loss = 0)
+      {
+          new (self) pacer::InterpolationResult();  // placement new
+          auto r_ctor_ = self;
+          r_ctor_->timestamps = timestamps;
+          r_ctor_->phase = phase;
+          r_ctor_->frequency = frequency;
+          r_ctor_->loss = loss;
+      },
+      nb::arg("timestamps") = std::vector<double>(), nb::arg("phase") = 0, nb::arg("frequency") = 0, nb::arg("loss") = 0
+      )
+      .def_rw("timestamps", &pacer::InterpolationResult::timestamps, "recovered per-sample timestamps (length N)")
+      .def_rw("phase", &pacer::InterpolationResult::phase, "fitted t[0]")
+      .def_rw("frequency", &pacer::InterpolationResult::frequency, "fitted sampling frequency")
+      .def_rw("loss", &pacer::InterpolationResult::loss, "final loss value")
+      ;
+
+
+  m.def("interpolation_loss",
+      pacer::InterpolationLoss,
+      nb::arg("input"), nb::arg("t"),
+      " The loss from the notebook: variance of di-normalized spacing plus the mean\n squared violation of the [floor, ceil] bounds. Exposed for tests / parity.");
+
+  m.def("interpolate_timestamps",
+      nb::overload_cast<const pacer::InterpolationInput &, double, const pacer::AdamOptions &>(pacer::InterpolateTimestamps), nb::arg("input"), nb::arg("initial_frequency"), nb::arg("opts") = pacer::AdamOptions{});
+
+  m.def("interpolate_timestamps",
+      nb::overload_cast<const std::vector<GPSSample> &, const std::vector<std::pair<double, double>> &, const CoordinateSystem &, const pacer::AdamOptions &>(pacer::InterpolateTimestamps), nb::arg("samples"), nb::arg("spans"), nb::arg("cs"), nb::arg("opts") = pacer::AdamOptions{});
+
+
+  auto pyClassDiResult =
+      nb::class_<pacer::DiResult>
+          (m, "DiResult", "")
+      .def("__init__", [](pacer::DiResult * self, std::vector<double> di = std::vector<double>(), double rough_frequency = 1.0)
+      {
+          new (self) pacer::DiResult();  // placement new
+          auto r_ctor_ = self;
+          r_ctor_->di = di;
+          r_ctor_->rough_frequency = rough_frequency;
+      },
+      nb::arg("di") = std::vector<double>(), nb::arg("rough_frequency") = 1.0
+      )
+      .def_rw("di", &pacer::DiResult::di, "")
+      .def_rw("rough_frequency", &pacer::DiResult::rough_frequency, "")
+      ;
+
+
+  m.def("compute_di",
+      pacer::ComputeDi,
+      nb::arg("samples"), nb::arg("spans"), nb::arg("cs"),
+      " Build the di vector and a rough sampling frequency from GPS samples and their\n frame spans, matching the notebook:\n   rough_frequency = #samples / #distinct spans\n   di[i] = round(distance(s[i-1], s[i]) / avg_speed * rough_frequency)\n di[0] is 1 and every di is clamped to >= 1 (a 0 would divide by zero in the\n spacing term and collapse the parametric timeline).");
+  ////////////////////    </generated_from:interpolation.hpp>    ////////////////////
+
+
   ////////////////////    <generated_from:laps.hpp>    ////////////////////
   auto pyClassLap =
       nb::class_<pacer::Lap>
@@ -227,10 +328,10 @@ void py_init_module_pacer(nb::module_ &m) {
       .def("__init__", [](pacer::Lap * self, float width = float(), std::vector<PointInTime<GPSSample>> points = std::vector<PointInTime<GPSSample>>(), std::vector<double> cum_distances = std::vector<double>())
       {
           new (self) pacer::Lap();  // placement new
-          auto r = self;
-          r->width = width;
-          r->points = points;
-          r->cum_distances = cum_distances;
+          auto r_ctor_ = self;
+          r_ctor_->width = width;
+          r_ctor_->points = points;
+          r_ctor_->cum_distances = cum_distances;
       },
       nb::arg("width") = float(), nb::arg("points") = std::vector<PointInTime<GPSSample>>(), nb::arg("cum_distances") = std::vector<double>()
       )
@@ -258,9 +359,9 @@ void py_init_module_pacer(nb::module_ &m) {
       .def("__init__", [](pacer::Sectors * self, Segment start_line = Segment(), std::vector<Segment> sector_lines = std::vector<Segment>())
       {
           new (self) pacer::Sectors();  // placement new
-          auto r = self;
-          r->start_line = start_line;
-          r->sector_lines = sector_lines;
+          auto r_ctor_ = self;
+          r_ctor_->start_line = start_line;
+          r_ctor_->sector_lines = sector_lines;
       },
       nb::arg("start_line") = Segment(), nb::arg("sector_lines") = std::vector<Segment>()
       )
@@ -275,8 +376,8 @@ void py_init_module_pacer(nb::module_ &m) {
       .def("__init__", [](pacer::Laps * self, pacer::Sectors sectors = pacer::Sectors())
       {
           new (self) pacer::Laps();  // placement new
-          auto r = self;
-          r->sectors = sectors;
+          auto r_ctor_ = self;
+          r_ctor_->sectors = sectors;
       },
       nb::arg("sectors") = pacer::Sectors()
       )
@@ -409,9 +510,9 @@ void py_init_module_pacer(nb::module_ &m) {
       .def("__init__", [](pacer::LapsDisplay * self, int selected_lap = -1, CoordinateSystem cs = CoordinateSystem())
       {
           new (self) pacer::LapsDisplay();  // placement new
-          auto r = self;
-          r->selected_lap = selected_lap;
-          r->cs = cs;
+          auto r_ctor_ = self;
+          r_ctor_->selected_lap = selected_lap;
+          r_ctor_->cs = cs;
       },
       nb::arg("selected_lap") = -1, nb::arg("cs") = CoordinateSystem()
       )
@@ -432,28 +533,28 @@ void py_init_module_pacer(nb::module_ &m) {
       ;
 
 
-  auto pyClassDeltaLapsComparision =
-      nb::class_<pacer::DeltaLapsComparision>
-          (m, "DeltaLapsComparision", "")
-      .def("__init__", [](pacer::DeltaLapsComparision * self, Lap reference_lap = Lap(), CoordinateSystem cs = CoordinateSystem(), std::unordered_set<int> selected_laps = {})
+  auto pyClassDeltaLapsComparison =
+      nb::class_<pacer::DeltaLapsComparison>
+          (m, "DeltaLapsComparison", "")
+      .def("__init__", [](pacer::DeltaLapsComparison * self, Lap reference_lap = Lap(), CoordinateSystem cs = CoordinateSystem(), std::unordered_set<int> selected_laps = {})
       {
-          new (self) pacer::DeltaLapsComparision();  // placement new
-          auto r = self;
-          r->reference_lap = reference_lap;
-          r->cs = cs;
-          r->selected_laps = selected_laps;
+          new (self) pacer::DeltaLapsComparison();  // placement new
+          auto r_ctor_ = self;
+          r_ctor_->reference_lap = reference_lap;
+          r_ctor_->cs = cs;
+          r_ctor_->selected_laps = selected_laps;
       },
       nb::arg("reference_lap") = Lap(), nb::arg("cs") = CoordinateSystem(), nb::arg("selected_laps") = std::unordered_set<int>{}
       )
-      .def_rw("reference_lap", &pacer::DeltaLapsComparision::reference_lap, "")
-      .def_rw("cs", &pacer::DeltaLapsComparision::cs, "")
+      .def_rw("reference_lap", &pacer::DeltaLapsComparison::reference_lap, "")
+      .def_rw("cs", &pacer::DeltaLapsComparison::cs, "")
       .def("plot_sticks",
-          &pacer::DeltaLapsComparision::PlotSticks)
+          &pacer::DeltaLapsComparison::PlotSticks)
       .def("draw_slider",
-          &pacer::DeltaLapsComparision::DrawSlider)
-      .def_rw("selected_laps", &pacer::DeltaLapsComparision::selected_laps, "{19, 24, 28, 35, 36};")
+          &pacer::DeltaLapsComparison::DrawSlider)
+      .def_rw("selected_laps", &pacer::DeltaLapsComparison::selected_laps, "{19, 24, 28, 35, 36};")
       .def("display",
-          &pacer::DeltaLapsComparision::Display, nb::arg("laps"))
+          &pacer::DeltaLapsComparison::Display, nb::arg("laps"))
       ;
   ////////////////////    </generated_from:laps-display.hpp>    ////////////////////
 

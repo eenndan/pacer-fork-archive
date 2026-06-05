@@ -14,7 +14,13 @@ void pacer::Laps::Update() {
   laps_.clear();
   sectors_.clear();
 
-  PointInTime<GPSSample> previous;
+  if (points_.empty())
+    return;
+
+  // Seed `previous` with the first real point. Using a default-constructed
+  // (null-island) sentinel here used to make the very first segment spuriously
+  // cross any timing line, producing a phantom leading lap.
+  PointInTime<GPSSample> previous = points_[0];
 
   int sector_index = -1;
   auto sector_line = [&] {
@@ -29,7 +35,7 @@ void pacer::Laps::Update() {
                    .second = {gps_second.lon, gps_second.lat}};
   };
 
-  for (size_t i = 0; i < points_.size(); ++i) {
+  for (size_t i = 1; i < points_.size(); ++i) {
     PointInTime<GPSSample> current = points_[i];
 
     auto lap_split = Split(to_global(sectors.start_line), previous, current);
@@ -70,8 +76,18 @@ void pacer::Laps::Update() {
 }
 
 pacer::Segment pacer::Laps::PickRandomStart() const {
-  auto fst = points_[points_.size() / 2].point;
-  auto snd = points_[points_.size() / 2 + 20].point;
+  if (points_.size() < 2)
+    return Segment{}; // not enough points to define a start line
+
+  // Take the median point and one ~20 samples later (clamped to the last point
+  // on short traces) to build a line perpendicular to the local direction.
+  size_t i = points_.size() / 2;
+  size_t j = std::min(i + 20, points_.size() - 1);
+  if (i == j)
+    i = j - 1;
+
+  auto fst = points_[i].point;
+  auto snd = points_[j].point;
 
   auto s1 = cs_.Local(fst);
   auto s2 = cs_.Local(snd);
@@ -79,7 +95,7 @@ pacer::Segment pacer::Laps::PickRandomStart() const {
   auto p1 = Point{s1[0], s1[1]}, p2 = Point{s2[0], s2[1]};
   auto m = (p1 + p2) / 2, dir = (p2 - p1);
 
-  dir /= std::sqrt(dir.Norm());
+  dir /= dir.Norm();
   dir = Point{-dir[1], dir[0]};
 
   // offset start midpoint by 5m
@@ -87,6 +103,8 @@ pacer::Segment pacer::Laps::PickRandomStart() const {
 }
 
 auto pacer::Laps::MinMax() const -> std::pair<Point, Point> {
+  if (points_.empty())
+    return {{0, 0}, {0, 0}};
   Point min{points_[0].point.lon, points_[0].point.lat}, max = min;
   for (auto [p, _] : points_) {
     min.x = std::min(min.x, p.lon);
@@ -151,10 +169,12 @@ double pacer::Laps::Distance(size_t lap, size_t row) const {
 double pacer::Laps::LapTime(size_t lap) const { return laps_[lap].Time(); }
 
 size_t pacer::Laps::SampleCount(size_t lap) const {
-  if (lap > laps_.size()) {
+  if (lap >= laps_.size()) {
     return 0;
   }
-  return laps_[lap].finish_index - laps_[lap].start_index + 3;
+  // GetLap / At expose: interpolated start + interior points + interpolated
+  // finish == (finish_index - start_index) + 2 rows.
+  return laps_[lap].finish_index - laps_[lap].start_index + 2;
 }
 
 double pacer::Laps::StartTimestamp(size_t lap) const {
@@ -268,7 +288,7 @@ pacer::Segment pacer::Lap::TimingLine(size_t i,
         next = cs.Local(points[i + 1].point);
 
   Vec3f dir = (next - prev);
-  dir /= std::sqrt(dir.Norm());
+  dir /= dir.Norm();
   Vec3f norm = Vec3f{dir[1], -dir[0], 0};
 
   return Segment{ToPoint(cs.Global(curr - norm * width)),

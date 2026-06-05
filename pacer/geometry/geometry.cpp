@@ -1,5 +1,6 @@
 #include "geometry.hpp"
 
+#include <cassert>
 #include <cmath>
 
 #include <pacer/datatypes/datatypes.hpp>
@@ -43,13 +44,24 @@ pacer::Point pacer::Interpolate(Point from, Point to, double ratio) {
 
 pacer::GPSSample pacer::Interpolate(GPSSample from, GPSSample to,
                                     double ratio) {
-  assert(ratio != ratio || (ratio >= 0 && ratio <= 1));
+  // ratio is an interpolation factor in [0,1]. A degenerate timing-line segment
+  // can yield NaN; in that case we fall back to `from` (the double fields just
+  // become NaN, but a NaN->int64_t cast for timestamp_ms would be UB).
+  assert(std::isnan(ratio) || (ratio >= 0 && ratio <= 1));
+  int64_t timestamp_ms =
+      std::isnan(ratio)
+          ? from.timestamp_ms
+          : from.timestamp_ms +
+                (int64_t)((to.timestamp_ms - from.timestamp_ms) * ratio);
+  // Fields are in declaration order (avoids -Wreorder-init-list) and
+  // timestamp_ms is interpolated too (previously dropped -> always 0).
   return {
       .lat = from.lat * (1 - ratio) + to.lat * ratio,
       .lon = from.lon * (1 - ratio) + to.lon * ratio,
       .altitude = from.altitude * (1 - ratio) + to.altitude * ratio,
-      .ground_speed = from.ground_speed * (1 - ratio) + to.ground_speed * ratio,
       .full_speed = from.full_speed * (1 - ratio) + to.full_speed * ratio,
+      .ground_speed = from.ground_speed * (1 - ratio) + to.ground_speed * ratio,
+      .timestamp_ms = timestamp_ms,
   };
 }
 
@@ -63,8 +75,7 @@ auto pacer::CoordinateSystem::Global(Vec3f point) const -> GPSSample {
   point = local_origin + dx * point[0] + dy * point[1] + dz * point[2];
   auto lon = 180 * atan2(point[1], point[0]) / M_PI;
   auto altitude =
-      (std::sqrt((point / Vec3f{R_equator, R_equator, R_pole}).Norm()) - 1) *
-      R_equator;
+      ((point / Vec3f{R_equator, R_equator, R_pole}).Norm() - 1) * R_equator;
 
   auto lat =
       180 *
@@ -125,9 +136,9 @@ pacer::CoordinateSystem::CoordinateSystem(GPSSample origin)
               std::sin(origin.lon * M_PI / 180.),
           R_equator * std::sin(origin.lat * M_PI / 180.),
       }) {
-  dx /= std::sqrt(dx.Norm());
-  dy /= std::sqrt(dy.Norm());
-  dz /= std::sqrt(dz.Norm());
+  dx /= dx.Norm();
+  dy /= dy.Norm();
+  dz /= dz.Norm();
 
   assert(std::abs(Scalar(dx, dy)) < 1e-6);
   assert(std::abs(Scalar(dx, dz)) < 1e-6);
@@ -135,7 +146,7 @@ pacer::CoordinateSystem::CoordinateSystem(GPSSample origin)
 }
 double pacer::CoordinateSystem::Distance(const GPSSample &from,
                                          const GPSSample &to) const {
-  return std::sqrt((Local(from) - Local(to)).Norm());
+  return (Local(from) - Local(to)).Norm();
 }
 bool pacer::Segment::operator==(const Segment &other) const {
   return (std::abs((first - other.first).x) < 1e-6) &&

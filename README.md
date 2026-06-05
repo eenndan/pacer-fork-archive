@@ -1,8 +1,9 @@
 # pacer
 
 This is my project for analysing telemetry data from races.
-Atm it's in the early stages so there're lots of questionable things laying around (such as filepaths baked in binary, lol).
-It's still pretty much work-in-progress so proceed with caution.
+It's still work-in-progress, but the worst of the early-days jank has been cleaned
+up: input paths are no longer baked into the binary, timestamp interpolation now
+runs in C++, there's a small test suite, and the build is green again.
 
 ## getting started
 
@@ -14,23 +15,32 @@ I use `cmake` for building binary stuff, `litgen` for code-generation of binding
 Is it the best setup? No. Does it work? Somewhat.
 
 ```bash
-pixi install  # that's the only thing you need.
+git submodule update --init --recursive  # 3rdparty/ deps (imgui, implot, gpmf, hello_imgui, nanobind)
+pixi install                              # env + editable python bindings
 ```
 
-After you done installing pixi stuff, presumably you can do following:
+After that, there are pixi tasks for the common stuff (no need to memorize commands):
 
 ```bash
-pixi shell                            # now you're in the shell with new python and stuff
-cmake -S . -B build/Release -G Ninja  # creates build tree
-cmake --build build/Release           # builds everything
+pixi run build      # configure + build everything (cmake + Ninja)
+pixi run test       # run the C++ (Catch2) tests via ctest
+pixi run test-py    # C++ vs PyTorch interpolation parity check
+pixi run timeline   # build + launch the GUI app
+pixi run fmt        # clang-format the C/C++ sources
+pixi run web        # build the WASM/web app (needs an Emscripten SDK)
 ```
 
 ### what to do?
 
 There're two good places to get started:
 
-- `timeline` app (build it with CMake, tweak source code to read your files), somewhat good, has delta, laps, sectors, but not proper interpolation;
-- `notebooks/interpolation.ipynb` --- notebook with bunch of convenient stuff, has some gradient descent based timestamp interpolation, somewhat decent for analysis I want to do.
+- `timeline` app — the GUI (map, lap table, delta plots). Point it at your files
+  via CLI args or a config: `pixi run timeline -- a.MP4 b.MP4` or copy
+  `pacer.example.json` to `pacer.json`. It uses the C++ gradient-descent timestamp
+  interpolation automatically;
+- `notebooks/interpolation.ipynb` --- a tidied notebook walking through loading
+  GoPro GPS, recovering timestamps with `pacer.interpolate_timestamps`, lap
+  segmentation and lap-delta plots (set `PACER_DATA` to your video folder).
 
 ## components
 
@@ -54,16 +64,19 @@ Still in progress:
   - shorter line is better;
   - keep minimum speed higher;
   - etc.
-- timestamp interpolation in C++;
-- emscripten based web app;
-- gradient descent (maybe something else) to properly get timestamp within C++;
-- clean up the code (lmao).
+- finish the emscripten/web app (the build target is scaffolded; in-browser file
+  loading still needs preloading into the emscripten FS);
+- keep chipping away at the code (it's much better, but still WIP).
 
 Wow, something already done:
 
-- lap segmentation, comparision between laps with delta;
-- nanobind-based python bindings to rapidly experiment in python (I've been putting it off due to shitty code);
+- lap segmentation, comparison between laps with delta;
+- nanobind-based python bindings to rapidly experiment in python;
 - integration with 3rd party gps data, e.g. from sampled file, consider building ios app for capturing;
+- timestamp interpolation in C++ (gradient descent), exposed to Python and used
+  by the `timeline` app — verified to match the original PyTorch implementation;
+- config/CLI-driven inputs (no more hard-coded paths), formatting/lint config,
+  pixi tasks, and a Catch2 test suite (ops, geometry, laps, interpolation).
 
 ## credits
 

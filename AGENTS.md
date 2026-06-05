@@ -12,9 +12,11 @@ motorsport GPS data). It ingests GPS samples from GoPro videos or `.dat` logs, s
 plots). The core is C++23; Python bindings (auto-generated) expose the same types for notebook-based
 experimentation.
 
-The author's own [README.md](README.md) warns the code is messy and full of "questionable things"
-(e.g. hard-coded file paths baked into the binary). **That is accurate** — see
-[Known issues & gotchas](#known-issues--gotchas) before assuming anything works out of the box.
+The README used to warn about "questionable things" (hard-coded paths, latent bugs, broken build).
+A tech-debt pass has since resolved most of them: the build is green again, inputs are
+config/CLI-driven, the documented latent bugs are fixed, there is a Catch2 test suite, and
+timestamp interpolation is implemented in C++. See [Recent changes](#recent-changes) and the
+trimmed [Known issues & gotchas](#known-issues--gotchas).
 
 ---
 
@@ -27,8 +29,8 @@ The author's own [README.md](README.md) warns the code is messy and full of "que
     input paths in `ReadInput` ([timeline.cpp:60](apps/timeline.cpp#L60)) to point at your files.
   - The **interpolation notebook** — [notebooks/interpolation.ipynb](notebooks/interpolation.ipynb)
     (gradient-descent timestamp interpolation; uses the Python `pacer`/`imgui` bindings).
-- **Core library:** [pacer/](pacer/) — five small modules: `datatypes`, `geometry`, `gps-source`,
-  `laps`, `laps-display`.
+- **Core library:** [pacer/](pacer/) — six small modules: `datatypes`, `geometry`, `gps-source`,
+  `interpolation`, `laps`, `laps-display`.
 - **Build chain:** `pixi` (env) → `cmake`/Ninja (C++23) → `scikit-build-core` (Python glue) →
   `litgen` (binding codegen) → `nanobind` (binding runtime). See [Build, run & test](#build-run--test).
 - **Size:** ~3.5k lines of hand-written C++/Python; the large line counts in `bindings/` are
@@ -36,8 +38,10 @@ The author's own [README.md](README.md) warns the code is messy and full of "que
 - **This repo is indexed by `gitnexus`** — you can query the code graph directly. See
   [Using gitnexus](#using-gitnexus).
 
-> ⚠️ **Before anything builds:** the git submodules under `3rdparty/` are **not checked out** except
-> `nanobind`. Run `git submodule update --init --recursive` first. See [gotchas](#known-issues--gotchas).
+> ⚠️ **Submodules:** run `git submodule update --init --recursive` if `3rdparty/` is empty.
+> `implot` is pinned to commit `3da8bd3` (v0.16-26-g3da8bd3, IMPLOT_VERSION 0.17-WIP) compatible with the imgui 1.92.x that
+> hello_imgui bundles — do not "update" it to v0.16 or to current master (master's ImPlotSpec API
+> breaks our display code). See [gotchas](#known-issues--gotchas).
 
 ---
 
@@ -56,13 +60,13 @@ pacer/                         # repo root
 │   ├── datatypes/             #   core value types + CRTP vector-operator mixins (header-only)
 │   ├── geometry/              #   2D Point, Segment, CoordinateSystem (GPS<->local meters), Split
 │   ├── gps-source/            #   telemetry ingestion: GoPro GPMF (MP4) + u-blox .dat -> GPSSample
+│   ├── interpolation/         #   gradient-descent (Adam) GPMF timestamp recovery (no PyTorch)
 │   ├── laps/                  #   lap/sector segmentation + per-lap queries (the data model)
 │   └── laps-display/          #   ImGui/ImPlot rendering of laps (map, table, delta plots)
 │
 ├── apps/                      # ── EXECUTABLES ──
 │   ├── timeline.cpp           #   MAIN GUI app (HelloImGui + ImPlot); the product
-│   ├── datparser.c            #   scratch: dump raw u-blox .dat records (predecessor of gps-source-dat)
-│   └── destructor_test.cpp    #   scratch: C++ temporary-destructor experiment (unrelated)
+│   └── (scratch datparser.c / destructor_test.cpp were removed in the cleanup)
 │
 ├── bindings/                  # ── PYTHON BINDINGS (litgen-generated, nanobind runtime) ──
 │   ├── litgen.cmake           #   vendored litgen CMake helpers (find python/nanobind, deploy .so)
@@ -71,7 +75,7 @@ pacer/                         # repo root
 │
 ├── examples/                  # standalone demos of 3rd-party libs (imgui, implot, gpmf, hello_imgui)
 ├── notebooks/                 # interpolation.ipynb, dat-files.ipynb (analysis hacking, untidy)
-├── tests/                     # Catch2 unit tests (currently ONE: coordinate-system round-trip)
+├── tests/                     # Catch2 tests: ops, geometry, coordinate-system, laps, interpolation
 │
 └── 3rdparty/                  # git submodules (see .gitmodules) — MUST be init'd before building
     ├── imgui/                 #   Dear ImGui            (empty until submodule init)
@@ -102,7 +106,7 @@ Two independent flows share the same core C++ types.
                           │                                    ← pacer/geometry (crossing detection)
                 segmented laps_ / sectors_ (LapChunk ranges)
                           │
-        LapsDisplay (map/table/telemetry) + DeltaLapsComparision (delta plots)   ← pacer/laps-display
+        LapsDisplay (map/table/telemetry) + DeltaLapsComparison (delta plots)   ← pacer/laps-display
                           │
                   ImGui / ImPlot  ──hosted by──►  HelloImGui::Run(frame_lambda)   ← apps/timeline.cpp
 ```
@@ -163,8 +167,8 @@ Each core module lives in `pacer/<name>/` and builds a static lib `pacer::<name>
     [ops.hpp:120](pacer/datatypes/ops.hpp#L120) — CRTP mixins giving any indexable type `+ - * / == Scalar Norm`.
 - **Note:** `datatypes.cpp` is an (almost) empty TU; all logic is header-only.
 - **Depends on:** nothing (std only). **Used by:** every other module.
-- ⚠️ `Norm()` returns the **squared** magnitude (no `sqrt`). `operator!=` is **buggy** (not the
-  negation of `==`). `timestamp_ms` is widely ignored by downstream code.
+- ✅ `Norm()` is the true Euclidean length; the squared value is `SquaredNorm()`. `operator!=` is
+  `!(*this == rhs)` and `operator==` is const-correct. (These were buggy pre-cleanup.)
 
 ### `pacer/geometry` — coordinate math, intersection, interpolation
 - **Purpose:** 2D geometry + GPS↔local-meter transform + the lap-splitting primitive.
@@ -181,8 +185,10 @@ Each core module lives in `pacer/<name>/` and builds a static lib `pacer::<name>
     [geometry.cpp:44](pacer/geometry/geometry.cpp#L44) (GPSSample).
   - `Split<P>` — [geometry.hpp:110](pacer/geometry/geometry.hpp#L110) — **core of lap detection**.
 - **Depends on:** `pacer::datatypes`, `implot` (for `ImPlotPoint`). **Used by:** `laps`, `laps-display`, bindings.
-- ⚠️ `Interpolate(GPSSample)` has out-of-order designated initializers (latent C++ bug) and drops
-  `timestamp_ms`. [geometry-bindings.cpp](pacer/geometry/geometry-bindings.cpp) is **dead code** (see gotchas).
+- ✅ `Interpolate(GPSSample)` now interpolates `timestamp_ms` (previously dropped) and uses
+  declaration-order initializers. `Norm()` is the true Euclidean length; the squared value is
+  `SquaredNorm()`. The old hand-written `geometry-bindings.cpp` has been removed (bindings are
+  generated in `bindings/pacer/`).
 
 ### `pacer/gps-source` — telemetry ingestion
 - **Purpose:** decode GoPro GPMF (inside MP4) and u-blox `.dat` records into a uniform `GPSSample` stream.
@@ -198,9 +204,25 @@ Each core module lives in `pacer/<name>/` and builds a static lib `pacer::<name>
     `uGnssDecUbxNavPvt_t` ([gps-source-dat.cpp:21](pacer/gps-source/gps-source-dat.cpp#L21)).
 - **Depends on:** `pacer::datatypes`, `gpmf::gpmf` (bundled GoPro parser). **Used by:** `apps/timeline.cpp`,
   `laps` (consumes the emitted samples), bindings, notebooks.
-- ⚠️ The u-blox struct is **duplicated** verbatim in [apps/datparser.c](apps/datparser.c). The `.dat`
-  path never sets `timestamp_ms`. Python `samples()`/`read_dat_file` only exist in the **disabled**
-  per-module binding (see gotchas).
+- ⚠️ The `.dat` path sets `timestamp_ms` only for `WITH_TIMESTAMP`. The old `apps/datparser.c`
+  duplicate of the u-blox struct has been removed. The Python `pacer` package binds the source
+  classes but still exposes only `read_samples` (the per-source `samples()`/`read_dat_file` were in
+  the disabled per-module binding).
+
+### `pacer/interpolation` — gradient-descent timestamp recovery
+- **Purpose:** recover an accurate per-sample timestamp from GPMF, which only provides a coarse
+  `[start, end]` frame span. A C++ port of the notebook's PyTorch approach (no torch dependency).
+- **Key symbols** (all in [interpolation.hpp](pacer/interpolation/interpolation.hpp)):
+  - `InterpolationInput` (`floor`/`ceil`/`di`), `InterpolationResult` (`timestamps`,`phase`,`frequency`,`loss`).
+  - `InterpolateTimestamps(input, initial_frequency, AdamOptions)` — fits the parametric model
+    `t[i] = phase + (cumsum(di)[i]-1)/frequency` with a hand-rolled Adam (analytic gradient; the
+    spacing-variance loss term is identically 0 for this model, so only the `[floor,ceil]` constraint
+    drives the fit). An overload takes `(samples, spans, cs)` and derives `di` via `ComputeDi`.
+  - `InterpolationLoss` exposes the notebook loss for tests/parity.
+- **Depends on:** `pacer::geometry`, `pacer::datatypes`. **Used by:** `apps/timeline.cpp` (GPMF path),
+  bindings (`interpolate_timestamps`), `notebooks/interpolation.ipynb`.
+- ✅ Verified to match the original torch optimizer to ~1e-15 (tests/test_interpolation_parity.py).
+  Adam state is reset per learning rate to mirror the notebook (one fresh `torch.optim.Adam` per rate).
 
 ### `pacer/laps` — lap/sector segmentation & queries (the data model)
 - **Purpose:** accumulate `PointInTime<GPSSample>` and re-segment into laps/sectors when timing lines move.
@@ -215,8 +237,8 @@ Each core module lives in `pacer/<name>/` and builds a static lib `pacer::<name>
   - `Sectors` — [laps.hpp:27](pacer/laps/laps.hpp#L27) — mutable `start_line` + `sector_lines` (local coords).
   - `Laps::LapChunk` (private) — [laps.hpp:81](pacer/laps/laps.hpp#L81) — half-open index range + interpolated ends.
 - **Depends on:** `pacer::geometry`, `pacer::datatypes`. **Used by:** `laps-display`, `apps/timeline.cpp`, bindings.
-- ⚠️ `SampleCount` returns `finish_index - start_index + 3` and several methods assume `points_` is
-  non-empty; short traces can read out of bounds. [laps-bindings.cpp](pacer/laps/laps-bindings.cpp) is dead code.
+- ✅ `SampleCount` returns `finish_index - start_index + 2` (matches `GetLap`); `Update`,
+  `PickRandomStart` and `MinMax` now guard empty/short traces. The old `laps-bindings.cpp` was removed.
 
 ### `pacer/laps-display` — ImGui/ImPlot rendering
 - **Purpose:** pure presentation. Draws the map, lap table, single-lap telemetry, and delta plots.
@@ -225,27 +247,25 @@ Each core module lives in `pacer/<name>/` and builds a static lib `pacer::<name>
     `CoordinateSystem`. `DisplayMap` ([laps-display.cpp:35](pacer/laps-display/laps-display.cpp#L35)),
     `DisplayTable` ([laps-display.cpp:120](pacer/laps-display/laps-display.cpp#L120)),
     `DisplayLapTelemetry` ([laps-display.cpp:92](pacer/laps-display/laps-display.cpp#L92)).
-  - `DeltaLapsComparision` *(sic — misspelled)* — [laps-display.hpp:30](pacer/laps-display/laps-display.hpp#L30) —
+  - `DeltaLapsComparison` — [laps-display.hpp:30](pacer/laps-display/laps-display.hpp#L30) —
     resamples selected laps onto a reference and plots speed + time-delta-vs-best.
     `Display` at [laps-display.cpp:218](pacer/laps-display/laps-display.cpp#L218).
 - **Depends on:** `pacer::laps`, `pacer::geometry`, `implot`/`imgui`. **Used by:** `apps/timeline.cpp`, bindings.
 - ⚠️ `DisplayMap` lazily initializes the `CoordinateSystem` and a random start line on first frame
-  (detected via inverted `bounds`). The misspelled `DeltaLapsComparision` is used everywhere — don't
-  "fix" the spelling piecemeal.
+  (detected via inverted `bounds`).
 
 ### `apps/` — executables
-- [apps/timeline.cpp](apps/timeline.cpp) — the **main GUI**. `main` ([timeline.cpp:218](apps/timeline.cpp#L218))
-  loads data via `ReadInput` ([timeline.cpp:60](apps/timeline.cpp#L60), GPMF path) — `ReadInputDat`
-  ([timeline.cpp:110](apps/timeline.cpp#L110), `.dat` path) exists but is **not** called — then runs
-  `HelloImGui::Run` with a per-frame lambda drawing the Data Subset / Map / Laps / Delta / Lap Telemetry
-  windows. `DisplayTelemetry` and `glfw_error_callback` are leftover demo code (unused).
-- [apps/datparser.c](apps/datparser.c) — scratch C tool to dump raw `.dat` records (`main` at
-  [datparser.c:88](apps/datparser.c#L88)); superseded by `ReadDatFile`.
-- [apps/destructor_test.cpp](apps/destructor_test.cpp) — unrelated C++ learning experiment.
+- [apps/timeline.cpp](apps/timeline.cpp) — the **main GUI**. `main` reads an `InputConfig` via
+  `ResolveConfig` (CLI args / `pacer.json` / `$PACER_CONFIG`), then `ReadInput` ingests GPMF (with
+  C++ timestamp interpolation) or a `.dat` file by extension, then runs `HelloImGui::Run` with a
+  per-frame lambda drawing the Data Subset / Map / Laps / Delta / Lap Telemetry windows. (The old
+  scratch executables and the unused `DisplayTelemetry`/`glfw_error_callback` were removed.)
 
 ### `tests/` — Catch2 unit tests
-- [tests/test_coordinate_system.cpp](tests/test_coordinate_system.cpp) — the **only** test
-  (`TEST_CASE` at [test_coordinate_system.cpp:8](tests/test_coordinate_system.cpp#L8)): verifies
+- Five suites wired via the `add_pacer_test` macro in [tests/CMakeLists.txt](tests/CMakeLists.txt):
+  `test_ops`, `test_geometry`, `test_coordinate_system`, `test_laps`, `test_interpolation`; plus a
+  Python C++/torch parity test [tests/test_interpolation_parity.py](tests/test_interpolation_parity.py).
+- [tests/test_coordinate_system.cpp](tests/test_coordinate_system.cpp) — verifies
   `CoordinateSystem` GPS↔local round-trips within `1e-6`. Linked against `pacer::geometry` +
   `Catch2::Catch2WithMain` ([tests/CMakeLists.txt](tests/CMakeLists.txt)).
 
@@ -287,7 +307,8 @@ pixi install     # creates the env (cmake, python 3.13, glfw, pytorch, jupyter, 
                  # installs the editable Python packages bindings/imgui + bindings/pacer
 pixi shell       # enter the env
 ```
-There are **no** `pixi run` tasks defined (`[tool.pixi.tasks]` is empty) — invoke tools directly.
+`[tool.pixi.tasks]` now provides: `configure`, `build`, `test`, `test-py`, `gen-bindings`,
+`timeline`, `fmt`, `lint`, `web` (e.g. `pixi run build`, `pixi run test`).
 
 ### 2. C++ build (cmake + Ninja)
 ```bash
@@ -299,10 +320,9 @@ This also runs the binding codegen targets and (non-wheel build) deploys the com
 
 ### 3. Run the GUI app
 - Built target: **`timeline`** (via `hello_imgui_add_app`, [apps/CMakeLists.txt](apps/CMakeLists.txt)).
-- ⚠️ **Edit the hard-coded input paths first** in `ReadInput`
-  ([timeline.cpp:63-76](apps/timeline.cpp#L63-L76)) — they point at another user's machine and the
-  app will produce no data otherwise. The number of files is also hard-coded in the `GPMFSource[]` /
-  `SequentialGPSSource` chain ([timeline.cpp:78-84](apps/timeline.cpp#L78-L84)).
+- Inputs are config/CLI-driven (no hard-coded paths). Pass `.MP4`/`.dat`/`.json` on the CLI, set
+  `$PACER_CONFIG`, or create `pacer.json` (see `pacer.example.json`). `ReadInput`/`InputConfig` live
+  near the top of [timeline.cpp](apps/timeline.cpp). With no input it opens an empty window.
 
 ### 4. Tests (Catch2 / CTest)
 ```bash
@@ -372,8 +392,9 @@ pixi shell && jupyter lab   # open notebooks/interpolation.ipynb or notebooks/da
 
 | I want to… | Go to |
 |---|---|
-| Change which telemetry files the GUI loads | `ReadInput` [timeline.cpp:61-85](apps/timeline.cpp#L61-L85) (paths **and** the `GPMFSource[]`/`SequentialGPSSource` chain) |
-| Load a `.dat` file instead of GoPro MP4 | call `ReadInputDat` [timeline.cpp:110](apps/timeline.cpp#L110) from `main`; impl [gps-source-dat.cpp:83](pacer/gps-source/gps-source-dat.cpp#L83) |
+| Change which telemetry files the GUI loads | no longer hard-coded: pass on the CLI / `pacer.json` / `$PACER_CONFIG`; see `InputConfig`/`ResolveConfig`/`ReadInput` in [timeline.cpp](apps/timeline.cpp) |
+| Change/port the timestamp interpolation | [pacer/interpolation/interpolation.cpp](pacer/interpolation/interpolation.cpp) (`InterpolateTimestamps`, `ComputeDi`); parity test [tests/test_interpolation_parity.py](tests/test_interpolation_parity.py) |
+| Load a `.dat` file instead of GoPro MP4 | pass a `.dat` path on the CLI / in `pacer.json` (dispatched by extension in `ReadInput`); impl [gps-source-dat.cpp:83](pacer/gps-source/gps-source-dat.cpp#L83) |
 | Add/modify a telemetry field | `GPSSample` [datatypes.hpp:10](pacer/datatypes/datatypes.hpp#L10); then `Interpolate` [geometry.cpp:44](pacer/geometry/geometry.cpp#L44), the `ostream<<` [datatypes.hpp:24](pacer/datatypes/datatypes.hpp#L24), and regenerate bindings |
 | Parse a new telemetry format | add a `RawGPSSource` subclass in [pacer/gps-source/](pacer/gps-source/) (interface [gps-source.hpp:19](pacer/gps-source/gps-source.hpp#L19)) |
 | Change MP4/GPMF timestamp decoding | [gps-source.cpp:104](pacer/gps-source/gps-source.cpp#L104) (`GPMFSource::Samples`); GPS9 epoch + GPSU ASCII parsing inside |
@@ -387,7 +408,7 @@ pixi shell && jupyter lab   # open notebooks/interpolation.ipynb or notebooks/da
 | Change GPS↔meter math / earth radii | `CoordinateSystem` impl [geometry.cpp:62-136](pacer/geometry/geometry.cpp#L62-L136); radii [geometry.hpp:90-91](pacer/geometry/geometry.hpp#L90-L91) |
 | Edit the map / draggable timing lines | `LapsDisplay::DisplayMap` [laps-display.cpp:35](pacer/laps-display/laps-display.cpp#L35), `DragTimingLine` [laps-display.cpp:19](pacer/laps-display/laps-display.cpp#L19) |
 | Edit the lap table (columns/selection/drag-drop) | `LapsDisplay::DisplayTable` [laps-display.cpp:120](pacer/laps-display/laps-display.cpp#L120) |
-| Edit the delta / multi-lap comparison plots | `DeltaLapsComparision::Display` [laps-display.cpp:218](pacer/laps-display/laps-display.cpp#L218) |
+| Edit the delta / multi-lap comparison plots | `DeltaLapsComparison::Display` [laps-display.cpp:218](pacer/laps-display/laps-display.cpp#L218) |
 | Add/modify a GUI window | the `HelloImGui::Run` lambda [timeline.cpp:240-313](apps/timeline.cpp#L240-L313) |
 | Expose a C++ type/function to Python | edit the header, then `python bindings/pacer/generate-bindings.py`; tune `my_litgen_options` [generate-bindings.py:11](bindings/pacer/generate-bindings.py#L11). **Do NOT** edit `pacer/*/*-bindings.cpp` (dead) |
 | Add a Python-overridable virtual class | `options.class_override_virtual_methods_in_python__regex` in [bindings/pacer/generate-bindings.py](bindings/pacer/generate-bindings.py) |
@@ -399,39 +420,42 @@ pixi shell && jupyter lab   # open notebooks/interpolation.ipynb or notebooks/da
 
 ---
 
+## Recent changes
+
+A tech-debt pass resolved most of the old gotchas:
+- **Build fixed.** `implot` was incompatible with the imgui 1.92.x hello_imgui bundles; it is pinned
+  to `3da8bd3` (v0.16-26-g3da8bd3, 0.17-WIP). `enable_testing()` was added so CTest registers tests.
+- **Latent bugs fixed** (with tests): `operator!=` / `operator==` const-correctness;
+  `Norm()` vs `SquaredNorm()`; `Interpolate(GPSSample)` keeps `timestamp_ms`; `Laps::SampleCount`
+  `+3`→`+2` and bounds; empty/short-trace guards in `PickRandomStart`/`MinMax`/`main`; `Laps::Update`
+  no longer emits a phantom leading lap from an uninitialized `previous`.
+- **`DeltaLapsComparision` → `DeltaLapsComparison`** (full rename incl. bindings).
+- **Dead code removed**: the three `*-bindings.cpp`, `apps/datparser.c`, `apps/destructor_test.cpp`,
+  and `DisplayTelemetry`/`glfw_error_callback` in timeline.
+- **Inputs are config/CLI-driven** (no hard-coded paths); notebooks use `$PACER_DATA`.
+- **C++ timestamp interpolation** added (`pacer/interpolation`), bound to Python, used by the app.
+- **Tooling**: `.clang-format`, `.clang-tidy`, `ruff.toml`, and populated `[tool.pixi.tasks]`.
+- **Web**: an `if(EMSCRIPTEN)` build path + `tools/build-web.sh` (groundwork; not compiled here).
+
 ## Known issues & gotchas
 
-These are real and will bite an agent that assumes a clean codebase.
-
-1. **Submodules not checked out.** `3rdparty/{imgui,implot,gpmf-parser,hello_imgui}` are empty; only
-   `nanobind` is present. Nothing builds until `git submodule update --init --recursive`.
-2. **Hard-coded absolute input paths.** `ReadInput` ([timeline.cpp:63-76](apps/timeline.cpp#L63-L76))
-   and `ReadInputDat` ([timeline.cpp:112](apps/timeline.cpp#L112)) reference `/Users/denys/...`; the
-   notebooks do too. Edit before running.
-3. **Dead per-module binding files.** [pacer/geometry/geometry-bindings.cpp](pacer/geometry/geometry-bindings.cpp),
-   [pacer/laps/laps-bindings.cpp](pacer/laps/laps-bindings.cpp), and
-   [pacer/gps-source/gps-source-bindings.cpp](pacer/gps-source/gps-source-bindings.cpp) are the *old*
-   hand-written approach — their `nanobind_add_module` blocks are **commented out** in the respective
-   `CMakeLists.txt`. The live bindings are generated into
-   [bindings/pacer/nanobind_pacer.cpp](bindings/pacer/nanobind_pacer.cpp). Editing the `*-bindings.cpp`
-   files has **no effect**. (They remain useful only as reference for callback/operator binding patterns.)
-4. **Python binding gap for GPS sources.** `read_dat_file` and `GPMFSource.samples(callback)` are only
-   exposed in the **disabled** `_pacer_gps_source_impl` module; the live `pacer` package binds the
-   source classes but exposes only `read_samples`. Notebooks importing the old module name will fail
-   unless that module is re-enabled/built.
-5. **`imgui` C++ target is implicit.** The `add_library(imgui ...)` in
-   [3rdparty/CMakeLists.txt](3rdparty/CMakeLists.txt) is commented out; the `imgui` target the
-   bindings/app link against comes transitively from `hello_imgui`. If that changes upstream, links break.
-6. **Generated files are large and must not be hand-edited.** `nanobind_imgui.cpp` (~5.5k lines),
-   `imgui/__init__.pyi` (~7.7k lines), etc. Regenerate instead.
-7. **Latent bugs to be aware of** (don't rely on them; fix carefully): `Interpolate(GPSSample)`
-   out-of-order initializers + dropped `timestamp_ms` ([geometry.cpp:44](pacer/geometry/geometry.cpp#L44));
-   `LinearOperators::operator!=` is not the negation of `==` ([ops.hpp:28](pacer/datatypes/ops.hpp#L28));
-   `Norm()` is squared length; `Laps::SampleCount` `+3` and out-of-bounds reads on short traces;
-   several `assert()`-guarded invariants vanish in `NDEBUG`/Release builds.
-8. **Misspelled identifier `DeltaLapsComparision`** is load-bearing (used across laps-display +
-   timeline). Don't rename it partially.
-9. **One platform, one test, no CI.** `osx-arm64` only; a single Catch2 test; `[tool.pixi.tasks]` empty.
+1. **imgui Python bindings are gated OFF.** `nanobind_imgui.cpp` is stale vs imgui 1.92.x (and the
+   package is unused). The CMake option `PACER_BUILD_IMGUI_BINDINGS` (default OFF) skips it; turning it
+   on requires regenerating against imgui 1.92.x. The `pacer` bindings are unaffected.
+2. **Don't move the implot pin.** v0.16 predates imgui 1.92's `ImTextureRef`; current master's
+   `ImPlotSpec` API breaks our display code. Keep `3da8bd3` (v0.16-26-g3da8bd3).
+3. **Python binding gap for GPS sources.** The `pacer` package binds the source classes but exposes
+   only `read_samples` (no per-source `samples()`/`read_dat_file`).
+4. **`imgui` C++ target is implicit** — it comes transitively from `hello_imgui`
+   ([3rdparty/CMakeLists.txt](3rdparty/CMakeLists.txt)); if that changes upstream, links break.
+5. **Generated files must not be hand-edited** between the `litgen_pydef`/`litgen_glue_code` markers in
+   `nanobind_*.cpp` (and the whole `*.pyi`). The include preamble *above* the markers is hand-maintained
+   (that's where a newly-bound header's `#include` goes). Regenerate via `pixi run gen-bindings`.
+6. **`assert()`-guarded invariants vanish under `NDEBUG`/Release.** Don't rely on them at runtime.
+7. **Platform & CI.** `osx-arm64` only; no CI configured. Tests run locally via `pixi run test`.
+   `pixi.lock` is format **v7** (needs a recent pixi). `ninja` and `catch2` are now explicit deps —
+   the build's Ninja generator and `find_package(Catch2)` require them, but they used to be present
+   only implicitly (and an interrupted `pixi add` once pruned them, breaking the build mid-session).
 
 ---
 
