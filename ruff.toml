@@ -18,4 +18,5 @@ ignore = [
 ]
 
 [lint.per-file-ignores]
-"*.ipynb" = ["F401", "F811", "E402"]  # notebooks: scratch imports / redefs are fine
+# notebooks: scratch imports / redefs / compact zips are fine
+"*.ipynb" = ["F401", "F811", "E402", "B905"]
