@@ -13,7 +13,6 @@
 // folder).
 // - Introduction, links and more at the top of imgui.cpp
 
-#include <cstdio>
 #include <iostream>
 #include <sstream>
 
@@ -29,8 +28,6 @@
 #include <pacer/laps-display/laps-display.hpp>
 #include <pacer/laps/laps.hpp>
 
-#include <stdio.h>
-#include <strings.h>
 #include <unordered_map>
 #include <vector>
 
@@ -50,10 +47,6 @@
 #ifdef __EMSCRIPTEN__
 #include "../libs/emscripten/emscripten_mainloop_stub.h"
 #endif
-
-static void glfw_error_callback(int error, const char *description) {
-  fprintf(stderr, "GLFW Error %d: %s\n", error, description);
-}
 
 using pacer::GPSSample;
 
@@ -76,7 +69,8 @@ void ReadInput(pacer::Laps *plaps) {
   };
 
   pacer::GPMFSource mm[] = {
-      pacer::GPMFSource(filenames[0]), pacer::GPMFSource(filenames[1]),
+      pacer::GPMFSource(filenames[0]),
+      pacer::GPMFSource(filenames[1]),
       pacer::GPMFSource(filenames[2]),
       // pacer::GPMFSource(filenames[3]),
       // pacer::GPMFSource(filenames[4]),
@@ -118,102 +112,6 @@ void ReadInputDat(pacer::Laps *plaps) {
       pacer::DatVersion::WITH_TIMESTAMP);
 }
 
-void DisplayTelemetry(pacer::RawGPSSource &m, std::vector<GPSSample> &gps,
-                      float &current, float duration) {
-  if (ImGui::Begin("timeline")) {
-    ImGui::Text("Duration: %.2f", duration);
-    ImGui::SetNextItemWidth(ImGui::GetWindowWidth() - 80);
-    if (ImGui::SliderFloat("Time", &current, 0, duration))
-      m.Seek(current);
-    ImGui::SameLine();
-    if (ImGui::Button(">"))
-      m.Next();
-    m.pacer::RawGPSSource::Samples(
-        [&](auto s, size_t, size_t) { gps.push_back(s); });
-  }
-  ImGui::End();
-
-  if (ImGui::Begin("Telemetry data")) {
-    auto [start, end] = m.CurrentTimeSpan();
-    ImGui::Text("Current time: %.3f %.3f", start, end);
-
-    // Expose a few Borders related flags interactively
-    enum ContentsType { CT_Text, CT_FillButton };
-    static ImGuiTableFlags flags =
-        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg;
-    static bool display_headers = false;
-    static int contents_type = CT_Text;
-
-    ImGui::CheckboxFlags("ImGuiTableFlags_RowBg", &flags,
-                         ImGuiTableFlags_RowBg);
-    ImGui::CheckboxFlags("ImGuiTableFlags_Borders", &flags,
-                         ImGuiTableFlags_Borders);
-    // ImGui::SameLine();
-    ImGui::Indent();
-
-    ImGui::CheckboxFlags("ImGuiTableFlags_BordersH", &flags,
-                         ImGuiTableFlags_BordersH);
-    ImGui::Indent();
-    ImGui::CheckboxFlags("ImGuiTableFlags_BordersOuterH", &flags,
-                         ImGuiTableFlags_BordersOuterH);
-    ImGui::CheckboxFlags("ImGuiTableFlags_BordersInnerH", &flags,
-                         ImGuiTableFlags_BordersInnerH);
-    ImGui::Unindent();
-
-    ImGui::CheckboxFlags("ImGuiTableFlags_BordersV", &flags,
-                         ImGuiTableFlags_BordersV);
-    ImGui::Indent();
-    ImGui::CheckboxFlags("ImGuiTableFlags_BordersOuterV", &flags,
-                         ImGuiTableFlags_BordersOuterV);
-    ImGui::CheckboxFlags("ImGuiTableFlags_BordersInnerV", &flags,
-                         ImGuiTableFlags_BordersInnerV);
-    ImGui::Unindent();
-
-    ImGui::CheckboxFlags("ImGuiTableFlags_BordersOuter", &flags,
-                         ImGuiTableFlags_BordersOuter);
-    ImGui::CheckboxFlags("ImGuiTableFlags_BordersInner", &flags,
-                         ImGuiTableFlags_BordersInner);
-    ImGui::Unindent();
-
-    ImGui::AlignTextToFramePadding();
-    ImGui::Text("Cell contents:");
-    ImGui::SameLine();
-    ImGui::RadioButton("Text", &contents_type, CT_Text);
-    ImGui::SameLine();
-    ImGui::RadioButton("FillButton", &contents_type, CT_FillButton);
-    ImGui::Checkbox("Display headers", &display_headers);
-    ImGui::CheckboxFlags("ImGuiTableFlags_NoBordersInBody", &flags,
-                         ImGuiTableFlags_NoBordersInBody);
-    // ImGui::SameLine();
-
-    if (ImGui::BeginTable("table1", 5, flags)) {
-      // Display headers so we can inspect their interaction with borders
-      // (Headers are not the main purpose of this section of the demo, so
-      // we are not elaborating on them now. See other sections for
-      // details)
-      if (display_headers) {
-        ImGui::TableSetupColumn("Latitude");
-        ImGui::TableSetupColumn("Longitude");
-        ImGui::TableSetupColumn("Altitude");
-        ImGui::TableSetupColumn("Ground Speed");
-        ImGui::TableSetupColumn("Full Speed");
-        ImGui::TableHeadersRow();
-      }
-
-      for (int row = 0; row < gps.size(); row++) {
-        ImGui::TableNextRow();
-        for (int column = 0; column < 5; column++) {
-          ImGui::TableSetColumnIndex(column);
-          ImGui::Text("%.2f", reinterpret_cast<double *>(&gps[row])[column] *
-                                  (column > 2 ? 3.6 : 1.0));
-        }
-      }
-      ImGui::EndTable();
-    }
-  }
-  ImGui::End();
-}
-
 // Main code
 int main(int, char **) {
   pacer::Laps full_laps;
@@ -228,12 +126,6 @@ int main(int, char **) {
   float duration =
             laps.GetPoint(laps.PointCount() - 1).time - laps.GetPoint(0).time,
         current = 0;
-
-  // Setup Dear ImGui style
-
-  bool show_imgui_demo_window = true;
-  bool show_implot_demo_window = true;
-  bool show_another_window = true;
 
   auto implotContext = ImPlot::CreateContext();
 
