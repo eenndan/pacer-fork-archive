@@ -1,10 +1,14 @@
 .DS_Store
 .cache
 .vscode
+.claude/settings.local.json
 build/
 __pycache__/
 xcode-build/
 *.ini
+
+# local, machine-specific telemetry input config (see pacer.example.json)
+pacer.json
 
 pacer-ios/
 
