@@ -39,7 +39,7 @@ trimmed [Known issues & gotchas](#known-issues--gotchas).
   [Using gitnexus](#using-gitnexus).
 
 > ⚠️ **Submodules:** run `git submodule update --init --recursive` if `3rdparty/` is empty.
-> `implot` is pinned to a rev (v0.17, commit `3da8bd3`) compatible with the imgui 1.92.x that
+> `implot` is pinned to commit `3da8bd3` (v0.16-26-g3da8bd3, IMPLOT_VERSION 0.17-WIP) compatible with the imgui 1.92.x that
 > hello_imgui bundles — do not "update" it to v0.16 or to current master (master's ImPlotSpec API
 > breaks our display code). See [gotchas](#known-issues--gotchas).
 
@@ -66,8 +66,7 @@ pacer/                         # repo root
 │
 ├── apps/                      # ── EXECUTABLES ──
 │   ├── timeline.cpp           #   MAIN GUI app (HelloImGui + ImPlot); the product
-│   ├── datparser.c            #   scratch: dump raw u-blox .dat records (predecessor of gps-source-dat)
-│   └── destructor_test.cpp    #   scratch: C++ temporary-destructor experiment (unrelated)
+│   └── (scratch datparser.c / destructor_test.cpp were removed in the cleanup)
 │
 ├── bindings/                  # ── PYTHON BINDINGS (litgen-generated, nanobind runtime) ──
 │   ├── litgen.cmake           #   vendored litgen CMake helpers (find python/nanobind, deploy .so)
@@ -76,7 +75,7 @@ pacer/                         # repo root
 │
 ├── examples/                  # standalone demos of 3rd-party libs (imgui, implot, gpmf, hello_imgui)
 ├── notebooks/                 # interpolation.ipynb, dat-files.ipynb (analysis hacking, untidy)
-├── tests/                     # Catch2 unit tests (currently ONE: coordinate-system round-trip)
+├── tests/                     # Catch2 tests: ops, geometry, coordinate-system, laps, interpolation
 │
 └── 3rdparty/                  # git submodules (see .gitmodules) — MUST be init'd before building
     ├── imgui/                 #   Dear ImGui            (empty until submodule init)
@@ -107,7 +106,7 @@ Two independent flows share the same core C++ types.
                           │                                    ← pacer/geometry (crossing detection)
                 segmented laps_ / sectors_ (LapChunk ranges)
                           │
-        LapsDisplay (map/table/telemetry) + DeltaLapsComparision (delta plots)   ← pacer/laps-display
+        LapsDisplay (map/table/telemetry) + DeltaLapsComparison (delta plots)   ← pacer/laps-display
                           │
                   ImGui / ImPlot  ──hosted by──►  HelloImGui::Run(frame_lambda)   ← apps/timeline.cpp
 ```
@@ -168,8 +167,8 @@ Each core module lives in `pacer/<name>/` and builds a static lib `pacer::<name>
     [ops.hpp:120](pacer/datatypes/ops.hpp#L120) — CRTP mixins giving any indexable type `+ - * / == Scalar Norm`.
 - **Note:** `datatypes.cpp` is an (almost) empty TU; all logic is header-only.
 - **Depends on:** nothing (std only). **Used by:** every other module.
-- ⚠️ `Norm()` returns the **squared** magnitude (no `sqrt`). `operator!=` is **buggy** (not the
-  negation of `==`). `timestamp_ms` is widely ignored by downstream code.
+- ✅ `Norm()` is the true Euclidean length; the squared value is `SquaredNorm()`. `operator!=` is
+  `!(*this == rhs)` and `operator==` is const-correct. (These were buggy pre-cleanup.)
 
 ### `pacer/geometry` — coordinate math, intersection, interpolation
 - **Purpose:** 2D geometry + GPS↔local-meter transform + the lap-splitting primitive.
@@ -238,8 +237,8 @@ Each core module lives in `pacer/<name>/` and builds a static lib `pacer::<name>
   - `Sectors` — [laps.hpp:27](pacer/laps/laps.hpp#L27) — mutable `start_line` + `sector_lines` (local coords).
   - `Laps::LapChunk` (private) — [laps.hpp:81](pacer/laps/laps.hpp#L81) — half-open index range + interpolated ends.
 - **Depends on:** `pacer::geometry`, `pacer::datatypes`. **Used by:** `laps-display`, `apps/timeline.cpp`, bindings.
-- ⚠️ `SampleCount` returns `finish_index - start_index + 3` and several methods assume `points_` is
-  non-empty; short traces can read out of bounds. [laps-bindings.cpp](pacer/laps/laps-bindings.cpp) is dead code.
+- ✅ `SampleCount` returns `finish_index - start_index + 2` (matches `GetLap`); `Update`,
+  `PickRandomStart` and `MinMax` now guard empty/short traces. The old `laps-bindings.cpp` was removed.
 
 ### `pacer/laps-display` — ImGui/ImPlot rendering
 - **Purpose:** pure presentation. Draws the map, lap table, single-lap telemetry, and delta plots.
@@ -248,27 +247,25 @@ Each core module lives in `pacer/<name>/` and builds a static lib `pacer::<name>
     `CoordinateSystem`. `DisplayMap` ([laps-display.cpp:35](pacer/laps-display/laps-display.cpp#L35)),
     `DisplayTable` ([laps-display.cpp:120](pacer/laps-display/laps-display.cpp#L120)),
     `DisplayLapTelemetry` ([laps-display.cpp:92](pacer/laps-display/laps-display.cpp#L92)).
-  - `DeltaLapsComparision` *(sic — misspelled)* — [laps-display.hpp:30](pacer/laps-display/laps-display.hpp#L30) —
+  - `DeltaLapsComparison` — [laps-display.hpp:30](pacer/laps-display/laps-display.hpp#L30) —
     resamples selected laps onto a reference and plots speed + time-delta-vs-best.
     `Display` at [laps-display.cpp:218](pacer/laps-display/laps-display.cpp#L218).
 - **Depends on:** `pacer::laps`, `pacer::geometry`, `implot`/`imgui`. **Used by:** `apps/timeline.cpp`, bindings.
 - ⚠️ `DisplayMap` lazily initializes the `CoordinateSystem` and a random start line on first frame
-  (detected via inverted `bounds`). The misspelled `DeltaLapsComparision` is used everywhere — don't
-  "fix" the spelling piecemeal.
+  (detected via inverted `bounds`).
 
 ### `apps/` — executables
-- [apps/timeline.cpp](apps/timeline.cpp) — the **main GUI**. `main` ([timeline.cpp:218](apps/timeline.cpp#L218))
-  loads data via `ReadInput` ([timeline.cpp:60](apps/timeline.cpp#L60), GPMF path) — `ReadInputDat`
-  ([timeline.cpp:110](apps/timeline.cpp#L110), `.dat` path) exists but is **not** called — then runs
-  `HelloImGui::Run` with a per-frame lambda drawing the Data Subset / Map / Laps / Delta / Lap Telemetry
-  windows. `DisplayTelemetry` and `glfw_error_callback` are leftover demo code (unused).
-- [apps/datparser.c](apps/datparser.c) — scratch C tool to dump raw `.dat` records (`main` at
-  [datparser.c:88](apps/datparser.c#L88)); superseded by `ReadDatFile`.
-- [apps/destructor_test.cpp](apps/destructor_test.cpp) — unrelated C++ learning experiment.
+- [apps/timeline.cpp](apps/timeline.cpp) — the **main GUI**. `main` reads an `InputConfig` via
+  `ResolveConfig` (CLI args / `pacer.json` / `$PACER_CONFIG`), then `ReadInput` ingests GPMF (with
+  C++ timestamp interpolation) or a `.dat` file by extension, then runs `HelloImGui::Run` with a
+  per-frame lambda drawing the Data Subset / Map / Laps / Delta / Lap Telemetry windows. (The old
+  scratch executables and the unused `DisplayTelemetry`/`glfw_error_callback` were removed.)
 
 ### `tests/` — Catch2 unit tests
-- [tests/test_coordinate_system.cpp](tests/test_coordinate_system.cpp) — the **only** test
-  (`TEST_CASE` at [test_coordinate_system.cpp:8](tests/test_coordinate_system.cpp#L8)): verifies
+- Five suites wired via the `add_pacer_test` macro in [tests/CMakeLists.txt](tests/CMakeLists.txt):
+  `test_ops`, `test_geometry`, `test_coordinate_system`, `test_laps`, `test_interpolation`; plus a
+  Python C++/torch parity test [tests/test_interpolation_parity.py](tests/test_interpolation_parity.py).
+- [tests/test_coordinate_system.cpp](tests/test_coordinate_system.cpp) — verifies
   `CoordinateSystem` GPS↔local round-trips within `1e-6`. Linked against `pacer::geometry` +
   `Catch2::Catch2WithMain` ([tests/CMakeLists.txt](tests/CMakeLists.txt)).
 
@@ -397,7 +394,7 @@ pixi shell && jupyter lab   # open notebooks/interpolation.ipynb or notebooks/da
 |---|---|
 | Change which telemetry files the GUI loads | no longer hard-coded: pass on the CLI / `pacer.json` / `$PACER_CONFIG`; see `InputConfig`/`ResolveConfig`/`ReadInput` in [timeline.cpp](apps/timeline.cpp) |
 | Change/port the timestamp interpolation | [pacer/interpolation/interpolation.cpp](pacer/interpolation/interpolation.cpp) (`InterpolateTimestamps`, `ComputeDi`); parity test [tests/test_interpolation_parity.py](tests/test_interpolation_parity.py) |
-| Load a `.dat` file instead of GoPro MP4 | call `ReadInputDat` [timeline.cpp:110](apps/timeline.cpp#L110) from `main`; impl [gps-source-dat.cpp:83](pacer/gps-source/gps-source-dat.cpp#L83) |
+| Load a `.dat` file instead of GoPro MP4 | pass a `.dat` path on the CLI / in `pacer.json` (dispatched by extension in `ReadInput`); impl [gps-source-dat.cpp:83](pacer/gps-source/gps-source-dat.cpp#L83) |
 | Add/modify a telemetry field | `GPSSample` [datatypes.hpp:10](pacer/datatypes/datatypes.hpp#L10); then `Interpolate` [geometry.cpp:44](pacer/geometry/geometry.cpp#L44), the `ostream<<` [datatypes.hpp:24](pacer/datatypes/datatypes.hpp#L24), and regenerate bindings |
 | Parse a new telemetry format | add a `RawGPSSource` subclass in [pacer/gps-source/](pacer/gps-source/) (interface [gps-source.hpp:19](pacer/gps-source/gps-source.hpp#L19)) |
 | Change MP4/GPMF timestamp decoding | [gps-source.cpp:104](pacer/gps-source/gps-source.cpp#L104) (`GPMFSource::Samples`); GPS9 epoch + GPSU ASCII parsing inside |
@@ -411,7 +408,7 @@ pixi shell && jupyter lab   # open notebooks/interpolation.ipynb or notebooks/da
 | Change GPS↔meter math / earth radii | `CoordinateSystem` impl [geometry.cpp:62-136](pacer/geometry/geometry.cpp#L62-L136); radii [geometry.hpp:90-91](pacer/geometry/geometry.hpp#L90-L91) |
 | Edit the map / draggable timing lines | `LapsDisplay::DisplayMap` [laps-display.cpp:35](pacer/laps-display/laps-display.cpp#L35), `DragTimingLine` [laps-display.cpp:19](pacer/laps-display/laps-display.cpp#L19) |
 | Edit the lap table (columns/selection/drag-drop) | `LapsDisplay::DisplayTable` [laps-display.cpp:120](pacer/laps-display/laps-display.cpp#L120) |
-| Edit the delta / multi-lap comparison plots | `DeltaLapsComparision::Display` [laps-display.cpp:218](pacer/laps-display/laps-display.cpp#L218) |
+| Edit the delta / multi-lap comparison plots | `DeltaLapsComparison::Display` [laps-display.cpp:218](pacer/laps-display/laps-display.cpp#L218) |
 | Add/modify a GUI window | the `HelloImGui::Run` lambda [timeline.cpp:240-313](apps/timeline.cpp#L240-L313) |
 | Expose a C++ type/function to Python | edit the header, then `python bindings/pacer/generate-bindings.py`; tune `my_litgen_options` [generate-bindings.py:11](bindings/pacer/generate-bindings.py#L11). **Do NOT** edit `pacer/*/*-bindings.cpp` (dead) |
 | Add a Python-overridable virtual class | `options.class_override_virtual_methods_in_python__regex` in [bindings/pacer/generate-bindings.py](bindings/pacer/generate-bindings.py) |
@@ -427,7 +424,7 @@ pixi shell && jupyter lab   # open notebooks/interpolation.ipynb or notebooks/da
 
 A tech-debt pass resolved most of the old gotchas:
 - **Build fixed.** `implot` was incompatible with the imgui 1.92.x hello_imgui bundles; it is pinned
-  to v0.17 (`3da8bd3`). `enable_testing()` was added so CTest actually registers the tests.
+  to `3da8bd3` (v0.16-26-g3da8bd3, 0.17-WIP). `enable_testing()` was added so CTest registers tests.
 - **Latent bugs fixed** (with tests): `operator!=` / `operator==` const-correctness;
   `Norm()` vs `SquaredNorm()`; `Interpolate(GPSSample)` keeps `timestamp_ms`; `Laps::SampleCount`
   `+3`→`+2` and bounds; empty/short-trace guards in `PickRandomStart`/`MinMax`/`main`; `Laps::Update`
@@ -446,7 +443,7 @@ A tech-debt pass resolved most of the old gotchas:
    package is unused). The CMake option `PACER_BUILD_IMGUI_BINDINGS` (default OFF) skips it; turning it
    on requires regenerating against imgui 1.92.x. The `pacer` bindings are unaffected.
 2. **Don't move the implot pin.** v0.16 predates imgui 1.92's `ImTextureRef`; current master's
-   `ImPlotSpec` API breaks our display code. Keep `3da8bd3` (v0.17).
+   `ImPlotSpec` API breaks our display code. Keep `3da8bd3` (v0.16-26-g3da8bd3).
 3. **Python binding gap for GPS sources.** The `pacer` package binds the source classes but exposes
    only `read_samples` (no per-source `samples()`/`read_dat_file`).
 4. **`imgui` C++ target is implicit** — it comes transitively from `hello_imgui`
@@ -456,8 +453,7 @@ A tech-debt pass resolved most of the old gotchas:
    (that's where a newly-bound header's `#include` goes). Regenerate via `pixi run gen-bindings`.
 6. **`assert()`-guarded invariants vanish under `NDEBUG`/Release.** Don't rely on them at runtime.
 7. **Platform & CI.** `osx-arm64` only; no CI configured. Tests run locally via `pixi run test`.
-8. **hello_imgui submodule** is currently present but tracked as an untracked dir rather than a
-   registered submodule gitlink — re-register if you need a clean `git submodule status`.
+   (`pixi.lock` is v5; some pixi versions may try to rewrite it to v7 on `pixi add` — review that diff.)
 
 ---
 
