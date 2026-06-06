@@ -105,8 +105,13 @@ class StudioWindow(QMainWindow):
         self.plots.scrubStarted.connect(self._on_scrub_started)
         self.plots.scrubMoved.connect(self._on_scrub_moved)
         self.plots.scrubEnded.connect(self._on_scrub_ended)
+        # F2: keep the sector boundary guide lines on the charts in sync. plots_view stays
+        # pacer-free, so app computes the boundary x-positions via session for the current
+        # axis mode and pushes them; recompute when the mode flips (the positions' units change).
+        self.plots.modeChanged.connect(self._refresh_sector_lines)
 
         self._select_default()
+        self._refresh_sector_lines()  # draw any sectors present on launch (none by default)
 
     def _select_default(self):
         """Pre-select the two fastest laps so speed + a real delta-to-best show on launch."""
@@ -227,6 +232,14 @@ class StudioWindow(QMainWindow):
         self._scrub_was_playing = False
         self._scrub_lap = None
 
+    def _refresh_sector_lines(self, mode: str | None = None):
+        """F2: push the sector boundary positions (start/finish + each sector line) to the charts
+        for the current axis mode. Computed via session (the s×best_distance / time-into-lap
+        axis), so plots_view stays pacer-free. Called on launch, after a sector edit, and when
+        the dist/time mode flips (positions' units change)."""
+        mode = mode or self.plots.axis_mode()
+        self.plots.set_sector_lines(self.session.sector_plot_positions(mode))
+
     def _on_lines(self, start, sectors):
         self.session.set_timing_lines(start, sectors)
         self.table.refresh()
@@ -234,6 +247,8 @@ class StudioWindow(QMainWindow):
         # overlays so their measured/inferred segments match the new segmentation.
         self.map.refresh_overlays()
         self._select_default()
+        # F2: the sector lines changed — update the chart guide lines live.
+        self._refresh_sector_lines()
 
 
 def main(argv: list[str] | None = None) -> int:
