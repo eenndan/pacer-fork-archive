@@ -301,41 +301,64 @@ class Session:
         return float(np.interp(t, times, dists))
 
     # -------------------------------------------------------- plot series glue
+    def _lap_arrays(self, lap_id):
+        """(dist, speed_kmh, elapsed) numpy arrays for a lap, aligned to the min length.
+
+        Arc-length basis: cum_distances is the per-lap odometer (monotonic), full_speed is
+        m/s (→ km/h), elapsed is seconds from the lap's first point. Aligning to the shortest
+        of the three guards against the C++ arrays disagreeing in length by one.
+        """
+        lap = self._get_lap(lap_id)
+        pts = lap.points
+        dist = np.array(lap.cum_distances)
+        m = min(len(dist), len(pts))
+        dist = dist[:m]
+        speed_kmh = np.array([pts[i].point.full_speed * 3.6 for i in range(m)])
+        t0 = pts[0].time if m else 0.0
+        elapsed = np.array([pts[i].time - t0 for i in range(m)])
+        return dist, speed_kmh, elapsed
+
     def delta(self, lap_ids):
         """Returns (best_lap_id, speed_series, delta_series).
 
-        Mirrors laps-display.cpp but always references the GLOBAL best lap, so a single
-        selected lap still shows a meaningful delta-to-best (not a trivial flat zero):
-        resample each selected lap onto the best lap's timing grid, plot speed vs the
-        shared cum-distance axis, delta as (lap_time[i] - best_time[i]).
+        Always references the GLOBAL best lap, so a single selected lap still shows a
+        meaningful delta-to-best (not a trivial flat zero). Uses ARC-LENGTH interpolation:
+        each lap is sampled onto a shared cumulative-distance grid via `np.interp`, so
+        every selected lap spans the FULL distance range (no dependence on the C++
+        `resample`, which truncated non-best laps at the first missed timing line).
+
+        The grid is uniform 0..max over the selected laps (NOT the best lap's odometer):
+        the best lap can be the SHORTEST by distance, and `np.interp` clamps beyond a
+        grid's right edge, so anchoring to the best lap would truncate every longer lap.
+        speed is plotted vs the shared distance axis; delta is (time_lap - time_best) on it.
         """
         ids = [i for i in lap_ids if 0 <= i < self.laps.laps_count()]
         best = self.best_lap_id()
         if not ids or best is None:
             return None
-        ref = self._get_lap(best)
-        ref.width = 5.0
-        # Resample the best lap too (it may not be selected) so it can anchor the delta.
-        resampled = {lid: ref.resample(self._get_lap(lid), self.cs) for lid in set(ids) | {best}}
 
-        cd_ref = np.array(ref.cum_distances)
-        best_rs = resampled[best]
-        bt = np.array([best_rs.points[i].time - best_rs.points[0].time
-                       for i in range(best_rs.count())]) if best_rs.count() else np.array([])
+        arrays = {}
+        for lid in set(ids) | {best}:
+            dist, speed_kmh, elapsed = self._lap_arrays(lid)
+            if len(dist) >= 2:
+                arrays[lid] = (dist, speed_kmh, elapsed)
+        if best not in arrays:
+            return None
+
+        # Shared grid up to the longest selected lap's distance so each lap spans its full
+        # own distance (best lap may be the shortest; np.interp clamps past the right edge).
+        max_dist = max(dist[-1] for dist, _, _ in arrays.values())
+        grid = np.linspace(0.0, float(max_dist), num=max(len(arrays[best][0]), 2))
+
+        best_dist, _, best_elapsed = arrays[best]
+        best_time_on_grid = np.interp(grid, best_dist, best_elapsed)
 
         speed, delta = {}, {}
-        for lid in ids:
-            lap = resampled[lid]
-            npt = lap.count()
-            if npt == 0:
-                continue
-            m = min(npt, len(cd_ref))
-            spd = np.array([lap.points[i].point.full_speed * 3.6 for i in range(m)])
-            speed[lid] = (cd_ref[:m], spd)
-            mm = min(m, len(bt))
-            if mm >= 2:
-                lt = np.array([lap.points[i].time - lap.points[0].time for i in range(mm)])
-                delta[lid] = (cd_ref[:mm], lt - bt[:mm])
+        for lid, (dist, speed_kmh, elapsed) in arrays.items():
+            speed_on_grid = np.interp(grid, dist, speed_kmh)
+            time_on_grid = np.interp(grid, dist, elapsed)
+            speed[lid] = (grid, speed_on_grid)
+            delta[lid] = (grid, time_on_grid - best_time_on_grid)
         return best, speed, delta
 
     # ------------------------------------------------------------ video sync
