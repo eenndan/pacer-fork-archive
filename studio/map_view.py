@@ -67,8 +67,23 @@ class MapView(QWidget):
         self.plot.showGrid(x=True, y=True, alpha=0.2)
         self.plot.setLabel("bottom", "x (m)")
         self.plot.setLabel("left", "y (m)")
-        self.plot.plot(session.tx, session.ty, pen=pg.mkPen(TRACE_COLOR, width=1))
+        trace = self.plot.plot(session.tx, session.ty, pen=pg.mkPen(TRACE_COLOR, width=1))
+        # The full trace is ~16k points; downsample + clip-to-view so per-tick marker moves
+        # don't re-render every point.
+        trace.setDownsampling(auto=True, method="peak")
+        trace.setClipToView(True)
         self._overlays: list = []  # highlighted selected-lap traces
+
+        # Freeze the view to the track bbox so marker moves never trigger autorange / a full
+        # re-render. The user's pan/zoom still works; the track stays fully visible on load.
+        if len(session.tx) and len(session.ty):
+            x_lo, x_hi = float(session.tx.min()), float(session.tx.max())
+            y_lo, y_hi = float(session.ty.min()), float(session.ty.max())
+            px = max(x_hi - x_lo, 1.0) * 0.05
+            py = max(y_hi - y_lo, 1.0) * 0.05
+            vb = self.plot.getViewBox()
+            vb.setRange(xRange=(x_lo - px, x_hi + px), yRange=(y_lo - py, y_hi + py), padding=0)
+            vb.disableAutoRange()
 
         self.marker = pg.TargetItem(
             (session.tx[0] if len(session.tx) else 0, session.ty[0] if len(session.ty) else 0),

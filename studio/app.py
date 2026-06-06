@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import QElapsedTimer, Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QMainWindow, QSplitter
 
 from .lap_table import LapTable
@@ -55,9 +55,16 @@ class StudioWindow(QMainWindow):
         self.setCentralWidget(main)
 
         # --- cross-panel wiring ---
-        self._sync_clock = QElapsedTimer()  # throttles UI sync off positionChanged
-        self._sync_clock.start()
+        # positionChanged fires in the video decode/present path; it must do almost nothing
+        # (just record the latest time). A steady ~30 Hz timer applies the map/plot/readout
+        # update off that path, so heavy repaints never starve frame presentation.
+        self._latest_t = 0.0
+        self._applied_t: float | None = None
         self.video.positionChanged.connect(self._on_position)
+        self._tick_timer = QTimer(self)
+        self._tick_timer.setInterval(33)  # ~30 Hz
+        self._tick_timer.timeout.connect(self._tick)
+        self._tick_timer.start()
         self.map.seek_requested.connect(self.video.seek)
         self.map.timing_lines_changed.connect(self._on_lines)
         self.table.laps_selected.connect(self._on_user_select)
@@ -84,13 +91,14 @@ class StudioWindow(QMainWindow):
             self.video.seek(self.session.laps.start_timestamp(min(ids)))
 
     def _on_position(self, t: float):
-        # Throttle to ~25 Hz. QMediaPlayer.positionChanged can fire per decoded frame; doing
-        # the map/plot repaints synchronously on every tick starves the video pipeline (the
-        # picture freezes while the clock advances, then jumps on pause). 40 ms is smooth.
-        if self._sync_clock.elapsed() < 40:
-            return
-        self._sync_clock.restart()
-        self._apply_position(t)
+        # Runs in the video event path — keep it trivial so frame presentation isn't starved.
+        self._latest_t = t
+
+    def _tick(self):
+        # Steady ~30 Hz: apply an update only when the position actually advanced.
+        if self._latest_t != self._applied_t:
+            self._applied_t = self._latest_t
+            self._apply_position(self._applied_t)
 
     def _apply_position(self, t: float):
         self.map.set_marker_time(t)
