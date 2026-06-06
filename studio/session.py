@@ -154,6 +154,61 @@ def _read_gpmf(paths):
     return samples, spans, naive, durations
 
 
+# --- True-clock timing from the GPS9 per-sample timestamps -------------------------------
+# WHY: the `naive` axis above spreads each payload's MEDIA span [a,b] across i/n. The GoPro's
+# media clock for the GPS track runs ~0.1% fast (measured: 9.990 Hz over the real 0060
+# session) whereas the GPS9 stream carries the true GPS fix time (`timestamp_ms`), which is
+# real WALL-CLOCK at a clean 10.000 Hz — the same clock a lap-timing transponder uses. Lap
+# time is a difference of two crossing instants, so the ~0.1% media-clock fast-rate
+# systematically COMPRESSES every lap (measured ~30 ms on the best lap). Timing off the GPS9
+# fix times removes that bias and is the physically-correct reference, with NONE of the
+# divergence of the global Adam `interpolate_timestamps` fit (which we keep opt-in only).
+#
+# We don't trust the GPS9 ABSOLUTE epoch (it jumps at chapter boundaries / midnight and is UTC,
+# not the media clock the video layer maps against). We use only its per-sample SPACING, and
+# RE-ANCHOR each contiguous run to that run's media (naive) start time — so the axis stays on
+# the global media clock end-to-end (video sync, chapter offsets, durations all unchanged) but
+# the inter-sample spacing within each run is the true 10 Hz GPS spacing.
+GPS9_MIN_DT_S = 0.02    # an inter-sample GPS9 delta below this is a duplicate/garbage fix
+GPS9_MAX_DT_S = 0.40    # …above this, the run is broken (chapter break / dropout / rollover)
+
+
+def _gps9_times(samples, spans, naive):
+    """Per-sample times built from the GPS9 fix timestamps' true spacing, re-anchored per
+    contiguous run to the media (naive) clock. Falls back to the naive time for any sample
+    whose GPS9 timestamp is absent/sentinel or sits across a run break, so a GPS5-only stream
+    (no per-sample timestamp) or a dropout degrades gracefully to the old behaviour.
+
+    Returns a list aligned to `samples`. Guaranteed monotonic non-decreasing: each run is
+    anchored at its naive start (naive is already sorted) and advanced by the GPS9 deltas; a
+    run that would overtake the next run's anchor is clamped (can't happen for sane 10 Hz data
+    but keeps the axis safe for video sync)."""
+    n = len(samples)
+    if n == 0:
+        return []
+    ts = np.array([getattr(s, "timestamp_ms", 0) for s in samples], dtype=np.float64)
+    naive = np.asarray(naive, float)
+    out = naive.copy()
+    have = ts > 0  # GPS5 / sentinel samples report 0 — keep their naive time
+    i = 0
+    while i < n:
+        if not have[i]:
+            i += 1
+            continue
+        # Extend a contiguous run while the GPS9 delta is a sane single-sample step.
+        j = i
+        while (j + 1 < n and have[j + 1]
+               and GPS9_MIN_DT_S <= (ts[j + 1] - ts[j]) / 1000.0 <= GPS9_MAX_DT_S):
+            j += 1
+        if j > i:  # a real run [i, j]: anchor at its naive start, add GPS9 spacing
+            base_naive = naive[i]
+            base_ts = ts[i]
+            out[i:j + 1] = base_naive + (ts[i:j + 1] - base_ts) / 1000.0
+        i = j + 1
+    # Enforce monotonicity defensively (re-anchoring keeps runs ordered; this guards the seams).
+    return list(np.maximum.accumulate(out))
+
+
 def _sustained_moving(samples, lo, hi, run=5):
     """First index in [lo,hi) where the car is moving for `run` consecutive samples."""
     for i in range(lo, hi - run):
@@ -359,9 +414,15 @@ class Session:
     @classmethod
     def load(cls, paths: list[str], interpolate: bool = False,
              smooth_window: int = SMOOTH_WINDOW) -> "Session":
-        """Naive timing by default — the C++ interpolation diverges on long/noisy sessions
-        (see studio/diagnose.py); `interpolate=True` enables it but the result is validated
-        and falls back to naive if it's non-monotonic or runs past the video duration.
+        """True-clock timing by default — the per-sample time comes from the GPS9 fix
+        timestamps' real 10 Hz spacing, re-anchored per run to the media clock (see
+        `_gps9_times`); this removes the ~0.1% media-clock fast-rate that was systematically
+        compressing every lap, while staying on the media axis the video layer maps against.
+        It degrades to the old naive media-payload-fraction timing for any sample lacking a
+        GPS9 timestamp (e.g. a GPS5-only stream). `interpolate=True` instead enables the C++
+        global Adam fit, which DIVERGES on long/noisy sessions (see studio/diagnose.py) and is
+        validated + rejected back to naive if non-monotonic or past the video duration — kept
+        opt-in only.
 
         The GPS track is quality-gated (drop no-3D-lock / high-DOP fixes) and boxcar-smoothed
         (window `smooth_window`, default SMOOTH_WINDOW) BEFORE the points are handed to the
@@ -381,9 +442,11 @@ class Session:
         if not samples:
             return cls(laps, empty, video_path, chapter_map)
 
-        times = list(naive)
         if interpolate and len(samples) >= 8:
             times = cls._interpolated_or_naive(samples, spans, naive)
+        else:
+            # GPS9 true-clock spacing (re-anchored to the media clock); naive otherwise.
+            times = _gps9_times(samples, spans, naive)
 
         # Smooth the GPS positions once, here — over the cleaned, time-ordered trace, guarded
         # against averaging across chapter/dropout gaps. All downstream geometry follows.

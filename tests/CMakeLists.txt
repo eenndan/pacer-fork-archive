@@ -19,6 +19,8 @@ find_package(Python COMPONENTS Interpreter)
 if(Python_Interpreter_FOUND)
     add_test(NAME test_scrub_conversion
              COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_scrub_conversion.py)
+    add_test(NAME test_lap_timing
+             COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_lap_timing.py)
     add_test(NAME test_chapters
              COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_chapters.py)
     add_test(NAME test_studio_features
