@@ -31,6 +31,7 @@ START_WIDEN = 3.0  # widen the auto start line so every lap pass crosses it
 MIN_LAP_TIME = 5.0  # s — laps shorter than this are partial/phantom, not real laps
 MIN_LAP_SAMPLES = 20  # a real lap has at least this many GPS samples
 LAP_BAND_LO, LAP_BAND_HI = 0.5, 1.6  # "real lap" = lap_time within [lo, hi] x median lap time
+MIN_TIMING_LINE = 10.0  # m — a snapped timing line must be ≥ this long or it crosses nothing
 
 
 @dataclass
@@ -295,7 +296,9 @@ class Session:
         self._dist_cache.clear()
 
     def suggest_sector(self) -> Seg:
-        """A short line perpendicular to the trace at ~1/4 of the way round."""
+        """A line perpendicular to the trace at ~1/4 of the way round. ±15 m (not ±5) so it
+        reliably registers a crossing every lap — a too-short line gets stepped over, which
+        fuses sub-sectors and makes the split times exceed the lap time. Draggable to adjust."""
         n = len(self.tx)
         if n < 4:
             return Seg(0, 0, 0, 0)
@@ -305,7 +308,7 @@ class Session:
         length = math.hypot(dx, dy) or 1.0
         nx, ny = -dy / length, dx / length
         cx, cy = self.tx[i], self.ty[i]
-        return Seg(cx - nx * 5, cy - ny * 5, cx + nx * 5, cy + ny * 5)
+        return Seg(cx - nx * 15, cy - ny * 15, cx + nx * 15, cy + ny * 15)
 
     # ------------------------------------------------------------- lap access
     def _get_lap(self, lap_id: int):
@@ -495,17 +498,19 @@ class Session:
             return None
         return int(np.argmin((self.tx - x) ** 2 + (self.ty - y) ** 2))
 
-    def nearest_index_excluding(self, x: float, y: float, ex: float, ey: float) -> int | None:
-        """Nearest trace sample to (x,y) whose coords differ from the excluded point (ex,ey).
+    def nearest_index_min_sep(self, x: float, y: float, ox: float, oy: float,
+                              min_sep: float = MIN_TIMING_LINE) -> int | None:
+        """Nearest trace sample to (x,y) that is at least `min_sep` metres from (ox,oy).
 
-        Used so a timing line's two handles never snap to the SAME trace sample (a zero-length
-        segment crosses nothing — Segment::Intersects returns false — and wipes out every lap).
-        Masks out samples sitting on the excluded point, then returns the nearest of the rest."""
+        Used so a timing line's two handles never snap into a too-short segment: not just a
+        zero-length line (which crosses nothing — Segment::Intersects returns false) but any
+        line shorter than ~min_sep gets stepped over by the GPS sampling and wipes out every
+        lap. Returns the nearest sample far enough from the other handle, or None if none is."""
         if len(self.tx) == 0:
             return None
-        keep = (self.tx != ex) | (self.ty != ey)
-        if not keep.any():
+        far = ((self.tx - ox) ** 2 + (self.ty - oy) ** 2) >= min_sep ** 2
+        if not far.any():
             return None
-        idx = np.flatnonzero(keep)
+        idx = np.flatnonzero(far)
         d2 = (self.tx[idx] - x) ** 2 + (self.ty[idx] - y) ** 2
         return int(idx[np.argmin(d2)])

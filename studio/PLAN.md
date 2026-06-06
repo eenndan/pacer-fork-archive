@@ -78,7 +78,11 @@ common distance grid (best lap's, or uniform 0..max); `np.interp` speed and time
   contains `t`; show its number in the readout, highlight that row in the table and/or its trace on
   the map. (`session.lap_at_time(t)`; wire in `app._on_position`.)
 
-## P2 (polish, from earlier)
+## P2 — DONE (2026-06-06; commits 988e05c/d960cff/241faa8 + review fixes)
+
+> Per-sector split-time columns (timestamp-mapped), snap-on-release for dragged handles (with a
+> min-length guard so a collapsed line can't wipe out laps), and a distance/time speed-plot toggle.
+> Dragging a timing line now re-segments once on release (not per mouse-move tick).
 
 - Per-sector split times in the lap table (`Laps.sector_time/sector_entry_speed`; needs the
   per-lap↔sector index mapping the C++ table does).
