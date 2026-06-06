@@ -17,14 +17,19 @@ print("points:", s.laps.point_count(), "laps:", s.lap_count(),
       "valid:", len(s.valid_lap_ids()), "best:", s.best_lap_id())
 assert s.laps.point_count() > 0
 
-# default selection wired plots; map draws a faint best-lap reference line
-print("plot curves:", len(w.plots._curves), "best overlay:", w.map._best_overlay is not None)
+# default selection wired plots; map draws a faint best-lap reference line (measured +
+# inferred gap-fill segments) — exercise the gap-fill segment build for the best lap.
+print("plot curves:", len(w.plots._curves), "best overlay lap:", w.map._best_overlay.lap_id)
+if s.best_lap_id() is not None:
+    segs = s.lap_trace_segments(s.best_lap_id())
+    n_inf = sum(1 for sg in segs if not sg.measured)
+    print(f"best-lap segments: {len(segs)} ({n_inf} inferred)")
 
 # video position -> marker + cursor + current-lap overlay (via the ~30 Hz tick)
 if len(s.tt):
     w._on_position(float(s.tt[len(s.tt) // 2]))
     w._tick()
-    print("marker/cursor OK, current lap:", w.map._current_lap_id)
+    print("marker/cursor OK, current lap:", w.map._current_overlay.lap_id)
 
 # timing-line drag re-segments and re-selects without error
 w._on_lines(s.start_line, s.sector_lines + [s.suggest_sector()])

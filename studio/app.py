@@ -116,6 +116,9 @@ class StudioWindow(QMainWindow):
     def _on_lines(self, start, sectors):
         self.session.set_timing_lines(start, sectors)
         self.table.refresh()
+        # Re-segmentation shifted lap ids + cleared the per-lap gap-fill cache; redraw the map
+        # overlays so their measured/inferred segments match the new segmentation.
+        self.map.refresh_overlays()
         self._select_default()
 
 

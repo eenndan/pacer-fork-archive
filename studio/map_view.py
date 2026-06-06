@@ -10,7 +10,7 @@ seeks the video to the nearest telemetry sample.
 from __future__ import annotations
 
 import pyqtgraph as pg
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
 from .session import Seg
@@ -20,6 +20,11 @@ SECTOR_COLOR = "#06d6a0"
 BEST_COLOR = "#5a6068"  # faint reference line for the best lap
 CURRENT_COLOR = "#39a0ed"  # highlighted current-lap trace
 MARKER_COLOR = "#ff5252"
+# Reconstructed (inferred) gap-fill segments are drawn DASHED + DIMMED so they read as
+# clearly distinct from measured GPS — the user must always be able to tell them apart.
+INFERRED_DASH = [5, 5]  # on/off dash pattern (px)
+INFERRED_ALPHA = 130    # 0-255; dimmer than the measured pen
+INFERRED_DARKEN = 0.55  # blend the lap colour toward black for the fill pen
 
 
 class _TimingLine:
@@ -64,6 +69,55 @@ class _TimingLine:
             self.plot.removeItem(item)
 
 
+def _inferred_pen(color, base_width):
+    """A dashed, dimmed, thinner pen for reconstructed (inferred) gap-fill segments — visibly
+    distinct from the solid measured pen so real GPS and reconstruction are never confused."""
+    qc = pg.mkColor(color)
+    qc = qc.darker(int(100 / INFERRED_DARKEN))  # toward black
+    qc.setAlpha(INFERRED_ALPHA)
+    pen = pg.mkPen(qc, width=max(base_width - 1, 1))
+    pen.setStyle(Qt.DashLine)
+    pen.setDashPattern(INFERRED_DASH)
+    return pen
+
+
+class _LapOverlay:
+    """Draws ONE lap as a group of plot items: solid measured runs + dashed/dimmed inferred
+    gap-fills (`session.lap_trace_segments`). Tracks its items so it can clear/redraw without
+    disturbing the rest of the scene. Holds NO `pacer` types — just numpy arrays from session."""
+
+    def __init__(self, plot, color, base_width):
+        self.plot = plot
+        self.color = color
+        self.base_width = base_width
+        self.lap_id = None
+        self._items: list = []
+
+    def _clear(self):
+        for it in self._items:
+            self.plot.removeItem(it)
+        self._items = []
+
+    def set_lap(self, session, lap_id):
+        """(Re)draw `lap_id` (or clear if None). No-op if unchanged."""
+        if lap_id == self.lap_id and self._items:
+            return
+        self._clear()
+        self.lap_id = lap_id
+        if lap_id is None:
+            return
+        solid = pg.mkPen(self.color, width=self.base_width)
+        dashed = _inferred_pen(self.color, self.base_width)
+        for seg in session.lap_trace_segments(lap_id):
+            pen = solid if seg.measured else dashed
+            self._items.append(self.plot.plot(seg.xs, seg.ys, pen=pen))
+
+    def refresh(self, session):
+        """Force a redraw of the current lap (e.g. after re-segmentation invalidated caches)."""
+        lap_id, self.lap_id = self.lap_id, None
+        self.set_lap(session, lap_id)
+
+
 class MapView(QWidget):
     # (start: Seg, sectors: list[Seg]) whenever a handle moves or sectors change.
     timing_lines_changed = Signal(object, object)
@@ -82,10 +136,11 @@ class MapView(QWidget):
         self.plot.setLabel("left", "y (m)")
         # The full ~16k-point trace is no longer drawn (jagged + slow). Instead we draw at most
         # the best lap (faint reference) and the current lap (highlighted) — a few hundred points.
-        self._best_overlay = None  # faint best-lap reference line
+        # Each lap is drawn as measured (solid) + reconstructed (dashed/dimmed) segments, so GPS
+        # dropouts no longer show as straight chords across the hole.
+        self._best_overlay = _LapOverlay(self.plot, BEST_COLOR, base_width=1)
         self._best_lap_id: int | None = None
-        self._current_overlay = None  # highlighted current-lap trace
-        self._current_lap_id: int | None = None
+        self._current_overlay = _LapOverlay(self.plot, CURRENT_COLOR, base_width=3)
 
         # Freeze the view to the track bbox so marker moves never trigger autorange / a full
         # re-render. The user's pan/zoom still works; the track stays fully visible on load.
@@ -174,32 +229,28 @@ class MapView(QWidget):
 
     # --------------------------------------------------------------- lap overlays
     def _refresh_best(self):
-        """Draw the best lap as a faint thin reference line. Re-draws only when the best
-        lap id actually changes (e.g. after the timing lines move)."""
+        """Draw the best lap as a faint thin reference line (measured solid + inferred dashed).
+        Re-draws only when the best lap id actually changes (e.g. after the timing lines move).
+        When the best lap changes, its per-lap segment cache may also be stale, so force a
+        redraw of the current overlay too."""
         best = self.session.best_lap_id()
-        if best == self._best_lap_id and self._best_overlay is not None:
+        if best == self._best_lap_id and self._best_overlay.lap_id is not None:
             return
-        if self._best_overlay is not None:
-            self.plot.removeItem(self._best_overlay)
-            self._best_overlay = None
         self._best_lap_id = best
-        if best is None:
-            return
-        xs, ys = self.session.lap_trace_xy(best)
-        self._best_overlay = self.plot.plot(xs, ys, pen=pg.mkPen(BEST_COLOR, width=1))
+        self._best_overlay.set_lap(self.session, best)
 
     def set_current_lap(self, lap_id):
-        """Highlight the lap the video is currently in. No-op if it hasn't changed; a None
-        id clears the highlight so only the faint best-lap reference remains."""
+        """Highlight the lap the video is currently in (measured solid + inferred dashed/dimmed).
+        No-op if it hasn't changed; a None id clears the highlight so only the faint best-lap
+        reference remains."""
         # The best lap can change when timing lines move; keep its reference line current.
         self._refresh_best()
-        if lap_id == self._current_lap_id:
-            return
-        self._current_lap_id = lap_id
-        if self._current_overlay is not None:
-            self.plot.removeItem(self._current_overlay)
-            self._current_overlay = None
-        if lap_id is None:
-            return
-        xs, ys = self.session.lap_trace_xy(lap_id)
-        self._current_overlay = self.plot.plot(xs, ys, pen=pg.mkPen(CURRENT_COLOR, width=3))
+        self._current_overlay.set_lap(self.session, lap_id)
+
+    def refresh_overlays(self):
+        """Force both lap overlays to redraw from the session — call after the timing lines
+        move (re-segmentation shifts lap ids and clears the session's per-lap segment cache,
+        so the cached drawings are stale even when the lap id is nominally unchanged)."""
+        self._best_lap_id = None
+        self._refresh_best()
+        self._current_overlay.refresh(self.session)
