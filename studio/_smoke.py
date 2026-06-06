@@ -17,13 +17,14 @@ print("points:", s.laps.point_count(), "laps:", s.lap_count(),
       "valid:", len(s.valid_lap_ids()), "best:", s.best_lap_id())
 assert s.laps.point_count() > 0
 
-# default selection wired plots + map highlight
-print("plot curves:", len(w.plots._curves), "map overlays:", len(w.map._overlays))
+# default selection wired plots; map draws a faint best-lap reference line
+print("plot curves:", len(w.plots._curves), "best overlay:", w.map._best_overlay is not None)
 
-# video position -> marker + cursor
+# video position -> marker + cursor + current-lap overlay (via the ~30 Hz tick)
 if len(s.tt):
     w._on_position(float(s.tt[len(s.tt) // 2]))
-    print("marker/cursor OK")
+    w._tick()
+    print("marker/cursor OK, current lap:", w.map._current_lap_id)
 
 # timing-line drag re-segments and re-selects without error
 w._on_lines(s.start_line, s.sector_lines + [s.suggest_sector()])
