@@ -56,7 +56,7 @@ gap-fill unit tests live in [`tests/test_gapfill.py`](../tests/test_gapfill.py) 
 | [map_view.py](map_view.py) | Best lap (faint) + current/playing lap (highlighted) + **freely-draggable** start/sector timing lines + video marker. Each lap is drawn as measured (solid) + reconstructed gap-fill (dashed/dimmed) segments. The full all-laps trace is intentionally not drawn (perf + clarity). |
 | [gapfill.py](gapfill.py) | **GPS-gap reconstruction (map only)** — pure numpy. Detects interior dropouts and fills them with cross-lap borrow (primary) / reference centerline (fallback) / spline, tagged measured-vs-inferred. No `pacer`. |
 | [reference.py](reference.py) + [mk_centerline.json](mk_centerline.json) | Georeferenced Daytona MK centerline (traced from `gmaps_pict.png`, similarity-ICP aligned to the GPS aggregate) — the gap-fill fallback for sections no lap covers. Rebuild via [build_reference.py](build_reference.py). |
-| [plots_view.py](plots_view.py) | Speed-vs-distance (x-axis toggle to time-into-lap) + lap-vs-best delta (aligned by **normalized distance** → endpoint = laptime diff). Downsampled/clipped curves + a synced cursor that is also a **draggable scrubber** — pacer-free, it only emits `scrubStarted`/`scrubMoved(x, mode)`/`scrubEnded` (mode = `time`\|`distance`\|`delta`); app converts + seeks. |
+| [plots_view.py](plots_view.py) | Speed (top) + lap-vs-best delta (bottom) on **one shared, x-linked x-axis** (dist/time toggle drives both; delta aligned by **normalized distance** → endpoint = laptime diff), so the two cursors always align. Downsampled/clipped curves + a synced cursor that is also a **draggable scrubber** + a **hover dot** on the delta curve — pacer-free, it only emits `scrubStarted`/`scrubMoved(x, mode)`/`scrubEnded` (mode = `time`\|`distance`); app converts + seeks and owns the live Δ/speed readout box. |
 | [lap_table.py](lap_table.py) | Lap time / dist / entry speed + per-sector split columns (S1…Sn) once sectors are added. Multi-select to compare; **▶** marks the playing lap, blue = selection, green = best. |
 | [app.py](app.py) | Assembles panels in splitters and wires the cross-panel signals. |
 
@@ -87,7 +87,11 @@ gap-fill unit tests live in [`tests/test_gapfill.py`](../tests/test_gapfill.py) 
 - **Lap validity is adaptive** (`session.valid_lap_ids`): laps within a band around the median lap
   time, so short double-crossings of the start line don't pollute the "best" lap.
 - **Delta-to-best** (`session.delta`) is aligned by **normalized distance fraction** (s∈[0,1]) so a
-  lap's delta *ends exactly at its laptime difference*; raw cum-distance alignment did not.
+  lap's delta *ends exactly at its laptime difference*; raw cum-distance alignment did not. The
+  speed + delta plots share **one x-axis** driven by the dist/time toggle and kept x-linked
+  (`delta(ids, x_mode=…)`: distance = s×best_distance metres, time = time-into-lap), so the two
+  cursors always line up vertically at the same moment. `session.delta_at_time(t)` gives the
+  current-moment Δ-to-best for the live readout box.
 - **Per-sector splits** (`session.lap_sector_splits`) project each sector line to a cum-distance on
   each lap and split the time there — correct (sums to lap time) for every lap, no reliance on
   fragile geometric crossing of short lines.
@@ -110,22 +114,32 @@ gap-fill unit tests live in [`tests/test_gapfill.py`](../tests/test_gapfill.py) 
 - **Draggable plot-cursor scrubber** (a fine, lap-scoped scrub; the full-video slider stays as-is):
   the speed + delta cursors are `movable` `InfiniteLine`s. Dragging either seeks the video **within
   the lap the playhead is currently in**, clamped to that lap's start/end. `plots_view` stays
-  pacer-free — it emits only the raw plot-x + which axis (`scrubMoved(x, mode)`); `app.py` (which
-  owns session + video) converts to a media time, seeks, and re-syncs both cursors + the slider +
-  the map marker. The x↔media-time mapping lives in `session` (pure numpy on cached per-lap
+  pacer-free — it emits only the raw plot-x + the shared axis mode (`scrubMoved(x, mode)`); `app.py`
+  (which owns session + video) converts to a media time, seeks, and re-syncs both cursors + the
+  slider + the map marker. The x↔media-time mapping lives in `session` (pure numpy on cached per-lap
   `(times, dists)`): `media_time_at_plot_x` / `plot_x_at_media_time`, with `mode`:
-  - **speed/time:**  `t = lap_start + x`
-  - **speed/distance:**  invert distance→time via `np.interp(x, lap_dists, lap_times)`
-  - **delta:**  `s = x / best_distance` → `dist_in_lap = s·lap_total` → `np.interp` → time
-  Source of truth is the media time; each plot renders its own cursor x for that time ("two lines,
-  one truth"), so the delta cursor uses normalized-distance×best so it sits **on** the lap's curve.
+  - **time:**  `t = lap_start + x`  (both plots; x = time-into-lap)
+  - **distance (= delta):**  `s = x / best_distance` → `dist_in_lap = s·lap_total` → `np.interp` →
+    time. Both plots share this ONE distance axis (x = s×best_distance, the metres axis the curves
+    are drawn on), so the speed and delta cursors map a given moment to the **same x** and coincide
+    vertically. The plots are permanently **x-linked** (`p_delta.setXLink(p_speed)`), so pan/zoom on
+    one follows the other in both modes. (`delta` is kept as a readable alias of `distance` in the
+    conversion helpers — identical math.) Source of truth is the media time ("two lines, one truth").
   **Throttle + pause/resume:** seeks are coalesced to **≤1 per 30 Hz tick** (store latest target,
   one seek/tick) so 4K HEVC stays responsive; on grab we pause if playing (remembering it), on
   release we resume iff it was playing. **No feedback loop:** while dragging, the playback tick's
   position-driven re-placement is ignored (`_user_dragging`) and the tick skips its normal apply
   (only the coalesced seek runs); programmatic `setValue` is `_suppress`-guarded so it can never
-  masquerade as a user drag. Measured ~0.12 ms/move and ~0.12 ms/tick (vs the 33 ms frame budget),
-  so live seeking is kept (no fall-back to seek-on-release needed). See `tests/test_scrub_conversion.py`.
+  masquerade as a user drag. Round-trip/clamp + cursor-coincide tests in `tests/test_scrub_conversion.py`.
+- **Live Δ/speed readout + delta-plot hover dot:** an always-on box above the plots
+  (`app._update_diff_box`) shows the **current-moment Δ-to-best (priority) + speed** from
+  `session.delta_at_time` / `speed_at_time` — green when ahead of best, red when behind — updating
+  live as the video plays or the cursor scrubs. The delta plot additionally shows a **hover dot**
+  (`ScatterPlotItem` + `TextItem` on `scene().sigMouseMoved`) that snaps to the nearest delta-curve
+  sample under the mouse and labels its Δ value (+ distance/time there), independent of the playback
+  cursor, hidden on mouse-leave. The hover handler is a cheap nearest-index lookup on the cached
+  curve arrays (no re-plot); `plots_view` stays pacer-free (the box's values come from `session`
+  via `app`; the hover reads only the curve already drawn).
 - **Performance:** UI sync runs on a ~30 Hz `QTimer` off the video present path; plot curves are
   downsampled+clipped with antialias off and autorange frozen; the map draws ≤2 laps. 4K HEVC
   decodes ~61 fps via VideoToolbox hardware decode — playback stays smooth, incl. with a lap selected.
