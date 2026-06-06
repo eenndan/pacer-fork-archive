@@ -40,9 +40,9 @@ pixi run python -m studio.diagnose -- /path/to/file.MP4 [--interp] [--clean]
 | [session.py](session.py) | Loads GPMF → `pacer.Laps`; exposes trace/lap/delta arrays + timing-line write-back. Owns the load/segmentation pipeline (primary `pacer` user). |
 | [tracks.py](tracks.py) | Registry of known tracks (Daytona MK); detects the track by centroid and gives its fixed start/finish line. The only other module that names `pacer` (geometry only). |
 | [video_view.py](video_view.py) | `QMediaPlayer` + `QVideoWidget`; emits `positionChanged(s)`, exposes `seek(s)`. |
-| [map_view.py](map_view.py) | Best lap (faint) + current/playing lap (highlighted) + draggable `TargetItem` timing lines + video marker. The full all-laps trace is intentionally not drawn (perf + clarity). |
-| [plots_view.py](plots_view.py) | Speed-vs-distance + lap-vs-best delta for the selected laps; downsampled/clipped curves + a time cursor. |
-| [lap_table.py](lap_table.py) | Lap times/distances; multi-select rows to choose laps to compare. |
+| [map_view.py](map_view.py) | Best lap (faint) + current/playing lap (highlighted) + **freely-draggable** start/sector timing lines + video marker. The full all-laps trace is intentionally not drawn (perf + clarity). |
+| [plots_view.py](plots_view.py) | Speed-vs-distance (x-axis toggle to time-into-lap) + lap-vs-best delta (aligned by **normalized distance** → endpoint = laptime diff). Downsampled/clipped curves + a synced cursor. |
+| [lap_table.py](lap_table.py) | Lap time / dist / entry speed + per-sector split columns (S1…Sn) once sectors are added. Multi-select to compare; **▶** marks the playing lap, blue = selection, green = best. |
 | [app.py](app.py) | Assembles panels in splitters and wires the cross-panel signals. |
 
 ## Gotchas / notes
@@ -59,12 +59,22 @@ pixi run python -m studio.diagnose -- /path/to/file.MP4 [--interp] [--clean]
   (monotonic + within the video duration) and silently falls back to naive if it's bad.
 - **Lap validity is adaptive** (`session.valid_lap_ids`): laps within a band around the median lap
   time, so short double-crossings of the start line don't pollute the "best" lap.
+- **Delta-to-best** (`session.delta`) is aligned by **normalized distance fraction** (s∈[0,1]) so a
+  lap's delta *ends exactly at its laptime difference*; raw cum-distance alignment did not.
+- **Per-sector splits** (`session.lap_sector_splits`) project each sector line to a cum-distance on
+  each lap and split the time there — correct (sums to lap time) for every lap, no reliance on
+  fragile geometric crossing of short lines.
+- **Timing lines are placed freely** (no snap-to-trace); dragging redraws live and re-segments the
+  laps once on release.
+- **Performance:** UI sync runs on a ~30 Hz `QTimer` off the video present path; plot curves are
+  downsampled+clipped with antialias off and autorange frozen; the map draws ≤2 laps. 4K HEVC
+  decodes ~61 fps via VideoToolbox hardware decode — playback stays smooth, incl. with a lap selected.
 - **Video sync** uses `QMediaPlayer.positionChanged`. For sub-frame precision, `QVideoSink.videoFrameChanged` / `QVideoFrame.startTime()` are available (the spike measured them frame-accurate, ~29 ms vs pacer's clock).
 - **Sources:** GPMF/GoPro `.MP4` only — the u-blox `.dat` reader isn't bound yet. pacer supplies the telemetry time axis; the app brings its own video player (pacer doesn't decode pixels).
 - `_smoke.py` is a headless self-test: `python -m studio._smoke`.
 
 ## Next ideas
 
-- Distance/time toggle on the speed plot; per-sector split times in the lap table.
-- Snap dragged sector handles onto the nearest trace point.
-- Bind a bulk `lap → numpy` accessor in the core to drop the per-point Python loops.
+See [PLAN.md](PLAN.md) for the prioritized backlog. In short: more tracks in `tracks.py` (+ real
+auto-detection), persist sector/start-line config per file, pure-Python tests for `session.py`,
+verify multi-file chaptered sessions, and polish (keyboard shortcuts, optional snap toggle).

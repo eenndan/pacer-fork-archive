@@ -1,119 +1,84 @@
-# pacer studio — progress & plan
+# pacer studio — status & handoff
 
-Working backlog for the `studio/` desktop app. Read this + [README.md](README.md) +
-the `pacer-studio-app-direction` memory to resume in a fresh session.
+`studio/` is a local **PySide6 + pyqtgraph** desktop app on the C++ `pacer` core (nanobind), for
+analysing GoPro race telemetry. This is the handoff doc: current state, how to run/verify, the
+architecture an agent must respect, and the prioritized backlog. Read it + [README.md](README.md)
++ the `pacer-studio-app-direction` memory to take over.
 
-## Status (done)
+**Branch:** `better-app` (local, not pushed). **Run:** `pixi run studio -- <file.MP4>`.
+Validated end-to-end on `/Users/daniil/Desktop/D24/GX010060.MP4` (Daytona MK, ~28 min 4K HEVC →
+18 valid laps @ ~69 s), user-confirmed.
 
-- Greenfield PySide6 + pyqtgraph app on the C++ `pacer` core (nanobind). Panels: video, track
-  map (draggable start/sector lines), speed + lap-vs-best delta plots, lap table. See README.
-- Video↔telemetry sync via `QMediaPlayer.positionChanged` (frame-accurate `QVideoSink` available;
-  proven by `spike_video_sync.py`).
-- **Debugged on real file `GX010060.MP4`** (see `diagnose.py`): default to naive timing (C++
-  interpolation diverges on long sessions, auto-rejected via `--interp`), `_clean` trims the
-  stationary GPS-spike lead-in, the track-aware start line (B1) widened MODESTLY only to catch a
-  pass the short exact segment missed, adaptive (median-band) lap validity. Result: 18 valid
-  flying laps @ ~68.4–70.8 s (was 8 garbage laps).
-- **Playback performance — RESOLVED** (verified by measurement, not just eyeball): the 4K HEVC
-  clip decodes at ~61 fps with VideoToolbox hardware decode, so lag was UI-bound. Fixes: UI sync
-  decoupled onto a ~30 Hz `QTimer` (off the video present path); the map draws only best + current
-  lap (no 16k-point trace, no `peak` downsampling); off-track GPS bbox-filtered; and the
-  speed/delta plot cursor was made ~51× cheaper (downsample+clip curves, antialias off, frozen
-  autorange, cached per-lap arrays) so fps holds with a lap selected. Cursor cost 56.5 → 1.1 ms.
+## Current state — feature-complete for the initial scope
 
-## Bugs — FIXED (autonomous run, 2026-06-06; commits edecaf1, 416616b, 2492636)
+Panels (module map in README):
+- **Map** — best lap (faint) + current/playing lap (highlighted); freely-draggable start + sector
+  timing lines; red video marker. The full all-laps trace is intentionally not drawn.
+- **Speed + delta plots** — speed-vs-distance (x-axis toggle to time-into-lap) and lap-vs-best
+  delta. Delta is aligned by normalized distance so its endpoint equals the laptime difference.
+- **Lap table** — time / dist / entry speed, plus per-sector split columns S1…Sn once sectors are
+  added. `▶` marks the playing lap; blue row = your selection; best lap shown in green.
+- **Video** — GoPro `.mp4` with play/pause + scrub; readout shows `t / speed / lap #`; synced both ways.
 
-> B1 + B2 are done and verified on GX010060.MP4 (18 valid laps, median 69.82 s; full-length
-> delta plots; start line on the MK coords). Spec kept below for reference. **Remaining work is
-> the Requested features (DONE too — see below) and P2 / backlog.**
+How it works (key decisions, all done & verified):
+- **Load/clean** (`session._clean`): trims the stationary GPS-spike lead-in/cool-down and
+  bbox-filters off-track fixes. Default **naive** per-frame timing; `--interp` opts into the C++
+  gradient-descent fit but it is validated and auto-rejected when it diverges on long sessions.
+- **Track-aware start/finish** (`tracks.py`): detects the track by trace centroid and sets a fixed
+  start/finish line from absolute lat/lon. One entry — **Daytona Milton Keynes**
+  (A=52.04031,−0.78487 · B=52.04020,−0.78460 · centroid ≈52.0403,−0.7847). Unknown tracks fall
+  back to `pick_random_start`.
+- **Lap validity** — adaptive: a lap counts if its time is within [0.5, 1.6]× the median lap time
+  (drops partials / out-laps).
+- **Delta-to-best** (`session.delta`) — aligns laps by **normalized distance fraction** s∈[0,1] so
+  the delta endpoint == laptime diff; plotted vs s×best_distance (metres), plain-seconds y-axis.
+- **Per-sector splits** (`session.lap_sector_splits`) — projects each sector line to a cum-distance
+  on each lap and splits the lap time there → sums to the lap time for **every** lap (no dependence
+  on fragile geometric crossing; no blanks/oversized values).
+- **Timing-line edit** — handles are placed **freely** (no snap); dragging redraws live and
+  re-segments the laps **once on release**.
+- **Performance** — 4K HEVC decodes ~61 fps (VideoToolbox HW). UI sync runs on a ~30 Hz `QTimer`
+  off the video present path; plot curves are downsampled + clipped, antialias off, autorange
+  frozen after refresh; the map draws ≤2 laps. Smooth incl. with a lap selected (cursor 56.5→1.1 ms).
 
-### B1 — track-aware start/finish line (was: mis-placed/over-long regression)
-Per the user, the real goal: **detect the track from GPS coordinates and use a FIXED,
-track-correct start/finish line** instead of `pick_random_start` + 3× `_widen` (which regressed
-placement after `_clean` moved the median point and over-lengthened the line). Focus on **one
-track first: Daytona Milton Keynes** (lat ≈ 52.040, lon ≈ −0.785 — see the GPSSample in
-notebooks/interpolation.ipynb cell output).
+## Run & verify
+- `pixi run studio -- <file.MP4>` (or `python -m studio [files]`; `--interp` to try interpolation).
+- `pixi run python -m studio.diagnose -- <file.MP4> [--interp] [--clean]` — headless stats / root-causing.
+- `pixi run python -m studio._smoke` — headless full-window build (offscreen); prints `SMOKE OK`.
+- The GUI needs a display / non-sandboxed run; use `QT_QPA_PLATFORM=offscreen` for headless checks.
 
-Reference layout/images: `/Users/daniil/Desktop/Tracks/MK/` →
-`Daytona-Milton-Keynes_Aerial.jpg`, `Link-Cliff-Plan.pdf` (official circuit plan),
-`gmaps_sat.png`, `gmaps_pict.png`. The aerial: the **main outdoor circuit** is centre/right;
-**start/finish is on the main straight by the paddock** (centre-left, near the white tent);
-a separate indoor/junior serpentine loop (far left) should be ignored.
-
-**Design:**
-- New `studio/tracks.py`: a tiny registry. One entry to start — MK Daytona — with a reference
-  centroid (for detection) and a **start/finish line as two absolute lat/lon points** (a track
-  property, not derived per-session).
-- `Session.load`: compute the trace centroid; if within ~1 km of a registry track, set the start
-  line from that track's lat/lon (via `cs.local`) instead of `pick_random_start`; else fall back.
-  This makes lap timing consistent and correct across any video of the same track.
-- Keep the line draggable to fine-tune; drop the blanket 3× `_widen` (or keep a modest
-  track-spanning width derived from local track width).
-
-**MK start/finish line — CONFIRMED (user, 2026-06-06; do not re-derive):**
-A = (lat 52.04031, lon −0.78487), B = (lat 52.04020, lon −0.78460). Store in `studio/tracks.py`
-as the Daytona MK entry; detect MK by trace centroid within ~1.5 km of (52.0403, −0.7847); convert
-both points via `cs.local` and set `sectors.start_line`; keep it draggable. Widen modestly only if
-some laps miss it. (`session.Session.load`, new `studio/tracks.py`; retire `_widen`/
-`pick_random_start` for known tracks.) Auto-detecting *other* tracks is a later expansion.
-
-### B2 — speed/delta show only ~5% for non-best laps
-`pacer.Lap.resample` aborts at the first reference timing line the candidate lap misses (its inner
-`while` advances the index to the end → all later lines break). Best-onto-best works; others
-truncate.
-**Fix:** replace `Session.delta`'s timing-line resample with **arc-length interpolation**:
-per lap take `(cum_distances, speed)` and `(cum_distances, elapsed_time)` from `get_lap`; build a
-common distance grid (best lap's, or uniform 0..max); `np.interp` speed and time onto it; delta =
-`time_lap(grid) - time_best(grid)`. Full-length, robust, no dependence on `resample`.
-(`session.delta`, `plots_view.refresh`.)
-
-## Requested features — DONE (autonomous run, 2026-06-06; commit c163fde + cleanup 2492636)
-
-- **F1 — select lap → jump video.** On lap-table selection (or map highlight), seek the video to
-  that lap's `start_timestamp`. (`app._on_laps_selected` → `video.seek`; use the primary/first
-  selected lap.)
-- **F2 — readout under the video:** current time, speed (km/h), lap number. (New label in
-  `video_view`; driven by `positionChanged`; speed/lap from `session` at the current time.)
-- **F3 — clear "current lap" indication.** As the video plays, find the lap whose time window
-  contains `t`; show its number in the readout, highlight that row in the table and/or its trace on
-  the map. (`session.lap_at_time(t)`; wire in `app._on_position`.)
-
-## P2 — DONE (2026-06-06; commits 988e05c/d960cff/241faa8 + review fixes)
-
-> Per-sector split-time columns (timestamp-mapped), snap-on-release for dragged handles (with a
-> min-length guard so a collapsed line can't wipe out laps), and a distance/time speed-plot toggle.
-> Dragging a timing line now re-segments once on release (not per mouse-move tick).
-
-- Per-sector split times in the lap table (`Laps.sector_time/sector_entry_speed`; needs the
-  per-lap↔sector index mapping the C++ table does).
-- Snap dragged start/sector handles to the nearest trace point (`session.nearest_index`).
-- Distance/time x-axis toggle on the speed plot.
-
-## Beyond / backlog
-
-- Robust start/finish detection for the default start line (autocorrelation of the trace, or
-  detect the most-crossed line) instead of `pick_random_start`.
-- Persist sector/start-line config per file (sidecar JSON), so dragging survives reloads.
-- Multi-file chaptered sessions: verify `SequentialGPSSource` chaining + the combined time axis.
-- A bulk `lap → numpy` accessor in the C++ bindings to drop per-point Python loops (perf on long
-  sessions; currently fine at ~16k points).
-- Tests for `session.py` (lap validity, delta series lengths, clean()) — pure-Python, fast.
-- Theming/layout polish; keyboard shortcuts (space=play, ←/→ = step).
-- Tune `_clean` thresholds; expose them; handle the trailing cool-down better.
-
-## How to verify
-
-- `pixi run python -m studio.diagnose -- <file.MP4> [--interp] [--clean]` — headless stats.
-- `pixi run python -m studio._smoke` — headless build of the full window (offscreen).
-- `pixi run studio -- <file.MP4>` — launch (GUI needs a display / non-sandboxed run).
-
-## Key facts / gotchas (for a fresh-session LLM)
-
-- Timing lines + trace are in **local meters** (`cs.local`); `set_coordinate_system` must precede
+## Architecture an agent MUST respect
+- Trace + timing lines live in **local metres** (`cs.local`); `set_coordinate_system` precedes
   `pick_random_start`/`update`. Sectors write-back is wholesale: `laps.sectors = pacer.Sectors(...)`.
-- `pacer` is GPMF/GoPro `.MP4` only (`.dat` not bound). It supplies the telemetry time axis; the app
-  brings its own video player.
-- Interpolation is opt-in and validated; default is naive per-frame timing.
-- `session.py` owns the load/segmentation pipeline and is the primary `pacer` user; the only
-  other module that names `pacer` is `tracks.py` (geometry-only: lat/lon → local `Segment`).
-- Throwaway `_probe.py` is not committed; `_smoke.py` is the kept self-test.
+- **`session.py` is the only module that drives the pacer pipeline; `tracks.py` is the only other
+  file that names `pacer` (pure geometry).** Keep `map_view`/`plots_view`/`lap_table`/`app` free of `pacer`.
+- `pacer` is GPMF/GoPro `.MP4` only (`.dat` reader is not bound). It supplies the telemetry time
+  axis; the app brings its own video player.
+- **Perf invariants — do not regress:** the 30 Hz tick decouple (`app._on_position` only stores the
+  time; `app._tick` applies); plot curves downsampled+clipped + antialias off + autorange frozen
+  after `refresh`; map draws only best+current lap; clear per-lap caches in `set_timing_lines`.
+- Module map: `session.py` (data/analysis — only pacer user) · `tracks.py` (track registry) ·
+  `map_view.py` · `plots_view.py` · `lap_table.py` · `video_view.py` · `app.py` (wiring) ·
+  `diagnose.py` / `_smoke.py` (tools). `_probe.py` / `_bench_cursor.py` are untracked scratch.
+
+## Next steps / backlog (prioritized for a fresh agent)
+1. **More tracks** — `tracks.py` has only Daytona MK; add entries and/or real auto-detection
+   (the user flagged other-track support as the planned next expansion).
+2. **Persist sector/start-line config per file** — a sidecar JSON so edits survive reloads.
+3. **Tests** — pure-Python unit tests for `session.py`: `_clean`, `valid_lap_ids`, delta
+   endpoint==laptime-diff, `lap_sector_splits` sum==lap-time. Fast, no GUI; a real regression guard.
+4. **Multi-file chaptered sessions** — verify `SequentialGPSSource` chaining + the combined time
+   axis on a real chaptered GoPro recording.
+5. **Polish** — keyboard shortcuts (space=play, ←/→ step), theming/layout, an optional snap-to-track
+   *toggle* (default is now free), trailing-cooldown trimming, expose `_clean` thresholds in UI.
+6. **Perf headroom (only if needed on longer sessions)** — a bulk `lap→numpy` accessor in the C++
+   bindings to drop per-point Python loops; `useOpenGL` for the pyqtgraph views.
+7. **Housekeeping** — delete scratch `studio/_probe.py` + `studio/_bench_cursor.py` (`rm` is blocked
+   in the agent sandbox, so the user must); decide whether to push `better-app` / open a PR.
+
+## How work is done here
+Autonomous background **Workflows** (full-autonomy perms already in `.claude/settings.local.json`):
+each phase implements → verifies headlessly (often driving the app via handlers + measuring numbers)
+→ adversarially reviews → commits to `better-app`. Agents can launch the GUI (non-sandboxed) for a
+crash-smoke but cannot perceive smoothness/visuals — the final visual confirmation is the human's.
+Keep that loop: define numeric pass criteria so a fix isn't "done" until they hold.
