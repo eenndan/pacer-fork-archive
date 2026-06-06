@@ -13,7 +13,14 @@ from __future__ import annotations
 import sys
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QApplication, QMainWindow, QSplitter
+from PySide6.QtWidgets import (
+    QApplication,
+    QLabel,
+    QMainWindow,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+)
 
 from .lap_table import LapTable
 from .map_view import MapView
@@ -38,14 +45,31 @@ class StudioWindow(QMainWindow):
         self.plots = PlotsView(self.session)
         self.table = LapTable(self.session)
 
+        # Always-on Δ/speed readout box for the CURRENT playback/scrub moment (Δ-to-best is the
+        # priority). Owned here (values come from session); placed ABOVE the plots so it never
+        # overlaps the curves. plots_view stays pacer-free — it knows nothing about this box.
+        self.diff_box = QLabel("Δ —    — km/h")
+        self.diff_box.setAlignment(Qt.AlignCenter)
+        self.diff_box.setStyleSheet(
+            "QLabel { background:#1b1b1b; color:#e6e6e6; font-size:18px; font-weight:600;"
+            " padding:6px; border-bottom:1px solid #333; }"
+        )
+
         left = QSplitter(Qt.Vertical)
         left.addWidget(self.video)
         left.addWidget(self.table)
         left.setSizes([460, 360])
 
+        plots_panel = QWidget()
+        plots_lay = QVBoxLayout(plots_panel)
+        plots_lay.setContentsMargins(0, 0, 0, 0)
+        plots_lay.setSpacing(0)
+        plots_lay.addWidget(self.diff_box)
+        plots_lay.addWidget(self.plots, 1)
+
         right = QSplitter(Qt.Vertical)
         right.addWidget(self.map)
-        right.addWidget(self.plots)
+        right.addWidget(plots_panel)
         right.setSizes([460, 380])
 
         main = QSplitter(Qt.Horizontal)
@@ -136,6 +160,26 @@ class StudioWindow(QMainWindow):
         speed = f"{sp:.1f}" if sp is not None else "-"
         lap = lap_id if lap_id is not None else "-"
         self.video.set_readout(f"t = {fmt_time(t)}   speed = {speed} km/h   lap {lap}")
+        self._update_diff_box(t, sp)
+
+    def _update_diff_box(self, t: float, sp: float | None):
+        """Refresh the always-on Δ/speed box for the current moment (priority: Δ-to-best in
+        seconds). Δ comes from session.delta_at_time (same normalized-distance alignment as the
+        delta plot, so the box and the cursor on the curve agree). Outside a valid lap Δ is —."""
+        d = self.session.delta_at_time(t)
+        if d is None:
+            delta_txt = "Δ —"
+        else:
+            # +behind / −ahead vs best, at the same track position.
+            delta_txt = f"Δ {d:+.2f} s"
+        speed_txt = f"{sp:.0f} km/h" if sp is not None else "— km/h"
+        # Colour cue: green when up on best (ahead), red when down (behind).
+        colour = "#e6e6e6" if d is None else ("#06d6a0" if d <= 0 else "#ef476f")
+        self.diff_box.setText(f"{delta_txt}     {speed_txt}")
+        self.diff_box.setStyleSheet(
+            f"QLabel {{ background:#1b1b1b; color:{colour}; font-size:18px; font-weight:600;"
+            " padding:6px; border-bottom:1px solid #333; }"
+        )
 
     # ------------------------------------------------------------- plot scrub
     def _on_scrub_started(self):
