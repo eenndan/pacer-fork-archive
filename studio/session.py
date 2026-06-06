@@ -28,6 +28,8 @@ MIN_START_SPEED = 3.0  # m/s — below this the car is stationary / GPS not yet 
 SPIKE_STEP = 50.0  # m — a lone fix farther than this from BOTH neighbours is a glitch
 START_WIDEN = 3.0  # widen the auto start line so every lap pass crosses it
 MIN_LAP_TIME = 5.0  # s — laps shorter than this are partial/phantom, not real laps
+MIN_LAP_SAMPLES = 20  # a real lap has at least this many GPS samples
+LAP_BAND_LO, LAP_BAND_HI = 0.5, 1.6  # "real lap" = lap_time within [lo, hi] x median lap time
 
 
 @dataclass
@@ -107,11 +109,11 @@ def _band_lap_count(laps) -> int:
     """How many laps land in a band around the median lap time — the same 'real lap' notion
     as Session.valid_lap_ids, but a free function usable during load (no Session yet)."""
     ts = [laps.lap_time(i) for i in range(laps.laps_count())
-          if laps.sample_count(i) >= 20 and laps.lap_time(i) >= MIN_LAP_TIME]
+          if laps.sample_count(i) >= MIN_LAP_SAMPLES and laps.lap_time(i) >= MIN_LAP_TIME]
     if not ts:
         return 0
     med = float(np.median(ts))
-    return sum(1 for t in ts if 0.5 * med <= t <= 1.6 * med)
+    return sum(1 for t in ts if LAP_BAND_LO * med <= t <= LAP_BAND_HI * med)
 
 
 def _fit_start_line(laps, base):
@@ -304,11 +306,11 @@ class Session:
         start line pass it and pollute the 'best' lap), so accept laps whose time is within
         a band around the MEDIAN lap time — this adapts to any track length."""
         basic = [(i, self.laps.lap_time(i)) for i in range(self.laps.laps_count())
-                 if self.laps.sample_count(i) >= 20 and self.laps.lap_time(i) >= MIN_LAP_TIME]
+                 if self.laps.sample_count(i) >= MIN_LAP_SAMPLES and self.laps.lap_time(i) >= MIN_LAP_TIME]
         if not basic:
             return []
         med = float(np.median([t for _, t in basic]))
-        lo, hi = 0.5 * med, 1.6 * med
+        lo, hi = LAP_BAND_LO * med, LAP_BAND_HI * med
         return [i for i, t in basic if lo <= t <= hi]
 
     def best_lap_id(self) -> int | None:
@@ -381,9 +383,8 @@ class Session:
         `resample`, which truncated non-best laps at the first missed timing line).
 
         The grid is uniform 0..max over the selected laps (NOT the best lap's odometer):
-        the best lap can be the SHORTEST by distance, and `np.interp` clamps beyond a
-        grid's right edge, so anchoring to the best lap would truncate every longer lap.
-        speed is plotted vs the shared distance axis; delta is (time_lap - time_best) on it.
+        the best lap can be the SHORTEST by distance. Each lap is then masked to its OWN
+        distance so it never flat-clamps past its end; delta spans the overlap with best.
         """
         ids = [i for i in lap_ids if 0 <= i < self.laps.laps_count()]
         best = self.best_lap_id()
@@ -404,14 +405,18 @@ class Session:
         grid = np.linspace(0.0, float(max_dist), num=max(len(arrays[best][0]), 2))
 
         best_dist, _, best_elapsed = arrays[best]
-        best_time_on_grid = np.interp(grid, best_dist, best_elapsed)
 
         speed, delta = {}, {}
         for lid, (dist, speed_kmh, elapsed) in arrays.items():
-            speed_on_grid = np.interp(grid, dist, speed_kmh)
-            time_on_grid = np.interp(grid, dist, elapsed)
-            speed[lid] = (grid, speed_on_grid)
-            delta[lid] = (grid, time_on_grid - best_time_on_grid)
+            # Mask each lap to its OWN distance so a shorter lap doesn't flat-clamp across the
+            # grid (np.interp holds the last value past the right edge): speed spans the lap's
+            # own range; delta spans the overlap with the best lap (where both have data).
+            own = grid <= dist[-1]
+            speed[lid] = (grid[own], np.interp(grid[own], dist, speed_kmh))
+            both = grid <= min(dist[-1], best_dist[-1])
+            delta[lid] = (grid[both],
+                          np.interp(grid[both], dist, elapsed)
+                          - np.interp(grid[both], best_dist, best_elapsed))
         return best, speed, delta
 
     # ------------------------------------------------------------ video sync

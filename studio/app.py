@@ -58,7 +58,7 @@ class StudioWindow(QMainWindow):
         self.video.positionChanged.connect(self._on_position)
         self.map.seek_requested.connect(self.video.seek)
         self.map.timing_lines_changed.connect(self._on_lines)
-        self.table.laps_selected.connect(self._on_laps_selected)
+        self.table.laps_selected.connect(self._on_user_select)
 
         self._select_default()
 
@@ -69,10 +69,16 @@ class StudioWindow(QMainWindow):
         self.table.select(ids)
         self._on_laps_selected(ids)
 
-    def _on_laps_selected(self, ids):
+    def _on_user_select(self, ids):
+        # A genuine user click in the lap table also jumps the video to that lap (F1).
+        self._on_laps_selected(ids, seek=True)
+
+    def _on_laps_selected(self, ids, seek=False):
         self.plots.set_laps(ids)
         self.map.highlight_laps(ids)
-        if ids:  # F1: jump the video to the earliest selected lap's start.
+        # F1 seeks ONLY on user selection — not on programmatic re-select from
+        # _select_default()/_on_lines(), or dragging a timing line would yank the video.
+        if seek and ids:
             self.video.seek(self.session.laps.start_timestamp(min(ids)))
 
     def _on_position(self, t: float):

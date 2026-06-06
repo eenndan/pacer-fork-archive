@@ -100,5 +100,6 @@ common distance grid (best lap's, or uniform 0..max); `np.interp` speed and time
 - `pacer` is GPMF/GoPro `.MP4` only (`.dat` not bound). It supplies the telemetry time axis; the app
   brings its own video player.
 - Interpolation is opt-in and validated; default is naive per-frame timing.
-- `session.py` is the only file that touches `pacer`; keep it that way.
+- `session.py` owns the load/segmentation pipeline and is the primary `pacer` user; the only
+  other module that names `pacer` is `tracks.py` (geometry-only: lat/lon → local `Segment`).
 - Throwaway `_probe.py` is not committed; `_smoke.py` is the kept self-test.

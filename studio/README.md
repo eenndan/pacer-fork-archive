@@ -37,7 +37,8 @@ pixi run python -m studio.diagnose -- /path/to/file.MP4 [--interp] [--clean]
 
 | File | Role |
 |------|------|
-| [session.py](session.py) | Loads GPMF → `pacer.Laps`; exposes trace/lap/delta arrays + timing-line write-back. The only place that touches `pacer`. |
+| [session.py](session.py) | Loads GPMF → `pacer.Laps`; exposes trace/lap/delta arrays + timing-line write-back. Owns the load/segmentation pipeline (primary `pacer` user). |
+| [tracks.py](tracks.py) | Registry of known tracks (Daytona MK); detects the track by centroid and gives its fixed start/finish line. The only other module that names `pacer` (geometry only). |
 | [video_view.py](video_view.py) | `QMediaPlayer` + `QVideoWidget`; emits `positionChanged(s)`, exposes `seek(s)`. |
 | [map_view.py](map_view.py) | Track trace + draggable `TargetItem` timing lines + the video marker. |
 | [plots_view.py](plots_view.py) | Speed-vs-distance + lap-vs-best delta for the selected laps; time cursor. |
