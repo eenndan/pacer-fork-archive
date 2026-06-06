@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import chapters
 from .lap_table import LapTable
 from .map_view import MapView
 from .plots_view import PlotsView
@@ -30,17 +31,45 @@ from .video_view import VideoView
 
 
 class StudioWindow(QMainWindow):
-    def __init__(self, paths: list[str], interpolate: bool = False):
+    def __init__(self, paths: list[str], interpolate: bool = False, full: bool = False):
         super().__init__()
-        self.setWindowTitle("pacer studio")
         self.resize(1340, 840)
+        self._interpolate = interpolate
+        self._tick_timer = None  # created on the first _build_ui; reused across reloads
+        self._build_menu()
+        # If opt-in full-recording was requested on the CLI, discover the sibling chapters of the
+        # FIRST opened file up front. With explicit multiple paths the user already chose the
+        # chain, so don't auto-discover; without the flag the DEFAULT is unchanged (just `paths`).
+        if full and len(paths) == 1:
+            paths = chapters.discover_siblings(paths[0])
+        self._load(paths)
 
+    # ------------------------------------------------------------------ loading
+    def _load(self, paths: list[str]):
+        """Load (or reload) the session for `paths` and (re)build the whole UI + wiring. Used at
+        startup and by the "Load full recording" action (which reloads with the discovered
+        sibling chapters). Tearing the central widget down and rebuilding keeps the panels — each
+        of which captures `session` at construction — simple and free of stale references."""
+        self._paths = list(paths)
         print("studio: loading telemetry…", flush=True)
-        self.session = Session.load(paths, interpolate=interpolate)
+        self.session = Session.load(paths, interpolate=self._interpolate)
+        n_ch = len(self.session.chapters) if self.session.chapters else 1
         print(f"studio: {self.session.laps.point_count()} points, "
-              f"{self.session.lap_count()} laps.", flush=True)
+              f"{self.session.lap_count()} laps, {n_ch} chapter(s).", flush=True)
 
-        self.video = VideoView(self.session.video_path)
+        label = chapters.recording_label(paths)
+        self.setWindowTitle(f"pacer studio — {label}" if label else "pacer studio")
+        self._build_ui()
+
+    def _build_ui(self):
+        # On a reload ("Load full recording"), stop the previous VideoView's player so its decoder
+        # doesn't linger after the old widget tree is replaced by setCentralWidget below.
+        old_video = getattr(self, "video", None)
+        if old_video is not None:
+            old_video.player.stop()
+        # The VideoView is driven by the session's ChapterMap so the slider spans the whole
+        # session and playback switches sources / auto-advances across chapters.
+        self.video = VideoView(self.session.chapters or self.session.video_path)
         self.map = MapView(self.session)
         self.plots = PlotsView(self.session)
         self.table = LapTable(self.session)
@@ -55,8 +84,29 @@ class StudioWindow(QMainWindow):
             " padding:6px; border-bottom:1px solid #333; }"
         )
 
+        # Multi-chapter status banner above the video: shows the recording label and, for a
+        # chaptered session, which chapter is currently playing (updated via chapterChanged).
+        self.chapter_label = QLabel("")
+        self.chapter_label.setAlignment(Qt.AlignCenter)
+        self.chapter_label.setStyleSheet(
+            "QLabel { background:#15233b; color:#9ec5ff; font-size:13px; font-weight:600;"
+            " padding:4px; border-bottom:1px solid #2a3a55; }"
+        )
+        self._update_chapter_label(self.video.current_chapter())
+        self.video.chapterChanged.connect(self._update_chapter_label)
+        # Only show the banner for a real (>1 chapter) chaptered session; a single file is
+        # exactly as before (no banner clutter).
+        self.chapter_label.setVisible(self.video.is_multi)
+
+        video_panel = QWidget()
+        video_lay = QVBoxLayout(video_panel)
+        video_lay.setContentsMargins(0, 0, 0, 0)
+        video_lay.setSpacing(0)
+        video_lay.addWidget(self.chapter_label)
+        video_lay.addWidget(self.video, 1)
+
         left = QSplitter(Qt.Vertical)
-        left.addWidget(self.video)
+        left.addWidget(video_panel)
         left.addWidget(self.table)
         left.setSizes([460, 360])
 
@@ -85,10 +135,13 @@ class StudioWindow(QMainWindow):
         self._latest_t = 0.0
         self._applied_t: float | None = None
         self.video.positionChanged.connect(self._on_position)
-        self._tick_timer = QTimer(self)
-        self._tick_timer.setInterval(33)  # ~30 Hz
-        self._tick_timer.timeout.connect(self._tick)
-        self._tick_timer.start()
+        # One ~30 Hz tick timer for the window's lifetime; on reload reuse it (a second timer
+        # would double the tick rate and fire into the now-rebuilt panels).
+        if getattr(self, "_tick_timer", None) is None:
+            self._tick_timer = QTimer(self)
+            self._tick_timer.setInterval(33)  # ~30 Hz
+            self._tick_timer.timeout.connect(self._tick)
+            self._tick_timer.start()
         self.map.seek_requested.connect(self.video.seek)
         self.map.timing_lines_changed.connect(self._on_lines)
         self.table.laps_selected.connect(self._on_user_select)
@@ -119,6 +172,46 @@ class StudioWindow(QMainWindow):
 
         self._select_default()
         self._refresh_sector_lines()  # draw any sectors present on launch (none by default)
+        self._sync_full_recording_action()
+
+    # ----------------------------------------------------- multi-chapter UI / opt-in
+    def _build_menu(self):
+        """The opt-in UI action: File ▸ "Load full recording" discovers the sibling chapters of
+        the currently-opened file and reloads the whole session as one chaptered recording.
+        Disabled when there's nothing more to load (already multi-chapter, or no siblings on
+        disk, or a non-GoPro clip)."""
+        menu = self.menuBar().addMenu("&File")
+        self._full_action = menu.addAction("Load full recording")
+        self._full_action.setToolTip(
+            "Discover this recording's sibling chapters and load them as one continuous session")
+        self._full_action.triggered.connect(self._load_full_recording)
+
+    def _sync_full_recording_action(self):
+        """Enable "Load full recording" only when the current session is a SINGLE opened chapter
+        that actually has sibling chapters on disk to chain (so the opt-in does something)."""
+        can = False
+        if len(self._paths) == 1:
+            sibs = chapters.discover_siblings(self._paths[0])
+            can = len(sibs) > 1
+        self._full_action.setEnabled(can)
+
+    def _load_full_recording(self):
+        """Opt-in: chain the opened chapter's siblings into one full recording and reload."""
+        if len(self._paths) != 1:
+            return
+        sibs = chapters.discover_siblings(self._paths[0])
+        if len(sibs) > 1:
+            print(f"studio: loading full recording — {len(sibs)} chapters.", flush=True)
+            self._load(sibs)
+
+    def _update_chapter_label(self, chapter_index: int):
+        """Banner text: the recording label plus, for a chaptered session, the current chapter."""
+        label = chapters.recording_label(self._paths)
+        if self.video.is_multi:
+            self.chapter_label.setText(f"{label}  —  chapter {chapter_index + 1} of "
+                                       f"{len(self.session.chapters)}")
+        else:
+            self.chapter_label.setText(label)
 
     def _select_default(self):
         """Pre-select the two fastest laps so speed + a real delta-to-best show on launch.
@@ -306,8 +399,12 @@ class StudioWindow(QMainWindow):
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     interpolate = "--interp" in argv  # off by default; the C++ fit diverges on long sessions
+    # Opt-in full-recording: discover & chain ALL sibling chapters of the single opened file.
+    # DEFAULT (no flag) is unchanged — only the passed file(s) load. Explicit multiple paths
+    # still chain exactly those, in order, regardless of the flag.
+    full = "--full" in argv or "--chaptered" in argv
     paths = [a for a in argv if not a.startswith("-")] or [DEFAULT_SAMPLE]
     app = QApplication(sys.argv)
-    window = StudioWindow(paths, interpolate=interpolate)
+    window = StudioWindow(paths, interpolate=interpolate, full=full)
     window.show()
     return app.exec()
