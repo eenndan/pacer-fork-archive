@@ -13,7 +13,14 @@ import os
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
-from PySide6.QtWidgets import QHBoxLayout, QPushButton, QSlider, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSlider,
+    QVBoxLayout,
+    QWidget,
+)
 
 
 class VideoView(QWidget):
@@ -40,10 +47,14 @@ class VideoView(QWidget):
         row.addWidget(self.play_btn)
         row.addWidget(self.slider, 1)
 
+        self.readout = QLabel("")  # F2: time / speed / current lap, driven by app
+        self.readout.setAlignment(Qt.AlignCenter)
+
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.video, 1)
         lay.addLayout(row)
+        lay.addWidget(self.readout)
 
         self.player.positionChanged.connect(self._on_position)
         self.player.durationChanged.connect(self.slider.setMaximum)
@@ -60,6 +71,9 @@ class VideoView(QWidget):
 
     def seek(self, seconds: float):
         self.player.setPosition(int(seconds * 1000))
+
+    def set_readout(self, text: str):
+        self.readout.setText(text)
 
     def _on_position(self, ms: int):
         self.slider.blockSignals(True)

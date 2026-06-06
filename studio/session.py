@@ -422,6 +422,22 @@ class Session:
         i = int(np.searchsorted(self.tt, t))
         return min(max(i, 0), n - 1)
 
+    def lap_at_time(self, t: float) -> int | None:
+        """The valid lap whose [start_timestamp, start_timestamp+lap_time] window contains
+        `t` (media-clock seconds), else None — for the readout + current-lap highlight."""
+        for lap_id in self.valid_lap_ids():
+            t0 = self.laps.start_timestamp(lap_id)
+            if t0 <= t <= t0 + self.laps.lap_time(lap_id):
+                return lap_id
+        return None
+
+    def speed_at_time(self, t: float) -> float | None:
+        """Speed (km/h) at media-clock time `t`, from the nearest trace sample, else None."""
+        i = self.index_at_time(t)
+        if i is None:
+            return None
+        return float(self.tv[i])
+
     def nearest_index(self, x: float, y: float) -> int | None:
         if len(self.tx) == 0:
             return None

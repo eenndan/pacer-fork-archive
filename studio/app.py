@@ -18,7 +18,7 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QSplitter
 from .lap_table import LapTable
 from .map_view import MapView
 from .plots_view import PlotsView
-from .session import DEFAULT_SAMPLE, Session
+from .session import DEFAULT_SAMPLE, Session, fmt_time
 from .video_view import VideoView
 
 
@@ -72,10 +72,19 @@ class StudioWindow(QMainWindow):
     def _on_laps_selected(self, ids):
         self.plots.set_laps(ids)
         self.map.highlight_laps(ids)
+        if ids:  # F1: jump the video to the earliest selected lap's start.
+            self.video.seek(self.session.laps.start_timestamp(min(ids)))
 
     def _on_position(self, t: float):
         self.map.set_marker_time(t)
         self.plots.set_cursor_time(t)
+
+        lap_id = self.session.lap_at_time(t)  # F3: which lap is on the video
+        self.table.set_current_lap(lap_id)
+        sp = self.session.speed_at_time(t)  # F2: time / speed / lap readout
+        speed = f"{sp:.1f}" if sp is not None else "-"
+        lap = lap_id if lap_id is not None else "-"
+        self.video.set_readout(f"t = {fmt_time(t)}   speed = {speed} km/h   lap {lap}")
 
     def _on_lines(self, start, sectors):
         self.session.set_timing_lines(start, sectors)

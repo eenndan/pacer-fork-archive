@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 from .session import fmt_time
 
 BEST_COLOR = QColor("#06d6a0")
+CURRENT_COLOR = QColor("#ffd166")  # the lap currently playing on the video
 COLUMNS = ["Lap", "Time", "Dist (m)", "Entry (km/h)"]
 
 
@@ -24,6 +25,7 @@ class LapTable(QWidget):
     def __init__(self, session):
         super().__init__()
         self.session = session
+        self._current_lap = None  # F3: the lap on the video (independent of selection)
 
         self.table = QTableWidget(0, len(COLUMNS))
         self.table.setHorizontalHeaderLabels(COLUMNS)
@@ -58,6 +60,36 @@ class LapTable(QWidget):
                     item.setForeground(BEST_COLOR)
                 self.table.setItem(r, c, item)
         self.table.blockSignals(False)
+        self._apply_current_lap()
+
+    def _row_for_lap(self, lap_id) -> int:
+        if lap_id is None:
+            return -1
+        for r in range(self.table.rowCount()):
+            if int(self.table.item(r, 0).text()) == lap_id:
+                return r
+        return -1
+
+    def _apply_current_lap(self):
+        """Bold + tint the current lap's row (F3) without disturbing the selection."""
+        target = self._row_for_lap(self._current_lap)
+        for r in range(self.table.rowCount()):
+            on = r == target
+            for c in range(self.table.columnCount()):
+                item = self.table.item(r, c)
+                if item is None:
+                    continue
+                font = item.font()
+                font.setBold(on)
+                item.setFont(font)
+                item.setBackground(CURRENT_COLOR if on else QColor(Qt.transparent))
+
+    def set_current_lap(self, lap_id):
+        """Mark the lap currently playing on the video; no effect on user selection."""
+        if lap_id == self._current_lap:
+            return
+        self._current_lap = lap_id
+        self._apply_current_lap()
 
     def select(self, idxs: list[int]):
         self.table.blockSignals(True)
