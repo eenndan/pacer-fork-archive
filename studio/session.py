@@ -19,7 +19,7 @@ import numpy as np
 
 import pacer
 
-from . import tracks
+from . import gapfill, tracks
 
 DEFAULT_SAMPLE = "3rdparty/gpmf-parser/samples/hero6.mp4"  # a clip with real motion
 
@@ -318,6 +318,11 @@ class Session:
         # Per-lap (times, dists) arrays for distance_in_lap_at_time — rebuilding these from the
         # bound lap object every ~30 Hz cursor tick is wasteful; cache and clear on re-segment.
         self._dist_cache: dict[int, tuple] = {}
+        # Per-lap gap-filled draw segments (measured + inferred runs). MAP RENDERING ONLY —
+        # computed once per lap on first draw, never per frame; cleared on re-segment.
+        self._seg_cache: dict[int, list] = {}
+        self._fills_cache: dict[int, list] = {}
+        self._reference_xy = None  # lazily-built georeferenced track centerline (fallback donor)
 
         # Full-trace arrays in local meters + the video-clock time + speed (km/h).
         n = laps.point_count()
@@ -424,6 +429,8 @@ class Session:
         self.laps.update()
         self._lap_cache.clear()
         self._dist_cache.clear()
+        self._seg_cache.clear()
+        self._fills_cache.clear()
 
     def suggest_sector(self, existing: int = 0) -> Seg:
         """A line perpendicular to the track at a DISTINCT fraction of the way round, so each
@@ -505,6 +512,81 @@ class Session:
             xs.append(v[0])
             ys.append(v[1])
         return xs, ys
+
+    # ------------------------------------------------- map gap-fill (rendering only)
+    def _lap_trace_xyt(self, lap_id: int):
+        """Per-lap (xs, ys, times): local metres + media-clock seconds. Used only to build
+        the gap-filled DRAW segments — never feeds the analysis pipeline."""
+        lap = self._get_lap(lap_id)
+        xs, ys, ts = [], [], []
+        for p in lap.points:
+            v = self.cs.local(p.point)
+            xs.append(v[0])
+            ys.append(v[1])
+            ts.append(p.time)
+        return np.asarray(xs), np.asarray(ys), np.asarray(ts)
+
+    def _median_sample_dt(self) -> float:
+        """Median inter-sample interval over the whole trace (s) — used to size gaps."""
+        if len(self.tt) < 2:
+            return 0.1
+        d = np.diff(self.tt)
+        d = d[(d > 0) & (d < 1.0)]
+        return float(np.median(d)) if len(d) else 0.1
+
+    def _donors_for(self, lap_id: int):
+        """Ordered fill-source list for reconstructing `lap_id`'s gaps: every OTHER valid lap
+        first (cross-lap borrow, the primary source), then the georeferenced reference
+        centerline LAST (fallback). Each donor is {"xy", "name", "is_reference"}."""
+        donors = []
+        for other in self.valid_lap_ids():
+            if other == lap_id:
+                continue
+            ox, oy, _ = self._lap_trace_xyt(other)
+            if len(ox) >= 3:
+                donors.append({"xy": np.column_stack([ox, oy]),
+                               "name": str(other), "is_reference": False})
+        ref = self.reference_centerline_xy()
+        if ref is not None and len(ref) >= 3:
+            donors.append({"xy": ref, "name": "MK-ref", "is_reference": True})
+        return donors
+
+    def reference_centerline_xy(self):
+        """The georeferenced track centerline in LOCAL metres (an (M,2) array), or None.
+
+        Built once and cached. Only the known-track fallback uses it; with ~18 laps the
+        cross-lap borrow covers virtually every gap, so this is rarely needed. See
+        studio/reference.py for the trace+georeference of the Daytona MK centerline."""
+        if self._reference_xy is not None:
+            return self._reference_xy if len(self._reference_xy) else None
+        from . import reference  # local import: optional, only on the fallback path
+        agg = np.column_stack([self.tx, self.ty]) if len(self.tx) else None
+        self._reference_xy = reference.centerline_local(self.cs, agg)
+        return self._reference_xy if len(self._reference_xy) else None
+
+    def lap_trace_segments(self, lap_id: int):
+        """Ordered list of `gapfill.Segment` for drawing this lap: measured GPS runs and
+        reconstructed (inferred) fills, tagged so the renderer can dash/dim the inferred ones.
+
+        MAP RENDERING ONLY. Built from the lap's kept-point arrays (the same points
+        `lap_trace_xy` returns); it does NOT alter any analysis quantity. Cached per lap."""
+        cached = self._seg_cache.get(lap_id)
+        if cached is not None:
+            return cached
+        xs, ys, ts = self._lap_trace_xyt(lap_id)
+        donors = self._donors_for(lap_id)
+        segs, fills = gapfill.reconstruct_lap(xs, ys, ts, donors, med_dt=self._median_sample_dt())
+        self._seg_cache[lap_id] = segs
+        self._fills_cache[lap_id] = fills
+        return segs
+
+    def lap_gap_report(self, lap_id: int) -> list[dict]:
+        """Per-gap fill report for a lap (for metrics/diagnostics): each dict has the gap's
+        chord length, dt, n_missing, fill source, filled length and endpoint error. Computed
+        as a side effect of `lap_trace_segments` (cached)."""
+        if lap_id not in self._fills_cache:
+            self.lap_trace_segments(lap_id)
+        return self._fills_cache.get(lap_id, [])
 
     def lap_window(self, lap_id: int) -> tuple[float, float] | None:
         if not (0 <= lap_id < self.laps.laps_count()):
