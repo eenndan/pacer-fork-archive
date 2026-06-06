@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 from .session import fmt_time
 
 BEST_COLOR = QColor("#06d6a0")
-CURRENT_COLOR = QColor("#ffd166")  # the lap currently playing on the video
+CURRENT_PREFIX = "▶ "  # "▶ " marks the lap currently playing on the video
 COLUMNS = ["Lap", "Time", "Dist (m)", "Entry (km/h)"]
 
 
@@ -74,27 +74,32 @@ class LapTable(QWidget):
         self.table.blockSignals(False)
         self._apply_current_lap()
 
+    def _lap_id(self, r: int) -> int:
+        # The Lap cell may carry the "▶ " current-lap prefix; strip it before parsing.
+        return int(self.table.item(r, 0).text().removeprefix(CURRENT_PREFIX))
+
     def _row_for_lap(self, lap_id) -> int:
         if lap_id is None:
             return -1
         for r in range(self.table.rowCount()):
-            if int(self.table.item(r, 0).text()) == lap_id:
+            if self._lap_id(r) == lap_id:
                 return r
         return -1
 
     def _apply_current_lap(self):
-        """Bold + tint the current lap's row (F3) without disturbing the selection."""
+        """Mark the current lap (F3) with a '▶ ' prefix + bold in the Lap column only — no
+        row background, so the BLUE Qt selection stays the sole row-background cue."""
         target = self._row_for_lap(self._current_lap)
         for r in range(self.table.rowCount()):
+            item = self.table.item(r, 0)
+            if item is None:
+                continue
             on = r == target
-            for c in range(self.table.columnCount()):
-                item = self.table.item(r, c)
-                if item is None:
-                    continue
-                font = item.font()
-                font.setBold(on)
-                item.setFont(font)
-                item.setBackground(CURRENT_COLOR if on else QColor(Qt.transparent))
+            lap_id = item.text().removeprefix(CURRENT_PREFIX)
+            item.setText(f"{CURRENT_PREFIX}{lap_id}" if on else lap_id)
+            font = item.font()
+            font.setBold(on)
+            item.setFont(font)
 
     def set_current_lap(self, lap_id):
         """Mark the lap currently playing on the video; no effect on user selection."""
@@ -107,11 +112,11 @@ class LapTable(QWidget):
         self.table.blockSignals(True)
         self.table.clearSelection()
         for r in range(self.table.rowCount()):
-            if int(self.table.item(r, 0).text()) in idxs:
+            if self._lap_id(r) in idxs:
                 self.table.selectRow(r)
         self.table.blockSignals(False)
 
     def _on_selection(self):
-        ids = sorted({int(self.table.item(idx.row(), 0).text())
+        ids = sorted({self._lap_id(idx.row())
                       for idx in self.table.selectionModel().selectedRows()})
         self.laps_selected.emit(ids)
