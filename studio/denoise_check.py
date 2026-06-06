@@ -179,6 +179,87 @@ def _render(session: Session, out_dir: str, tag: str):
     return paths
 
 
+def gap_metrics(session: Session):
+    """Per-lap GPS-gap reconstruction stats (MAP-ONLY). Returns a summary dict + per-lap
+    detail. Quantifies the chords that the gap-fill replaces and how each was filled
+    (cross-lap borrow / spline / reference / unfilled)."""
+    valid = session.valid_lap_ids()
+    tot = {"laps": len(valid), "gaps": 0, "chord_m": 0.0, "borrow_m": 0.0, "spline_m": 0.0,
+           "reference_m": 0.0, "unfilled_m": 0.0,
+           "n_borrow": 0, "n_spline": 0, "n_reference": 0, "n_unfilled": 0}
+    per_lap = {}
+    for lid in valid:
+        rep = session.lap_gap_report(lid)
+        if not rep:
+            continue
+        per_lap[lid] = rep
+        for f in rep:
+            tot["gaps"] += 1
+            tot["chord_m"] += f["chord_m"]
+            src = f["source"]
+            if src.startswith("borrow:"):
+                tot["borrow_m"] += f["fill_m"]
+                tot["n_borrow"] += 1
+            elif src.startswith("spline"):  # spline + spline-fallback
+                tot["spline_m"] += f["fill_m"]
+                tot["n_spline"] += 1
+            elif src == "reference":
+                tot["reference_m"] += f["fill_m"]
+                tot["n_reference"] += 1
+            else:
+                tot["unfilled_m"] += f["chord_m"]
+                tot["n_unfilled"] += 1
+    return tot, per_lap
+
+
+def _render_gaps(session: Session, out_dir: str, tag: str):
+    """Render the gap-filled map: measured runs SOLID, reconstructed fills DASHED/DIMMED —
+    exactly the map_view styling. The best lap + the laps that actually have gaps."""
+    import pyqtgraph as pg
+    import pyqtgraph.exporters
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+
+    _app = QApplication.instance() or QApplication(sys.argv)
+    os.makedirs(out_dir, exist_ok=True)
+    valid = session.valid_lap_ids()
+    best = session.best_lap_id()
+    gappy = [lid for lid in valid if session.lap_gap_report(lid)]
+    out = []
+
+    def draw(lids, name, title):
+        w = pg.PlotWidget()
+        pi = w.getPlotItem()
+        pi.setAspectLocked(True)
+        pi.showGrid(x=True, y=True, alpha=0.2)
+        pi.setTitle(title)
+        w.resize(900, 900)
+        colors = ["#39a0ed", "#ff5252", "#06d6a0", "#ffd166", "#b388ff", "#ff9f1c"]
+        for k, lid in enumerate(lids):
+            col = colors[k % len(colors)]
+            for seg in session.lap_trace_segments(lid):
+                if seg.measured:
+                    pi.plot(seg.xs, seg.ys, pen=pg.mkPen(col, width=2))
+                else:
+                    pen = pg.mkPen("#ffffff", width=2)
+                    pen.setStyle(Qt.DashLine)
+                    pen.setDashPattern([4, 4])
+                    pi.plot(seg.xs, seg.ys, pen=pen)
+        _app.processEvents()
+        p = os.path.join(out_dir, name)
+        ex = pg.exporters.ImageExporter(pi)
+        ex.parameters()["width"] = 900
+        ex.export(p)
+        out.append(p)
+
+    if best is not None:
+        draw([best], f"{tag}_gaps_best.png", f"[{tag}] best lap {best} (white dash = inferred)")
+    if gappy:
+        draw(gappy[:6], f"{tag}_gaps_gappy.png",
+             f"[{tag}] {min(6, len(gappy))} laps with gaps (white dash = inferred)")
+    return out
+
+
 def _render_notebook_reference(paths_in, out_dir, tag="notebook"):
     """Render the notebook's gold-standard map: _smooth the per-lap local x/y and plot — the
     SAME filter the notebook applies before computing distance/delta. Parity eyeball target."""
@@ -252,6 +333,17 @@ def main(argv=None):
         ref = _render_notebook_reference(paths, out_dir)
         for p in ref:
             print("   (ref)", p)
+    if "--gaps" in argv:
+        tot, per_lap = gap_metrics(session)
+        print("GAP METRICS", {k: (round(v, 1) if isinstance(v, float) else v)
+                              for k, v in tot.items()})
+        for lid, rep in per_lap.items():
+            print(f"  lap {lid}:", "; ".join(
+                f"{f['source']}(chord {f['chord_m']:.1f}m fill {f['fill_m']:.1f}m "
+                f"err {f['endpoint_err_m']:.2f}m)" for f in rep))
+        gout = _render_gaps(session, out_dir, tag)
+        for p in gout:
+            print("   (gaps)", p)
     return 0
 
 
