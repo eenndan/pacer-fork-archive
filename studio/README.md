@@ -9,10 +9,17 @@ frame-accurate video↔telemetry sync (all in Python — see [the spike](spike_v
 
 ```bash
 pixi run studio                              # short demo clip (hero6 sample, map+video only)
-pixi run studio -- /path/to/GX010060.MP4     # your GoPro session (multi-lap)
-pixi run studio -- a.MP4 b.MP4               # chaptered recording (chained in order)
+pixi run studio -- /path/to/GX010060.MP4     # one chapter only (DEFAULT — single-file, as before)
+pixi run studio -- --full /path/to/GX010060.MP4  # opt-in: discover + chain ALL sibling chapters
+pixi run studio -- a.MP4 b.MP4               # explicit chaptered recording (chained in order)
 pixi run studio -- --interp session.MP4      # opt in to C++ timestamp interpolation
 ```
+
+A long GoPro recording is split, at a file-size limit, into **chapters** (`GX<CC><NNNN>.MP4`:
+prefix, 2-digit chapter `CC`, 4-digit recording `NNNN`). By default opening one chapter loads
+only that file. Pass **`--full`** (or `--chaptered`), or use **File ▸ Load full recording** in
+the UI, to discover the sibling chapters (same recording `NNNN`, same folder, ordered by `CC`)
+and chain them into one continuous session — see [Chaptered sessions](#chaptered-sessions).
 
 First `pixi run studio` resolves the env once (installs `pyside6`/`pyqtgraph` from the
 manifest). Equivalent without pixi: `python -m studio [files]`.
@@ -55,7 +62,8 @@ gap-fill unit tests live in [`tests/test_gapfill.py`](../tests/test_gapfill.py) 
 |------|------|
 | [session.py](session.py) | Loads GPMF → `pacer.Laps`; exposes trace/lap/delta arrays + timing-line write-back. Owns the load/segmentation pipeline (primary `pacer` user). |
 | [tracks.py](tracks.py) | Registry of known tracks (Daytona MK); detects the track by centroid and gives its fixed start/finish line. The only other module that names `pacer` (geometry only). |
-| [video_view.py](video_view.py) | `QMediaPlayer` + `QVideoWidget` + `QAudioOutput`; emits `positionChanged(s)`, exposes `seek(s)` + `is_playing()`/`pause()`/`play()` + a **mute/unmute toggle** (🔇/🔊, default muted). |
+| [video_view.py](video_view.py) | `QMediaPlayer` + `QVideoWidget` + `QAudioOutput`; emits `positionChanged(s)` in **global session time**, exposes `seek(s)` (global) + `is_playing()`/`pause()`/`play()` + a **mute/unmute toggle** (🔇/🔊, default muted). For a **chaptered** recording it holds the `ChapterMap`, switches source on a cross-chapter seek, and **auto-advances** to the next chapter at end-of-media — one source at a time, one continuous global slider. |
+| [chapters.py](chapters.py) | Pure-Python (no `pacer`): the GoPro chaptered-filename parser, sibling **discovery/grouping** (same recording number, same folder, ordered by chapter), and the **`ChapterMap`** global↔chapter time mapping (per-chapter offset table). Unit-tested in [`tests/test_chapters.py`](../tests/test_chapters.py). |
 | [map_view.py](map_view.py) | Best lap (faint) + current/playing lap (highlighted) + **freely-draggable** start/sector timing lines + video marker (drag **constrained to the current lap** so it never jumps laps). Each lap is drawn as measured (solid) + reconstructed gap-fill (dashed/dimmed) segments. The full all-laps trace is intentionally not drawn (perf + clarity). |
 | [gapfill.py](gapfill.py) | **GPS-gap reconstruction (map only)** — pure numpy. Detects interior dropouts and fills them with cross-lap borrow (primary) / reference centerline (fallback) / spline, tagged measured-vs-inferred. No `pacer`. |
 | [reference.py](reference.py) + [mk_centerline.json](mk_centerline.json) | Georeferenced Daytona MK centerline (traced from `gmaps_pict.png`, similarity-ICP aligned to the GPS aggregate) — the gap-fill fallback for sections no lap covers. Rebuild via [build_reference.py](build_reference.py). |
@@ -185,6 +193,37 @@ gap-fill unit tests live in [`tests/test_gapfill.py`](../tests/test_gapfill.py) 
   The new handlers are all cheap O(n) lookups (numeric sort, per-column min, lap-scoped nearest,
   sector-line redraw), never per-frame work.
 - **Video sync** uses `QMediaPlayer.positionChanged`. For sub-frame precision, `QVideoSink.videoFrameChanged` / `QVideoFrame.startTime()` are available (the spike measured them frame-accurate, ~29 ms vs pacer's clock).
+
+### Chaptered sessions
+
+A long GoPro recording is split at a file-size limit (≈12 GB ≈ 28 min for 4K) into **chapters**
+that share a recording number and increment a chapter index, e.g. recording 0060 =
+`GX010060.MP4` + `GX020060.MP4` + `GX030060.MP4`. They are contiguous in time (split mid-lap,
+not at a lap), so a lap can span a chapter boundary.
+
+- **Opt-in, default unchanged.** Opening one chapter loads only that file (the single-file
+  path is byte-identical to before). `--full`/`--chaptered`, or **File ▸ Load full recording**,
+  discovers the sibling chapters (`chapters.discover_siblings`: same recording `NNNN` + same
+  prefix, same folder, ordered ascending by chapter `CC` — never mixes recordings; a
+  single-chapter recording loads gracefully) and reloads them as one session.
+- **Telemetry chaining (`session.py`).** The per-file `GPMFSource`s are folded into a chain of
+  the C++ `SequentialGPSSource`, whose time spans are already **cumulative** — so the trace lands
+  on **one continuous, monotonic global clock** with no per-chapter reset, and lap segmentation,
+  cum-distances, delta, sectors, smoothing and gap-fill all span boundaries automatically. (A
+  lap that crosses a seam is one correct lap; the ~1 s GPS gap at a seam is the same payload
+  granularity as in-chapter dropouts and is reconstructed by the existing gap-fill.)
+- **Chapter offset table (`chapters.ChapterMap`).** Per-chapter media durations (from the GPMF)
+  give each chapter a global `offset` (cumulative prior durations); chapter *i* covers global
+  `[offset_i, offset_i+dur_i)`. `to_local(global_t) → (i, local_t)` and `to_global(i, local_t)`
+  are the global↔chapter mapping the video layer drives source-switching with.
+- **Video across files (`video_view.py`).** `QMediaPlayer` plays one source, so the view keeps
+  the ordered chapter list + offsets and: the **slider + emitted position are global** (span the
+  whole session); a `seek(global_t)` maps to (chapter, local) and **switches source** if the
+  target chapter isn't loaded (the deferred local seek applies on `LoadedMedia`); and at
+  `EndOfMedia` it **auto-advances** to the next chapter and keeps playing from 0. **Known
+  limitation:** switching source at a seam reopens the file, so a brief hitch there is expected.
+- **UI.** The window title and a banner above the video show e.g. `recording 0060 · 3 chapters`
+  and the current chapter (`— chapter 2 of 3`); the banner is hidden for a single file.
 - **Sources:** GPMF/GoPro `.MP4` only — the u-blox `.dat` reader isn't bound yet. pacer supplies the telemetry time axis; the app brings its own video player (pacer doesn't decode pixels).
 - `_smoke.py` is a headless self-test: `python -m studio._smoke`.
 
@@ -192,5 +231,5 @@ gap-fill unit tests live in [`tests/test_gapfill.py`](../tests/test_gapfill.py) 
 
 See [PLAN.md](PLAN.md) for the prioritized backlog. In short: more tracks in `tracks.py` (+ real
 auto-detection), persist sector/start-line config per file, more pure-Python tests for `session.py`
-(beyond the existing `tests/test_studio_features.py` F1/F3/F5 logic + `test_scrub_conversion.py`),
-verify multi-file chaptered sessions, and polish (keyboard shortcuts, optional snap toggle).
+(beyond the existing `tests/test_studio_features.py` F1/F3/F5 logic + `test_scrub_conversion.py`
++ `test_chapters.py`), and polish (keyboard shortcuts, optional snap toggle).
