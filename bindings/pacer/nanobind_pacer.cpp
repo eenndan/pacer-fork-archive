@@ -83,7 +83,7 @@ void py_init_module_pacer(nb::module_ &m) {
   auto pyClassGPSSample =
       nb::class_<pacer::GPSSample>
           (m, "GPSSample", "")
-      .def("__init__", [](pacer::GPSSample * self, double lat = double(), double lon = double(), double altitude = double(), double full_speed = double(), double ground_speed = double(), int64_t timestamp_ms = int64_t())
+      .def("__init__", [](pacer::GPSSample * self, double lat = double(), double lon = double(), double altitude = double(), double full_speed = double(), double ground_speed = double(), int64_t timestamp_ms = int64_t(), double dop = -1.0, int fix = -1)
       {
           new (self) pacer::GPSSample();  // placement new
           auto r_ctor_ = self;
@@ -93,8 +93,10 @@ void py_init_module_pacer(nb::module_ &m) {
           r_ctor_->full_speed = full_speed;
           r_ctor_->ground_speed = ground_speed;
           r_ctor_->timestamp_ms = timestamp_ms;
+          r_ctor_->dop = dop;
+          r_ctor_->fix = fix;
       },
-      nb::arg("lat") = double(), nb::arg("lon") = double(), nb::arg("altitude") = double(), nb::arg("full_speed") = double(), nb::arg("ground_speed") = double(), nb::arg("timestamp_ms") = int64_t()
+      nb::arg("lat") = double(), nb::arg("lon") = double(), nb::arg("altitude") = double(), nb::arg("full_speed") = double(), nb::arg("ground_speed") = double(), nb::arg("timestamp_ms") = int64_t(), nb::arg("dop") = -1.0, nb::arg("fix") = -1
       )
       .def_rw("lat", &pacer::GPSSample::lat, "")
       .def_rw("lon", &pacer::GPSSample::lon, "")
@@ -102,6 +104,8 @@ void py_init_module_pacer(nb::module_ &m) {
       .def_rw("full_speed", &pacer::GPSSample::full_speed, "")
       .def_rw("ground_speed", &pacer::GPSSample::ground_speed, "")
       .def_rw("timestamp_ms", &pacer::GPSSample::timestamp_ms, "")
+      .def_rw("dop", &pacer::GPSSample::dop, "")
+      .def_rw("fix", &pacer::GPSSample::fix, "")
       ;
 
 
@@ -567,7 +571,9 @@ void py_init_module_pacer(nb::module_ &m) {
            ", lon=" + std::to_string(s.lon) +
            ", altitude=" + std::to_string(s.altitude) +
            ", full_speed=" + std::to_string(s.full_speed) +
-           ", ground_speed=" + std::to_string(s.ground_speed) + ")";
+           ", ground_speed=" + std::to_string(s.ground_speed) +
+           ", dop=" + std::to_string(s.dop) +
+           ", fix=" + std::to_string(s.fix) + ")";
   });
 
   pyClassPoint.def("__repr__", [](const pacer::Point &p) {
