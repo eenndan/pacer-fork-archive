@@ -23,6 +23,14 @@ Diagnose a file headlessly (sample stats, GPS noise, time axis, lap segmentation
 pixi run python -m studio.diagnose -- /path/to/file.MP4 [--interp] [--clean]
 ```
 
+Render the map offscreen to PNG + print jitter/signal metrics (the GPS-denoise feedback loop;
+`--window N` overrides `SMOOTH_WINDOW`, `--window 1` = raw baseline, `--notebook-ref` adds the
+notebook's w=9 reference overlay):
+
+```bash
+pixi run python -m studio.denoise_check -- /path/to/file.MP4 [--window N] [--tag T] [--notebook-ref]
+```
+
 ## Layout
 
 ```
@@ -54,6 +62,18 @@ pixi run python -m studio.diagnose -- /path/to/file.MP4 [--interp] [--clean]
 - **Data cleaning (`session._clean`):** real GoPro sessions have a stationary lead-in where
   GPS isn't locked and spikes wildly (jumps up to ~80 km). We trim the non-moving lead-in/cool-down
   and drop lone teleport glitches. Without this the trace, map zoom, and lap segmentation all break.
+- **GPS quality gating (`session._gate_quality`):** the C++ core surfaces the GoPro **GPS9 DOP +
+  fix-type** on `GPSSample` (new `.dop`/`.fix`; parsed in `pacer/gps-source/gps-source.cpp`). At
+  load we drop fixes with no 3D lock (`fix<3`) or poor geometry (`dop>10`) — conservative. The
+  older GPS5 stream carries neither (sentinels `fix=-1`, `dop=-1.0`) → "unknown" is always KEPT.
+- **GPS track smoothing (`session._smooth_track`, `SMOOTH_WINDOW=13`):** the original map plotted
+  RAW GPS coords, so ~3 m position jitter made the trace look noisy. We now apply the notebook's
+  proven boxcar moving average (`notebooks/interpolation.ipynb`) — edge-corrected and split at
+  time gaps — to lat/lon/alt ONCE at load, *before* the points reach the core. Because the source
+  coordinates are smoothed, the trace and every derived quantity (distances, segmentation, delta,
+  sector splits) stay consistent. w=13 (~1.3 s @ 10 Hz) cuts the high-frequency jitter ~39% / the
+  heading jitter ~91% while preserving genuine lap-to-lap racing-line differences and NOT clipping
+  corner apexes (w≥21 starts cutting corners). Tune/measure with `studio/denoise_check.py`.
 - **Timing is naive by default.** The C++ `interpolate_timestamps` diverges on long/noisy sessions
   (compresses lap times, overruns the video). `--interp` opts in, but the result is validated
   (monotonic + within the video duration) and silently falls back to naive if it's bad.

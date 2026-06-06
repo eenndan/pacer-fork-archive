@@ -24,6 +24,20 @@ How it works (key decisions, all done & verified):
 - **Load/clean** (`session._clean`): trims the stationary GPS-spike lead-in/cool-down and
   bbox-filters off-track fixes. Default **naive** per-frame timing; `--interp` opts into the C++
   gradient-descent fit but it is validated and auto-rejected when it diverges on long sessions.
+- **GPS quality gating** (`session._gate_quality`): the C++ core now surfaces the GoPro **GPS9
+  DOP + fix-type** on `GPSSample` (`pacer/datatypes/datatypes.hpp`, parsed in
+  `pacer/gps-source/gps-source.cpp`, bound as `.dop`/`.fix`). At load we drop fixes with no 3D
+  lock (`fix<3`) or poor geometry (`dop>10`) — on the real session ~12% of raw fixes, but ~69%
+  of those are the stationary lead-in trimmed anyway, so only ~4% of driving data. The GPS5
+  stream carries neither field → sentinels (`fix=-1`, `dop=-1.0`) mean "unknown" and are KEPT.
+- **GPS track smoothing** (`session._smooth_track`, window `SMOOTH_WINDOW=13`): an edge-correct
+  boxcar moving average on lat/lon/alt — the notebook's denoiser (`notebooks/interpolation.ipynb`
+  `_smooth`, proven in `noise-investigation.ipynb`), tuned up from w=9. Applied ONCE at load to
+  the SOURCE coordinates so the trace AND every C++-derived quantity (cum_distances, segmentation,
+  delta, sector splits) use the same smoothed track. Smoothed within gap-free runs only (never
+  across chapter/dropout gaps). Verified (`studio/denoise_check.py`): ~39% less HF cross-track
+  jitter, ~91% less heading jitter, lap-to-lap racing-line signal preserved, corner apexes not
+  clipped (`w>=21` starts cutting corners; w=13 tracks the raw apex). O(n), never per-frame.
 - **Track-aware start/finish** (`tracks.py`): detects the track by trace centroid and sets a fixed
   start/finish line from absolute lat/lon. One entry — **Daytona Milton Keynes**
   (A=52.04031,−0.78487 · B=52.04020,−0.78460 · centroid ≈52.0403,−0.7847). Unknown tracks fall
@@ -44,6 +58,9 @@ How it works (key decisions, all done & verified):
 ## Run & verify
 - `pixi run studio -- <file.MP4>` (or `python -m studio [files]`; `--interp` to try interpolation).
 - `pixi run python -m studio.diagnose -- <file.MP4> [--interp] [--clean]` — headless stats / root-causing.
+- `pixi run python -m studio.denoise_check -- <file.MP4> [--window N] [--tag T] [--notebook-ref]` —
+  offscreen render of the map (best / selected / overlaid laps) to PNG + numeric jitter/signal
+  metrics; the feedback loop for tuning `SMOOTH_WINDOW`. `--window 1` = raw baseline.
 - `pixi run python -m studio._smoke` — headless full-window build (offscreen); prints `SMOKE OK`.
 - The GUI needs a display / non-sandboxed run; use `QT_QPA_PLATFORM=offscreen` for headless checks.
 
@@ -59,7 +76,8 @@ How it works (key decisions, all done & verified):
   after `refresh`; map draws only best+current lap; clear per-lap caches in `set_timing_lines`.
 - Module map: `session.py` (data/analysis — only pacer user) · `tracks.py` (track registry) ·
   `map_view.py` · `plots_view.py` · `lap_table.py` · `video_view.py` · `app.py` (wiring) ·
-  `diagnose.py` / `_smoke.py` (tools). `_probe.py` / `_bench_cursor.py` are untracked scratch.
+  `diagnose.py` / `denoise_check.py` / `_smoke.py` (tools). `_probe.py` / `_bench_cursor.py` are
+  untracked scratch.
 
 ## Next steps / backlog (prioritized for a fresh agent)
 1. **More tracks** — `tracks.py` has only Daytona MK; add entries and/or real auto-detection
