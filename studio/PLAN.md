@@ -15,11 +15,18 @@ Validated end-to-end on `/Users/daniil/Desktop/D24/GX010060.MP4` (Daytona MK, ~2
 Panels (module map in README):
 - **Map** — best lap (faint) + current/playing lap (highlighted); freely-draggable start + sector
   timing lines; red video marker. The full all-laps trace is intentionally not drawn.
-- **Speed + delta plots** — speed-vs-distance (x-axis toggle to time-into-lap) and lap-vs-best
-  delta. Delta is aligned by normalized distance so its endpoint equals the laptime difference.
+- **Speed + delta plots** — speed (top) and lap-vs-best delta (bottom) on ONE shared, x-linked
+  x-axis: the dist/time toggle drives BOTH plots (distance = normalized-distance × best-lap
+  distance, in metres; time = time-into-lap), so the same moment lands at the same x on both and
+  the two cursors always line up vertically. Delta is aligned by normalized distance so its
+  endpoint equals the laptime difference. An always-on **Δ/speed readout box** above the plots
+  shows the current-moment Δ-to-best (priority) + speed; the delta plot has a **hover dot** that
+  rides the curve under the mouse with its Δ value (independent of the playback cursor).
 - **Lap table** — time / dist / entry speed, plus per-sector split columns S1…Sn once sectors are
   added. `▶` marks the playing lap; blue row = your selection; best lap shown in green.
-- **Video** — GoPro `.mp4` with play/pause + scrub; readout shows `t / speed / lap #`; synced both ways.
+- **Video** — GoPro `.mp4` with play/pause + a full-video scrub slider; readout shows
+  `t / speed / lap #`; synced both ways. The speed + delta **plot cursors are also draggable** — a
+  fine, lap-scoped scrubber that seeks the video within the current lap (complements the slider).
 
 How it works (key decisions, all done & verified):
 - **Load/clean** (`session._clean`): trims the stationary GPS-spike lead-in/cool-down and
@@ -46,12 +53,37 @@ How it works (key decisions, all done & verified):
 - **Lap validity** — adaptive: a lap counts if its time is within [0.5, 1.6]× the median lap time
   (drops partials / out-laps).
 - **Delta-to-best** (`session.delta`) — aligns laps by **normalized distance fraction** s∈[0,1] so
-  the delta endpoint == laptime diff; plotted vs s×best_distance (metres), plain-seconds y-axis.
+  the delta endpoint == laptime diff; plotted vs s×best_distance (metres) in distance mode, or vs
+  time-into-lap in time mode (`delta(ids, x_mode=…)` — same Δ y-values, only the x basis changes).
+  The speed plot draws on the SAME x basis, so both plots share one x-axis and stay x-linked.
+  `session.delta_at_time(t)` gives the current-moment Δ-to-best for the readout box (same
+  normalized-distance alignment, so the box and the on-curve cursor agree).
 - **Per-sector splits** (`session.lap_sector_splits`) — projects each sector line to a cum-distance
   on each lap and splits the lap time there → sums to the lap time for **every** lap (no dependence
   on fragile geometric crossing; no blanks/oversized values).
 - **Timing-line edit** — handles are placed **freely** (no snap); dragging redraws live and
   re-segments the laps **once on release**.
+- **Draggable plot-cursor scrub** (`plots_view` cursors → `session` conversion → `app` seek): both
+  plot cursors are `movable` `InfiniteLine`s; dragging either seeks the video **within the lap the
+  playhead is in**, clamped to that lap. `plots_view` stays pacer-free — it emits the raw plot-x +
+  the SHARED axis mode (`scrubStarted`/`scrubMoved(x, mode)`/`scrubEnded`, `mode` ∈ `time|distance`;
+  `delta` is kept as a readable alias of `distance` in the conversion helpers — same math); `app`
+  converts via `session.media_time_at_plot_x` / `plot_x_at_media_time` (pure numpy on cached per-lap
+  `(times, dists)`: time `t=lap_start+x`; **shared distance** `s=x/best_dist → dist_in_lap=s·lap_total
+  → interp`). The two plots share ONE x-axis and are permanently x-linked, so the same media moment
+  maps to the SAME x on both → the cursors always coincide (verified `|x_speed−x_delta|≈0`). Source
+  of truth is the media time; both cursors + slider + map marker are placed from it ("two lines, one
+  truth"). Seeks **coalesced to ≤1/30 Hz tick** (latest target wins), **pause on grab / resume iff
+  was playing**; the feedback loop is gated (drag ignores the playback tick; `setValue`
+  `_suppress`-guarded). Round-trip/clamp + cursor-coincide tests in `tests/test_scrub_conversion.py`;
+  analysis numbers proven byte-identical (UI-only, same MD5 as the pre-change baseline).
+- **Live Δ/speed readout + hover dot**: an always-on box above the plots shows the
+  **current-moment Δ-to-best (priority) + speed** (`app._update_diff_box` ← `session.delta_at_time`
+  / `speed_at_time`), green when ahead of best / red when behind, updating live on playback and
+  scrub. The delta plot has a **hover dot** (`ScatterPlotItem` + `TextItem` driven by
+  `scene().sigMouseMoved`) that snaps to the nearest delta-curve sample under the mouse and labels
+  its Δ value (+ distance/time there) — independent of the playback cursor, hidden on mouse-leave.
+  The hover handler is a cheap nearest-index lookup on the cached curve arrays (no re-plot).
 - **Performance** — 4K HEVC decodes ~61 fps (VideoToolbox HW). UI sync runs on a ~30 Hz `QTimer`
   off the video present path; plot curves are downsampled + clipped, antialias off, autorange
   frozen after refresh; the map draws ≤2 laps. Smooth incl. with a lap selected (cursor 56.5→1.1 ms).
@@ -96,19 +128,24 @@ How it works (key decisions, all done & verified):
 - **Perf invariants — do not regress:** the 30 Hz tick decouple (`app._on_position` only stores the
   time; `app._tick` applies); plot curves downsampled+clipped + antialias off + autorange frozen
   after `refresh`; map draws only best+current lap; clear per-lap caches in `set_timing_lines`.
+  **Plot-cursor scrub seeks are coalesced to ≤1 per tick** (latest target wins) — never seek
+  per-mouse-move; the drag↔`positionChanged` feedback loop is gated (`_user_dragging`/`_suppress`).
 - Module map: `session.py` (data/analysis — only pacer user) · `tracks.py` (track registry) ·
   `gapfill.py` (GPS-gap reconstruction, pure numpy) · `reference.py` + `mk_centerline.json` /
   `build_reference.py` (georeferenced fallback centerline) · `map_view.py` · `plots_view.py` ·
   `lap_table.py` · `video_view.py` · `app.py` (wiring) · `diagnose.py` / `denoise_check.py`
   (`--gaps` renders the filled map + prints gap metrics) / `_smoke.py` (tools). Tests:
-  `tests/test_gapfill.py` (pure-Python, fast). `_probe.py` / `_bench_cursor.py` are untracked scratch.
+  `tests/test_gapfill.py` + `tests/test_scrub_conversion.py` (both pure-Python, fast — the latter
+  round-trips the cursor x↔media-time conversions for every mode + clamping). `_probe.py` /
+  `_bench_cursor.py` are untracked scratch.
 
 ## Next steps / backlog (prioritized for a fresh agent)
 1. **More tracks** — `tracks.py` has only Daytona MK; add entries and/or real auto-detection
    (the user flagged other-track support as the planned next expansion).
 2. **Persist sector/start-line config per file** — a sidecar JSON so edits survive reloads.
-3. **Tests** — `tests/test_gapfill.py` exists (gap detection / borrow / spline / continuity). Still
-   TODO: pure-Python tests for `session.py` itself (`_clean`, `valid_lap_ids`, delta
+3. **Tests** — `tests/test_gapfill.py` (gap detection / borrow / spline / continuity) and
+   `tests/test_scrub_conversion.py` (cursor x↔media-time round-trip + clamp, every mode) exist.
+   Still TODO: pure-Python tests for the rest of `session.py` (`_clean`, `valid_lap_ids`, delta
    endpoint==laptime-diff, `lap_sector_splits` sum==lap-time). Fast, no GUI; a real regression guard.
 4. **Multi-file chaptered sessions** — verify `SequentialGPSSource` chaining + the combined time
    axis on a real chaptered GoPro recording.

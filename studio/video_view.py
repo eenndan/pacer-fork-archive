@@ -64,10 +64,19 @@ class VideoView(QWidget):
             self.player.setSource(QUrl.fromLocalFile(os.path.abspath(path)))
 
     def toggle(self):
-        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+        if self.is_playing():
             self.player.pause()
         else:
             self.player.play()
+
+    def is_playing(self) -> bool:
+        return self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+
+    def pause(self):
+        self.player.pause()
+
+    def play(self):
+        self.player.play()
 
     def seek(self, seconds: float):
         self.player.setPosition(int(seconds * 1000))

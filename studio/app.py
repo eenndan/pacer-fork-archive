@@ -13,7 +13,14 @@ from __future__ import annotations
 import sys
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QApplication, QMainWindow, QSplitter
+from PySide6.QtWidgets import (
+    QApplication,
+    QLabel,
+    QMainWindow,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+)
 
 from .lap_table import LapTable
 from .map_view import MapView
@@ -38,14 +45,31 @@ class StudioWindow(QMainWindow):
         self.plots = PlotsView(self.session)
         self.table = LapTable(self.session)
 
+        # Always-on Δ/speed readout box for the CURRENT playback/scrub moment (Δ-to-best is the
+        # priority). Owned here (values come from session); placed ABOVE the plots so it never
+        # overlaps the curves. plots_view stays pacer-free — it knows nothing about this box.
+        self.diff_box = QLabel("Δ —    — km/h")
+        self.diff_box.setAlignment(Qt.AlignCenter)
+        self.diff_box.setStyleSheet(
+            "QLabel { background:#1b1b1b; color:#e6e6e6; font-size:18px; font-weight:600;"
+            " padding:6px; border-bottom:1px solid #333; }"
+        )
+
         left = QSplitter(Qt.Vertical)
         left.addWidget(self.video)
         left.addWidget(self.table)
         left.setSizes([460, 360])
 
+        plots_panel = QWidget()
+        plots_lay = QVBoxLayout(plots_panel)
+        plots_lay.setContentsMargins(0, 0, 0, 0)
+        plots_lay.setSpacing(0)
+        plots_lay.addWidget(self.diff_box)
+        plots_lay.addWidget(self.plots, 1)
+
         right = QSplitter(Qt.Vertical)
         right.addWidget(self.map)
-        right.addWidget(self.plots)
+        right.addWidget(plots_panel)
         right.setSizes([460, 380])
 
         main = QSplitter(Qt.Horizontal)
@@ -68,6 +92,19 @@ class StudioWindow(QMainWindow):
         self.map.seek_requested.connect(self.video.seek)
         self.map.timing_lines_changed.connect(self._on_lines)
         self.table.laps_selected.connect(self._on_user_select)
+
+        # --- plot cursor scrub (a fine, lap-scoped scrubber; the full-video slider stays) ---
+        # Dragging either plot cursor seeks the video WITHIN the current lap. plots_view emits
+        # the raw plot-x + which axis it came from; we convert (session, pacer-side) to a media
+        # time, clamp it to the lap, throttle the seek to ≤1 per tick, pause while dragging and
+        # resume iff it was playing. See _on_scrub_*.
+        self._scrub_lap: int | None = None      # the lap captured at grab; the drag is scoped to it
+        self._scrub_target: float | None = None  # latest requested media time (coalesced)
+        self._scrub_pending = False              # a new target awaits the next tick's seek
+        self._scrub_was_playing = False          # restore playback on release iff it was playing
+        self.plots.scrubStarted.connect(self._on_scrub_started)
+        self.plots.scrubMoved.connect(self._on_scrub_moved)
+        self.plots.scrubEnded.connect(self._on_scrub_ended)
 
         self._select_default()
 
@@ -96,7 +133,16 @@ class StudioWindow(QMainWindow):
         self._latest_t = t
 
     def _tick(self):
-        # Steady ~30 Hz: apply an update only when the position actually advanced.
+        # Steady ~30 Hz. While the user is scrubbing a plot cursor, the source of truth is the
+        # drag, not playback: issue at most ONE coalesced seek per tick to the latest dragged
+        # target, and DON'T apply the (stale / seek-driven) playback position — that gating is
+        # what prevents the drag↔positionChanged feedback loop from oscillating.
+        if self._scrub_target is not None:
+            if self._scrub_pending:
+                self._scrub_pending = False
+                self.video.seek(self._scrub_target)
+            return
+        # Normal playback: apply an update only when the position actually advanced.
         if self._latest_t != self._applied_t:
             self._applied_t = self._latest_t
             self._apply_position(self._applied_t)
@@ -104,7 +150,9 @@ class StudioWindow(QMainWindow):
     def _apply_position(self, t: float):
         self.map.set_marker_time(t)
         self.plots.set_cursor_time(t)
+        self._apply_readout(t)
 
+    def _apply_readout(self, t: float):
         lap_id = self.session.lap_at_time(t)  # F3: which lap is on the video
         self.table.set_current_lap(lap_id)
         self.map.set_current_lap(lap_id)  # highlight the current lap's trace on the map
@@ -112,6 +160,72 @@ class StudioWindow(QMainWindow):
         speed = f"{sp:.1f}" if sp is not None else "-"
         lap = lap_id if lap_id is not None else "-"
         self.video.set_readout(f"t = {fmt_time(t)}   speed = {speed} km/h   lap {lap}")
+        self._update_diff_box(t, sp)
+
+    def _update_diff_box(self, t: float, sp: float | None):
+        """Refresh the always-on Δ/speed box for the current moment (priority: Δ-to-best in
+        seconds). Δ comes from session.delta_at_time (same normalized-distance alignment as the
+        delta plot, so the box and the cursor on the curve agree). Outside a valid lap Δ is —."""
+        d = self.session.delta_at_time(t)
+        if d is None:
+            delta_txt = "Δ —"
+        else:
+            # +behind / −ahead vs best, at the same track position.
+            delta_txt = f"Δ {d:+.2f} s"
+        speed_txt = f"{sp:.0f} km/h" if sp is not None else "— km/h"
+        # Colour cue: green when up on best (ahead), red when down (behind).
+        colour = "#e6e6e6" if d is None else ("#06d6a0" if d <= 0 else "#ef476f")
+        self.diff_box.setText(f"{delta_txt}     {speed_txt}")
+        self.diff_box.setStyleSheet(
+            f"QLabel {{ background:#1b1b1b; color:{colour}; font-size:18px; font-weight:600;"
+            " padding:6px; border-bottom:1px solid #333; }"
+        )
+
+    # ------------------------------------------------------------- plot scrub
+    def _on_scrub_started(self):
+        """Grab: scope the scrub to the lap the playhead is currently in; pause playback,
+        remembering whether it was playing so we can resume on release."""
+        self._scrub_lap = self.session.lap_at_time(self._applied_t or 0.0)
+        self._scrub_was_playing = self.video.is_playing()
+        if self._scrub_was_playing:
+            self.video.pause()
+        self._scrub_target = None
+        self._scrub_pending = False
+
+    def _on_scrub_moved(self, x: float, mode: str):
+        """Drag: convert the raw plot-x (in `mode`'s axis) to a media time within the captured
+        current lap, clamped to that lap. Store it as the latest target (the tick coalesces the
+        actual seek to ≤1/tick) and immediately re-place BOTH cursors + the map marker + the
+        readout from that single clamped time, so the line snaps to the lap boundary and every
+        view stays in sync without waiting on the (throttled, async) seek."""
+        lap = self._scrub_lap
+        if lap is None:  # not inside a valid lap (lead-in / between laps) — no-op
+            return
+        best_d = self.session.best_lap_total_distance()
+        t = self.session.media_time_at_plot_x(lap, x, mode, best_distance=best_d)
+        if t is None:
+            return
+        self._scrub_target = t
+        self._scrub_pending = True
+        # Drive every view from the one clamped truth (plots ignore the playback tick mid-drag).
+        self.plots.place_cursors_at_time(t)
+        self.map.set_marker_time(t)
+        self._apply_readout(t)
+
+    def _on_scrub_ended(self):
+        """Release: issue a final seek to the last target (so the frame matches the cursor even
+        if the last move coalesced out), resume playback iff it was playing at grab, then clear
+        the scrub state so the normal playback→cursor sync resumes."""
+        target = self._scrub_target
+        self._scrub_target = None
+        self._scrub_pending = False
+        if target is not None:
+            self.video.seek(target)
+            self._applied_t = target  # keep current-lap/readout consistent until the seek lands
+        if self._scrub_was_playing:
+            self.video.play()
+        self._scrub_was_playing = False
+        self._scrub_lap = None
 
     def _on_lines(self, start, sectors):
         self.session.set_timing_lines(start, sectors)
