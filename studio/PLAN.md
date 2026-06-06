@@ -198,12 +198,18 @@ How it works (key decisions, all done & verified):
    (the user flagged other-track support as the planned next expansion).
 2. **Persist sector/start-line config per file** — a sidecar JSON so edits survive reloads.
 3. **Tests** — `tests/test_gapfill.py` (gap detection / borrow / spline / continuity),
-   `tests/test_scrub_conversion.py` (cursor x↔media-time round-trip + clamp, every mode) and
-   `tests/test_studio_features.py` (F1 sort key / F3 lap-scoped nearest / F5 per-column min) exist.
-   Still TODO: pure-Python tests for the rest of `session.py` (`_clean`, `valid_lap_ids`, delta
-   endpoint==laptime-diff, `lap_sector_splits` sum==lap-time, `sector_plot_positions`). Fast, no GUI.
-4. **Multi-file chaptered sessions** — verify `SequentialGPSSource` chaining + the combined time
-   axis on a real chaptered GoPro recording.
+   `tests/test_scrub_conversion.py` (cursor x↔media-time round-trip + clamp, every mode),
+   `tests/test_studio_features.py` (F1 sort key / F3 lap-scoped nearest / F5 per-column min) and
+   `tests/test_chapters.py` (GoPro filename parse, sibling grouping/ordering, global↔chapter map)
+   exist. Still TODO: pure-Python tests for the rest of `session.py` (`_clean`, `valid_lap_ids`,
+   delta endpoint==laptime-diff, `lap_sector_splits` sum==lap-time, `sector_plot_positions`).
+4. **Multi-file chaptered sessions — DONE.** Opt-in (`--full`/`--chaptered` + File ▸ Load full
+   recording) discovers + chains sibling chapters (`chapters.py`); telemetry rides one continuous
+   global clock via `SequentialGPSSource` (verified on recording 0060: 57 valid laps vs 18 for
+   chapter 1 alone, monotonic axis, the seam lap is one correct ~68.8 s / 1073 m lap); video
+   switches source on a cross-chapter seek and **auto-advances** at end-of-media (`video_view.py`),
+   with a global slider/position. Default single-file load stays byte-identical to main. Known
+   limitation: a brief reopen hitch when the video source switches at a seam.
 5. **Polish** — keyboard shortcuts (space=play, ←/→ step), theming/layout, an optional snap-to-track
    *toggle* (default is now free), trailing-cooldown trimming, expose `_clean` thresholds in UI.
    Also: the MK reference centerline's INFIELD switchbacks (`mk_centerline.json`) are an approximate
