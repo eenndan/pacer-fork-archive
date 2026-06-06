@@ -31,7 +31,6 @@ START_WIDEN = 3.0  # widen the auto start line so every lap pass crosses it
 MIN_LAP_TIME = 5.0  # s — laps shorter than this are partial/phantom, not real laps
 MIN_LAP_SAMPLES = 20  # a real lap has at least this many GPS samples
 LAP_BAND_LO, LAP_BAND_HI = 0.5, 1.6  # "real lap" = lap_time within [lo, hi] x median lap time
-MIN_TIMING_LINE = 10.0  # m — a snapped timing line must be ≥ this long or it crosses nothing
 
 
 @dataclass
@@ -550,20 +549,3 @@ class Session:
         if len(self.tx) == 0:
             return None
         return int(np.argmin((self.tx - x) ** 2 + (self.ty - y) ** 2))
-
-    def nearest_index_min_sep(self, x: float, y: float, ox: float, oy: float,
-                              min_sep: float = MIN_TIMING_LINE) -> int | None:
-        """Nearest trace sample to (x,y) that is at least `min_sep` metres from (ox,oy).
-
-        Used so a timing line's two handles never snap into a too-short segment: not just a
-        zero-length line (which crosses nothing — Segment::Intersects returns false) but any
-        line shorter than ~min_sep gets stepped over by the GPS sampling and wipes out every
-        lap. Returns the nearest sample far enough from the other handle, or None if none is."""
-        if len(self.tx) == 0:
-            return None
-        far = ((self.tx - ox) ** 2 + (self.ty - oy) ** 2) >= min_sep ** 2
-        if not far.any():
-            return None
-        idx = np.flatnonzero(far)
-        d2 = (self.tx[idx] - x) ** 2 + (self.ty[idx] - y) ** 2
-        return int(idx[np.argmin(d2)])

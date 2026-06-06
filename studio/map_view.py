@@ -1,9 +1,10 @@
 """MapView: the track trace with draggable start/sector timing lines + a video marker.
 
 Timing lines are drawn in LOCAL meters (same space as the trace). Each line is two
-draggable pyqtgraph TargetItem handles joined by a segment; dragging either handle
-re-segments the laps (via the app) live. The red marker tracks the video position and,
-when dragged, seeks the video to the nearest telemetry sample.
+draggable pyqtgraph TargetItem handles joined by a segment; handles are placed FREELY
+(no snap to trace) and stay exactly where the user drops them — releasing a handle
+re-segments the laps once. The red marker tracks the video position and, when dragged,
+seeks the video to the nearest telemetry sample.
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ class _TimingLine:
         self.plot = plot
         self.on_changed = on_changed
         self.session = session
-        self._snapping = False  # guard so a snap's setPos doesn't recurse on Finished
         pen = pg.mkPen(color, width=2)
         self.line = pg.PlotDataItem([seg.x1, seg.x2], [seg.y1, seg.y2], pen=pen)
         self.h1 = pg.TargetItem((seg.x1, seg.y1), size=11, movable=True, pen=pen)
@@ -36,12 +36,17 @@ class _TimingLine:
         plot.addItem(self.line)
         plot.addItem(self.h1)
         plot.addItem(self.h2)
-        # Live: dragging either handle redraws the segment as it moves. On release each handle
-        # snaps to its own nearest trace point (and re-segments the laps).
+        # Free placement: dragging either handle redraws the segment as it moves; on release
+        # the laps are re-segmented ONCE. Handles are NOT snapped to a trace point — they stay
+        # exactly where the user drops them.
         self.h1.sigPositionChanged.connect(self._moved)
         self.h2.sigPositionChanged.connect(self._moved)
-        self.h1.sigPositionChangeFinished.connect(lambda: self._snap(self.h1))
-        self.h2.sigPositionChangeFinished.connect(lambda: self._snap(self.h2))
+        self.h1.sigPositionChangeFinished.connect(self._released)
+        self.h2.sigPositionChangeFinished.connect(self._released)
+
+    def _released(self, *_):
+        # On release: re-segment the laps ONCE, leaving the handle exactly where dropped.
+        self.on_changed()
 
     def _moved(self, *_):
         # Fires continuously while a handle is dragged — only redraw the segment (cheap).
@@ -49,25 +54,6 @@ class _TimingLine:
         # drag stays smooth instead of re-segmenting on every mouse-move tick.
         p1, p2 = self.h1.pos(), self.h2.pos()
         self.line.setData([p1.x(), p2.x()], [p1.y(), p2.y()])
-
-    def _snap(self, handle):
-        """On release: snap `handle` to its own nearest trace point, then re-segment ONCE.
-
-        The snap target must NOT land on the other handle's point: a zero-length segment
-        crosses nothing (pacer Segment::Intersects returns false) and wipes out every lap, so
-        snap to the nearest DISTINCT sample (skip the snap if none exists)."""
-        if self._snapping:
-            return
-        other = self.h2 if handle is self.h1 else self.h1
-        op = other.pos()
-        p = handle.pos()
-        i = self.session.nearest_index_min_sep(p.x(), p.y(), op.x(), op.y())
-        if i is not None:
-            self._snapping = True
-            handle.setPos(pg.Point(float(self.session.tx[i]), float(self.session.ty[i])))
-            self._snapping = False
-        self._moved()        # redraw the final segment
-        self.on_changed()    # re-segment the laps once, on release
 
     def seg(self) -> Seg:
         p1, p2 = self.h1.pos(), self.h2.pos()
@@ -158,7 +144,9 @@ class MapView(QWidget):
 
     def _add_sector(self):
         start, sectors = self._current()
-        sectors.append(self.session.suggest_sector())
+        # Pass the count of existing sectors so each suggestion lands at a DISTINCT track
+        # position (evenly subdividing the lap); two identical lines would collapse a split.
+        sectors.append(self.session.suggest_sector(len(sectors)))
         self._rebuild(start, sectors)
         self.timing_lines_changed.emit(start, sectors)
 
