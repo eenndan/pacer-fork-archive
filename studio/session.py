@@ -26,6 +26,7 @@ DEFAULT_SAMPLE = "3rdparty/gpmf-parser/samples/hero6.mp4"  # a clip with real mo
 # Data-cleaning thresholds (see studio/diagnose.py; validated on real sessions).
 MIN_START_SPEED = 3.0  # m/s — below this the car is stationary / GPS not yet locked
 SPIKE_STEP = 50.0  # m — a lone fix farther than this from BOTH neighbours is a glitch
+OFF_TRACK_MARGIN = 0.5  # drop points outside the inlier bbox (1-99 pct) expanded by this fraction
 START_WIDEN = 3.0  # widen the auto start line so every lap pass crosses it
 MIN_LAP_TIME = 5.0  # s — laps shorter than this are partial/phantom, not real laps
 MIN_LAP_SAMPLES = 20  # a real lap has at least this many GPS samples
@@ -172,7 +173,19 @@ def _clean(samples, spans, naive):
                 and math.dist(xy[i], xy[i + 1]) > SPIKE_STEP
                 and math.dist(xy[i - 1], xy[i + 1]) < SPIKE_STEP):
             keep[i] = False
-    idx = [i for i in range(len(s)) if keep[i]]
+
+    # Drop points clearly outside the track. The 1st–99th percentile box ignores the far GPS
+    # excursions (km off-track) when sizing, then a generous margin keeps the whole real track;
+    # anything beyond that box is an off-track fix and is removed.
+    xs = np.array([p[0] for p in xy])
+    ys = np.array([p[1] for p in xy])
+    x_lo, x_hi = np.percentile(xs, [1, 99])
+    y_lo, y_hi = np.percentile(ys, [1, 99])
+    margin = max(x_hi - x_lo, y_hi - y_lo, 1.0) * OFF_TRACK_MARGIN
+    in_box = ((xs >= x_lo - margin) & (xs <= x_hi + margin)
+              & (ys >= y_lo - margin) & (ys <= y_hi + margin))
+
+    idx = [i for i in range(len(s)) if keep[i] and bool(in_box[i])]
     return [s[i] for i in idx], [sp[i] for i in idx], [t[i] for i in idx]
 
 

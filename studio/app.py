@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QElapsedTimer, Qt
 from PySide6.QtWidgets import QApplication, QMainWindow, QSplitter
 
 from .lap_table import LapTable
@@ -55,6 +55,8 @@ class StudioWindow(QMainWindow):
         self.setCentralWidget(main)
 
         # --- cross-panel wiring ---
+        self._sync_clock = QElapsedTimer()  # throttles UI sync off positionChanged
+        self._sync_clock.start()
         self.video.positionChanged.connect(self._on_position)
         self.map.seek_requested.connect(self.video.seek)
         self.map.timing_lines_changed.connect(self._on_lines)
@@ -82,6 +84,15 @@ class StudioWindow(QMainWindow):
             self.video.seek(self.session.laps.start_timestamp(min(ids)))
 
     def _on_position(self, t: float):
+        # Throttle to ~25 Hz. QMediaPlayer.positionChanged can fire per decoded frame; doing
+        # the map/plot repaints synchronously on every tick starves the video pipeline (the
+        # picture freezes while the clock advances, then jumps on pause). 40 ms is smooth.
+        if self._sync_clock.elapsed() < 40:
+            return
+        self._sync_clock.restart()
+        self._apply_position(t)
+
+    def _apply_position(self, t: float):
         self.map.set_marker_time(t)
         self.plots.set_cursor_time(t)
 
