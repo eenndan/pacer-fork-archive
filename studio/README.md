@@ -92,9 +92,32 @@ gap-fill unit tests live in [`tests/test_gapfill.py`](../tests/test_gapfill.py) 
   sector splits) stay consistent. w=13 (~1.3 s @ 10 Hz) cuts the high-frequency jitter ~39% / the
   heading jitter ~91% while preserving genuine lap-to-lap racing-line differences and NOT clipping
   corner apexes (w≥21 starts cutting corners). Tune/measure with `studio/denoise_check.py`.
-- **Timing is naive by default.** The C++ `interpolate_timestamps` diverges on long/noisy sessions
-  (compresses lap times, overruns the video). `--interp` opts in, but the result is validated
-  (monotonic + within the video duration) and silently falls back to naive if it's bad.
+- **Lap time = two interpolated crossing instants.** The C++ core (`pacer::Split`) already
+  interpolates each start/finish (and sector) crossing TIME along the chord between the two GPS
+  points that straddle the line — `t = t0 + f·(t1−t0)` for the geometric fraction `f` — so lap
+  times are sub-sample accurate, NOT snapped to the nearest fix. Accuracy is therefore set by the
+  per-sample TIME AXIS that those crossing times interpolate on (next bullet).
+- **Timing uses the GPS9 true wall clock by default** (`session._gps9_times`). The old `naive`
+  axis spread each GPMF payload's MEDIA span `[a,b]` across `i/n`; the GoPro media clock for the
+  GPS track runs ~0.1 % fast (measured 9.990 Hz on real sessions), which **systematically
+  compressed every lap** (~30 ms on the best lap). The GPS9 stream carries the true GPS fix time
+  (`timestamp_ms`), a clean 10.000 Hz **wall clock** — the same clock a lap-timing transponder
+  uses. We take only its per-sample SPACING and re-anchor each contiguous run to that run's media
+  time, so the axis stays on the media clock the video layer maps against (video sync / chapter
+  offsets unchanged) while inter-sample spacing is the real wall-clock spacing. Degrades to the
+  old naive timing for any sample without a GPS9 timestamp (e.g. a GPS5-only stream). The C++
+  `interpolate_timestamps` global Adam fit DIVERGES on long/noisy sessions (compresses lap times,
+  overruns the video); it stays opt-in via `--interp`, validated (monotonic + within the video
+  duration) and falling back to naive if bad. NB: the irreducible ~0.15 s GPS-vs-transponder
+  difference (10 Hz GPS cannot resolve sub-100 ms crossing timing) is NOT fudged away.
+- **Lap distance is gap-aware** (C++ `SegmentDistance` in `laps.cpp`, used by both
+  `GetLapDistance` and the per-lap `cum_distances`). A normal segment is measured by the GPS chord
+  (correct for well-sampled track); across a DROPOUT (a point-to-point time jump > 0.35 s) the
+  straight chord cuts the corner and under-measures — one 6 s dropout cost ~100 m on the 0060
+  session — so the gap segment uses the trapezoidal speed integral `½(v0+v1)·Δt` instead (the
+  vehicle odometer, valid right across the hole), clamped to never fall below the chord. This cut
+  the valid-lap distance spread from ~91 m → ~35 m (std 12.3 → 7.6 m) on the 0060 session; only
+  the dropout laps change, so the delta / sector math stays consistent.
 - **Lap validity is adaptive** (`session.valid_lap_ids`): laps within a band around the median lap
   time, so short double-crossings of the start line don't pollute the "best" lap.
 - **Delta-to-best** (`session.delta`) is aligned by **normalized distance fraction** (s∈[0,1]) so a

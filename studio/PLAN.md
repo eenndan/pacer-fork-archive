@@ -38,8 +38,25 @@ Panels (module map in README):
 
 How it works (key decisions, all done & verified):
 - **Load/clean** (`session._clean`): trims the stationary GPS-spike lead-in/cool-down and
-  bbox-filters off-track fixes. Default **naive** per-frame timing; `--interp` opts into the C++
-  gradient-descent fit but it is validated and auto-rejected when it diverges on long sessions.
+  bbox-filters off-track fixes.
+- **Lap timing — GPS9 true wall clock** (`session._gps9_times`, the load default): lap time is the
+  difference of two start/finish crossing instants, each already INTERPOLATED along the chord by
+  the C++ core (`pacer::Split`: `t = t0 + f·(t1−t0)`), so accuracy is set by the per-sample TIME
+  AXIS. The old `naive` axis spread each GPMF payload's MEDIA span over `i/n`; the GoPro media
+  clock for the GPS track runs ~0.1 % fast (9.990 Hz measured), which systematically compressed
+  every lap (~30 ms on the best lap). We now time off the GPS9 fix timestamps' true 10.000 Hz
+  **wall-clock** spacing (the transponder's clock), re-anchored per contiguous run to the media
+  time so video sync / chapter offsets are unchanged; degrades to naive when no GPS9 timestamp is
+  present. `--interp` still opts into the C++ gradient-descent fit, validated and auto-rejected
+  when it diverges on long sessions (it does — keep it opt-in). The remaining ~0.15 s
+  GPS-vs-transponder gap on lap 36 is the irreducible limit of 10 Hz GPS and is NOT fudged.
+- **Lap distance — gap-aware** (C++ `SegmentDistance` in `pacer/laps/laps.cpp`, feeding both
+  `GetLapDistance` and the per-lap `cum_distances`): normal segments use the GPS chord; a segment
+  spanning a DROPOUT (point-to-point Δt > 0.35 s) uses the trapezoidal speed integral
+  `½(v0+v1)·Δt` instead, clamped to ≥ chord. Chords across dropouts were cutting corners and
+  under-counting (one 6 s hole = ~100 m short); this cut the valid-lap distance spread ~91 m → ~35 m
+  (std 12.3 → 7.6 m) on the 0060 session, changing only the dropout laps so delta/sectors stay
+  consistent.
 - **GPS quality gating** (`session._gate_quality`): the C++ core now surfaces the GoPro **GPS9
   DOP + fix-type** on `GPSSample` (`pacer/datatypes/datatypes.hpp`, parsed in
   `pacer/gps-source/gps-source.cpp`, bound as `.dop`/`.fix`). At load we drop fixes with no 3D
