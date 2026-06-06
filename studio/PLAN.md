@@ -15,7 +15,11 @@ the `pacer-studio-app-direction` memory to resume in a fresh session.
   pass the short exact segment missed, adaptive (median-band) lap validity. Result: 18 valid
   flying laps @ ~68.4–70.8 s (was 8 garbage laps).
 
-## Open bugs (fix first)
+## Bugs — FIXED (autonomous run, 2026-06-06; commits edecaf1, 416616b, 2492636)
+
+> B1 + B2 are done and verified on GX010060.MP4 (18 valid laps, median 69.82 s; full-length
+> delta plots; start line on the MK coords). Spec kept below for reference. **Remaining work is
+> the Requested features (DONE too — see below) and P2 / backlog.**
 
 ### B1 — track-aware start/finish line (was: mis-placed/over-long regression)
 Per the user, the real goal: **detect the track from GPS coordinates and use a FIXED,
@@ -57,7 +61,7 @@ common distance grid (best lap's, or uniform 0..max); `np.interp` speed and time
 `time_lap(grid) - time_best(grid)`. Full-length, robust, no dependence on `resample`.
 (`session.delta`, `plots_view.refresh`.)
 
-## Requested features
+## Requested features — DONE (autonomous run, 2026-06-06; commit c163fde + cleanup 2492636)
 
 - **F1 — select lap → jump video.** On lap-table selection (or map highlight), seek the video to
   that lap's `start_timestamp`. (`app._on_laps_selected` → `video.seek`; use the primary/first
