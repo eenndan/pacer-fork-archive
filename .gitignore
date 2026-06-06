@@ -1,7 +1,7 @@
 .DS_Store
 .cache
 .vscode
-.claude/settings.local.json
+.claude/
 build/
 __pycache__/
 xcode-build/
@@ -21,3 +21,6 @@ pacer-ios/
 
 # scratch dir used by offline test compilation
 .tmp_review/
+
+# studio gap-fill / denoise render scratch (denoise_check.py)
+.gap_pngs/
