@@ -37,6 +37,10 @@ CURSOR_PEN = pg.mkPen("#ffffff", width=1, style=Qt.DashLine)
 CURSOR_HOVER_PEN = pg.mkPen("#ffd166", width=2, style=Qt.DashLine)
 HOVER_DOT_BRUSH = pg.mkBrush("#ffd166")
 HOVER_DOT_PEN = pg.mkPen("#000000", width=1)
+# F2: sector boundary guide lines — subtle (dimmed + dashed) vertical lines on BOTH charts so
+# they read as a backdrop and never obscure the curves or the (white/dashed) scrub cursor.
+SECTOR_LINE_PEN = pg.mkPen("#6b7280", width=1, style=Qt.DotLine)  # muted grey dotted
+SECTOR_LABEL_COLOR = "#9aa3b2"
 
 
 class PlotsView(QWidget):
@@ -45,6 +49,9 @@ class PlotsView(QWidget):
     scrubStarted = Signal()
     scrubMoved = Signal(float, str)  # (plot_x, mode) — mode in {'time','distance'} (shared axis)
     scrubEnded = Signal()
+    # Emitted whenever the shared x-axis mode flips (distance ⇄ time). app re-pushes the sector
+    # boundary positions for the new mode (F2) so the vertical guide lines reposition correctly.
+    modeChanged = Signal(str)  # the new mode: 'time' | 'distance'
 
     def __init__(self, session):
         super().__init__()
@@ -56,6 +63,11 @@ class PlotsView(QWidget):
         self._cursor_t: float | None = None  # last applied position; re-placed after refresh()
         self._user_dragging = False  # True between grab and release of either cursor
         self._suppress = False  # guard programmatic setValue from re-emitting a scrub
+        # F2: sector boundary guide lines (start/finish + each sector) on BOTH plots. Items are
+        # tracked so they can be cleared/redrawn live as sectors are edited; positions are
+        # (label, x) for the CURRENT axis mode, pushed by app via set_sector_lines.
+        self._sector_items: list = []
+        self._sector_positions: list[tuple[str, float]] = []
 
         # x-axis toggle — drives BOTH plots together (distance ⇄ time-into-lap). The plots share
         # one x-axis and stay x-linked, so the speed + delta cursors always align in either mode.
@@ -132,6 +144,9 @@ class PlotsView(QWidget):
     def _on_mode_changed(self, index):
         self._time_mode = index == 1
         self.refresh()
+        # The sector guide-line x-positions are mode-dependent; ask app to re-push them for the
+        # new mode (F2). app recomputes via session and calls set_sector_lines.
+        self.modeChanged.emit(self._axis_mode())
 
     # ----------------------------------------------------------- cursor scrub
     def is_dragging(self) -> bool:
@@ -143,6 +158,11 @@ class PlotsView(QWidget):
         """The ONE shared x-axis mode driving both plots: 'time' or 'distance' (the latter is
         the s×best_distance axis the conversion helpers treat identically to 'delta')."""
         return "time" if self._time_mode else "distance"
+
+    def axis_mode(self) -> str:
+        """Public read of the current shared-axis mode ('time'|'distance'), so app can compute
+        the sector boundary positions (F2) in the right units without poking internals."""
+        return self._axis_mode()
 
     def _on_speed_dragged(self, *_):
         self._emit_scrub(self.cur_speed.value(), self._axis_mode())
@@ -178,12 +198,52 @@ class PlotsView(QWidget):
         self._lap_ids = list(lap_ids)
         self.refresh()
 
+    # ----------------------------------------------------------- sector lines (F2)
+    def set_sector_lines(self, positions):
+        """Draw the sector BOUNDARIES as subtle vertical guide lines on BOTH charts. `positions`
+        is a list of (label, plot-x) on the CURRENT shared-axis mode (app computes them via
+        session, so this view stays pacer-free). Called live as sectors are added/moved/reset and
+        whenever the dist/time mode flips. An empty list clears the lines."""
+        self._sector_positions = list(positions or [])
+        self._draw_sectors()
+
+    def _clear_sectors(self):
+        for plot, item in self._sector_items:
+            plot.removeItem(item)
+        self._sector_items = []
+
+    def _draw_sectors(self):
+        """(Re)draw the cached sector guide lines on both plots. A small label (S/F, S1, S2…)
+        sits near the TOP of the speed plot so it doesn't collide with the delta curve. The lines
+        sit BELOW the scrub cursor (lower zValue) and use a muted dotted pen so they never obscure
+        the curves or the cursor."""
+        self._clear_sectors()
+        if not self._sector_positions:
+            return
+        for label, x in self._sector_positions:
+            for plot in (self.p_speed, self.p_delta):
+                # Only the speed plot carries the text label (top); the delta plot just gets the
+                # line so the boundary reads across both without crowding the small delta panel.
+                # InfiniteLine wants the label as a format string and styling in labelOpts.
+                text = label if plot is self.p_speed else None
+                ln = pg.InfiniteLine(
+                    pos=float(x), angle=90, pen=SECTOR_LINE_PEN, label=text,
+                    labelOpts={"color": SECTOR_LABEL_COLOR, "position": 0.96, "movable": False},
+                )
+                ln.setZValue(-5)  # behind the curves + cursor; a subtle backdrop
+                plot.addItem(ln)
+                self._sector_items.append((plot, ln))
+
     def refresh(self):
         for plot, curve in self._curves:
             plot.removeItem(curve)
         self._curves = []
         self._hide_hover()
         self._delta_curves = []  # [(lid, xs, ys)] for the hover-dot nearest-sample snap
+        # Clear the sector guide lines too: a stale vertical InfiniteLine would otherwise be
+        # caught by the autoRange fit below (like the cursor) and stretch the frozen range.
+        # They're redrawn at the end on the freshly-fit axes (and re-pushed by app on a mode flip).
+        self._clear_sectors()
 
         # Both plots share ONE x-axis (distance = s×best_dist, or time-into-lap), kept x-linked
         # in BOTH modes so the two cursors always align. Just relabel the (shared) bottom axis.
@@ -246,6 +306,10 @@ class PlotsView(QWidget):
         # immediately — including when paused, where no position tick follows the toggle.
         if self._cursor_t is not None:
             self.set_cursor_time(self._cursor_t)
+        # Redraw the sector guide lines on the freshly-fit axes (positions are in the current
+        # mode's units; app re-pushes them when the mode flips, but a selection-only refresh
+        # keeps the same positions, so just redraw the cached ones here).
+        self._draw_sectors()
 
     def set_cursor_time(self, t: float):
         # While the user is dragging, the source of truth is the drag, not playback — ignore

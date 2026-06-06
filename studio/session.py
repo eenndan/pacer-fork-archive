@@ -647,6 +647,70 @@ class Session:
         splits = [float(t_at[k + 1] - t_at[k]) for k in range(n_splits)]
         return splits
 
+    def sector_boundary_distances(self, lap_id: int) -> list[float]:
+        """Per-lap odometer distance (metres) of each sector line, found the SAME way
+        `lap_sector_splits` measures the splits: project each sector line's midpoint onto this
+        lap's trace and take the nearest point's cum_distance. Sorted ascending. So the boundary
+        guide lines on the charts (F2) land exactly where the split times are measured."""
+        lines = self.laps.sectors.sector_lines
+        if not lines:
+            return []
+        lap = self._get_lap(lap_id)
+        pts = lap.points
+        cds = lap.cum_distances
+        m = min(len(pts), len(cds))
+        if m < 2:
+            return []
+        locs = [self.cs.local(pts[i].point) for i in range(m)]
+        xy = np.array([(v[0], v[1]) for v in locs])
+        cum = np.asarray(cds[:m], dtype=float)
+        bounds = []
+        for seg in lines:
+            mx = (seg.first.x + seg.second.x) / 2.0
+            my = (seg.first.y + seg.second.y) / 2.0
+            j = int(np.argmin((xy[:, 0] - mx) ** 2 + (xy[:, 1] - my) ** 2))
+            bounds.append(float(cum[j]))
+        return sorted(bounds)
+
+    def sector_plot_positions(self, mode: str) -> list[tuple[str, float]]:
+        """(label, plot-x) for the sector BOUNDARIES on the speed+delta charts' SHARED axis (F2).
+
+        Includes the start/finish ("S/F", x=0) plus one line per sector. Positions are taken on
+        the GLOBAL best lap — the reference the distance axis is scaled to — using the same
+        midpoint→trace projection as the split times, so the guide lines sit exactly where the
+        splits are measured and align with the curves. Respects the dist/time toggle:
+          * 'distance': x = (d_k / lap_total) × best_distance  (the s×best_distance axis)
+          * 'time':     x = elapsed-into-best-lap at d_k        (seconds)
+        Returns [] if there's no best lap (so the caller clears the lines)."""
+        # No sector lines placed → no guide lines (the chart x-origin already marks the lap
+        # start; a lone S/F line would be redundant). "Reset sectors" therefore clears them.
+        if not self.laps.sectors.sector_lines:
+            return []
+        best = self.best_lap_id()
+        if best is None:
+            return []
+        td = self._lap_time_dist(best)
+        if td is None:
+            return []
+        times, dists = td
+        total = float(dists[-1])
+        if total <= 0:
+            return []
+        bounds = self.sector_boundary_distances(best)
+        # Start/finish first, then the sector lines in track order.
+        positions: list[tuple[str, float]] = []
+        labels = ["S/F"] + [f"S{i + 1}" for i in range(len(bounds))]
+        edge_dists = [0.0, *bounds]
+        if mode == "time":
+            t0 = float(times[0])
+            for label, d in zip(labels, edge_dists, strict=True):
+                t_at = float(np.interp(d, dists, times)) - t0  # elapsed into the best lap
+                positions.append((label, t_at))
+        else:  # 'distance' — the shared s×best_distance axis (here best_distance == total)
+            for label, d in zip(labels, edge_dists, strict=True):
+                positions.append((label, d))
+        return positions
+
     def _lap_time_dist(self, lap_id: int):
         """Cached (times, dists) for a lap: media-clock seconds + per-lap odometer (metres),
         both monotonic and aligned. The single source the cursor↔video conversions interpolate
@@ -878,3 +942,39 @@ class Session:
         if len(self.tx) == 0:
             return None
         return int(np.argmin((self.tx - x) ** 2 + (self.ty - y) ** 2))
+
+    # ----------------------------------------------- map marker: lap-scoped nearest (F3)
+    # The red map marker is draggable; dragging seeks the video. Searching the WHOLE trace for
+    # the nearest point makes the marker JUMP to another lap wherever the laps overlap
+    # spatially. So constrain the search to the CURRENT lap's own trace — the same lap-scoped
+    # behaviour as the scrub cursor. Pure numpy on the lap's cached local-metre points; no pacer.
+    def _lap_xy_t(self, lap_id: int):
+        """Cached (xs, ys, times) for one lap in local metres + media-clock seconds. Reuses the
+        per-lap cache so the marker drag is a cheap O(n_lap) nearest-point lookup, not a rebuild."""
+        td = self._lap_time_dist(lap_id)  # ensures the lap is segmented/usable
+        if td is None:
+            return None
+        xs, ys, ts = self._lap_trace_xyt(lap_id)
+        if len(xs) < 1:
+            return None
+        return xs, ys, ts
+
+    def nearest_index_in_lap(self, lap_id: int, x: float, y: float) -> int | None:
+        """Index (into `lap_id`'s OWN point array) of the trace point nearest (x, y), searching
+        ONLY within that lap. Returns None if the lap is degenerate. Pure numpy — used to keep
+        the dragged map marker on the current lap instead of snapping across spatial overlaps."""
+        got = self._lap_xy_t(lap_id)
+        if got is None:
+            return None
+        xs, ys, _ = got
+        return int(np.argmin((xs - x) ** 2 + (ys - y) ** 2))
+
+    def nearest_time_in_lap(self, lap_id: int, x: float, y: float) -> float | None:
+        """Media-clock time (s) of the point within `lap_id` nearest (x, y), CLAMPED to the lap's
+        [start, end] window. The map marker uses this so a drag scrubs smoothly inside the one
+        lap and never jumps to another lap. None if the lap is degenerate."""
+        i = self.nearest_index_in_lap(lap_id, x, y)
+        if i is None:
+            return None
+        _, _, ts = self._lap_xy_t(lap_id)
+        return float(min(max(ts[i], ts[0]), ts[-1]))
