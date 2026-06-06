@@ -12,6 +12,10 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from .session import fmt_time
 
+# Antialiased path rendering is a major per-repaint cost; the cursor's InfiniteLine.setValue
+# re-renders every visible curve each ~30 Hz tick, so keep it OFF for smooth playback.
+pg.setConfigOptions(antialias=False)
+
 PALETTE = ["#39a0ed", "#ef476f", "#ffd166", "#06d6a0", "#b388eb", "#ff924c", "#118ab2"]
 CURSOR_PEN = pg.mkPen("#ffffff", width=1, style=Qt.DashLine)
 
@@ -55,6 +59,10 @@ class PlotsView(QWidget):
             plot.removeItem(curve)
         self._curves = []
 
+        # Re-enable autorange so the new selection's curves are fit before we freeze it again.
+        self.p_speed.enableAutoRange()
+        self.p_delta.enableAutoRange()
+
         result = self.session.delta(self._lap_ids)
         if not result:
             self.p_speed.setTitle(None)
@@ -70,11 +78,26 @@ class PlotsView(QWidget):
             if lid in speed:
                 dist, spd = speed[lid]
                 c = self.p_speed.plot(dist, spd, pen=pen, name=name)
+                # Distance x-axis is monotonic, so downsampling + clip-to-view is valid and
+                # cuts the segments re-rendered on every cursor tick to roughly the visible set.
+                c.setDownsampling(auto=True)
+                c.setClipToView(True)
                 self._curves.append((self.p_speed, c))
             if lid in delta:
                 dd, dl = delta[lid]
                 c = self.p_delta.plot(dd, dl, pen=pen)
+                c.setDownsampling(auto=True)
+                c.setClipToView(True)
                 self._curves.append((self.p_delta, c))
+
+        # Fit each plot to its data once, then freeze autorange: cursor moves (InfiniteLine
+        # setValue every tick) must not trigger a range recompute. x is linked, so fitting both
+        # axes here covers the shared x range and each plot's own y range. Pan/zoom still works.
+        self.glw.scene().update()
+        self.p_speed.autoRange()
+        self.p_delta.autoRange()
+        self.p_speed.disableAutoRange()
+        self.p_delta.disableAutoRange()
 
     def set_cursor_time(self, t: float):
         dist = None

@@ -195,6 +195,9 @@ class Session:
         self.cs = cs
         self.video_path = video_path
         self._lap_cache: dict[int, object] = {}
+        # Per-lap (times, dists) arrays for distance_in_lap_at_time — rebuilding these from the
+        # bound lap object every ~30 Hz cursor tick is wasteful; cache and clear on re-segment.
+        self._dist_cache: dict[int, tuple] = {}
 
         # Full-trace arrays in local meters + the video-clock time + speed (km/h).
         n = laps.point_count()
@@ -289,6 +292,7 @@ class Session:
         )
         self.laps.update()
         self._lap_cache.clear()
+        self._dist_cache.clear()
 
     def suggest_sector(self) -> Seg:
         """A short line perpendicular to the trace at ~1/4 of the way round."""
@@ -358,14 +362,19 @@ class Session:
         return (t0, t0 + self.laps.lap_time(lap_id))
 
     def distance_in_lap_at_time(self, lap_id: int, t: float) -> float | None:
-        lap = self._get_lap(lap_id)
-        n = lap.count()
-        cds = lap.cum_distances
-        m = min(n, len(cds))
-        if m < 2:
-            return None
-        times = np.array([lap.points[i].time for i in range(m)])
-        dists = np.array([cds[i] for i in range(m)])
+        td = self._dist_cache.get(lap_id)
+        if td is None:
+            lap = self._get_lap(lap_id)
+            n = lap.count()
+            cds = lap.cum_distances
+            m = min(n, len(cds))
+            if m < 2:
+                return None
+            times = np.array([lap.points[i].time for i in range(m)])
+            dists = np.array([cds[i] for i in range(m)])
+            td = (times, dists)
+            self._dist_cache[lap_id] = td
+        times, dists = td
         return float(np.interp(t, times, dists))
 
     # -------------------------------------------------------- plot series glue
