@@ -11,6 +11,13 @@ class GPSSample:
     full_speed: float
     ground_speed: float
     timestamp_ms: int
+    # GPS9 quality fields (GoPro): dilution-of-precision and fix type (0=none, 2=2D, 3=3D).
+    # Sources without these (the legacy GPS5 stream) leave the sentinels below, which downstream
+    # treats as "quality unknown -> keep". DOP is always positive in real fixes, so a negative
+    # sentinel is unambiguous (and -- unlike NaN -- renders as a plain literal in the generated
+    # python stub). Defaulted so existing aggregate inits stay valid.
+    dop: float = -1.0
+    fix: int = -1
     def __init__(
         self,
         lat: float = float(),
@@ -19,6 +26,8 @@ class GPSSample:
         full_speed: float = float(),
         ground_speed: float = float(),
         timestamp_ms: int = int(),
+        dop: float = -1.0,
+        fix: int = -1,
     ) -> None:
         """Auto-generated default constructor with named params"""
         pass
