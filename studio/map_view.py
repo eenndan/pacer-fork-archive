@@ -12,12 +12,12 @@ import pyqtgraph as pg
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
-from .plots_view import PALETTE
 from .session import Seg
 
 START_COLOR = "#ffd166"
 SECTOR_COLOR = "#06d6a0"
-TRACE_COLOR = "#8a8f98"
+BEST_COLOR = "#5a6068"  # faint reference line for the best lap
+CURRENT_COLOR = "#39a0ed"  # highlighted current-lap trace
 MARKER_COLOR = "#ff5252"
 
 
@@ -67,12 +67,12 @@ class MapView(QWidget):
         self.plot.showGrid(x=True, y=True, alpha=0.2)
         self.plot.setLabel("bottom", "x (m)")
         self.plot.setLabel("left", "y (m)")
-        trace = self.plot.plot(session.tx, session.ty, pen=pg.mkPen(TRACE_COLOR, width=1))
-        # The full trace is ~16k points; downsample + clip-to-view so per-tick marker moves
-        # don't re-render every point.
-        trace.setDownsampling(auto=True, method="peak")
-        trace.setClipToView(True)
-        self._overlays: list = []  # highlighted selected-lap traces
+        # The full ~16k-point trace is no longer drawn (jagged + slow). Instead we draw at most
+        # the best lap (faint reference) and the current lap (highlighted) — a few hundred points.
+        self._best_overlay = None  # faint best-lap reference line
+        self._best_lap_id: int | None = None
+        self._current_overlay = None  # highlighted current-lap trace
+        self._current_lap_id: int | None = None
 
         # Freeze the view to the track bbox so marker moves never trigger autorange / a full
         # re-render. The user's pan/zoom still works; the track stays fully visible on load.
@@ -97,6 +97,7 @@ class MapView(QWidget):
         self._start: _TimingLine | None = None
         self._sectors: list[_TimingLine] = []
         self._rebuild(session.start_line, session.sector_lines)
+        self._refresh_best()
 
         add_btn = QPushButton("Add sector")
         reset_btn = QPushButton("Reset sectors")
@@ -155,12 +156,34 @@ class MapView(QWidget):
         self.marker.setPos(pg.Point(float(self.session.tx[i]), float(self.session.ty[i])))
         self._suppress_marker = False
 
-    def highlight_laps(self, lap_ids):
-        """Overlay the selected laps' traces in their plot colours (matches PlotsView)."""
-        for curve in self._overlays:
-            self.plot.removeItem(curve)
-        self._overlays = []
-        for k, lid in enumerate(lap_ids):
-            xs, ys = self.session.lap_trace_xy(lid)
-            curve = self.plot.plot(xs, ys, pen=pg.mkPen(PALETTE[k % len(PALETTE)], width=3))
-            self._overlays.append(curve)
+    # --------------------------------------------------------------- lap overlays
+    def _refresh_best(self):
+        """Draw the best lap as a faint thin reference line. Re-draws only when the best
+        lap id actually changes (e.g. after the timing lines move)."""
+        best = self.session.best_lap_id()
+        if best == self._best_lap_id and self._best_overlay is not None:
+            return
+        if self._best_overlay is not None:
+            self.plot.removeItem(self._best_overlay)
+            self._best_overlay = None
+        self._best_lap_id = best
+        if best is None:
+            return
+        xs, ys = self.session.lap_trace_xy(best)
+        self._best_overlay = self.plot.plot(xs, ys, pen=pg.mkPen(BEST_COLOR, width=1))
+
+    def set_current_lap(self, lap_id):
+        """Highlight the lap the video is currently in. No-op if it hasn't changed; a None
+        id clears the highlight so only the faint best-lap reference remains."""
+        # The best lap can change when timing lines move; keep its reference line current.
+        self._refresh_best()
+        if lap_id == self._current_lap_id:
+            return
+        self._current_lap_id = lap_id
+        if self._current_overlay is not None:
+            self.plot.removeItem(self._current_overlay)
+            self._current_overlay = None
+        if lap_id is None:
+            return
+        xs, ys = self.session.lap_trace_xy(lap_id)
+        self._current_overlay = self.plot.plot(xs, ys, pen=pg.mkPen(CURRENT_COLOR, width=3))

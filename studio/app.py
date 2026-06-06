@@ -83,8 +83,9 @@ class StudioWindow(QMainWindow):
         self._on_laps_selected(ids, seek=True)
 
     def _on_laps_selected(self, ids, seek=False):
+        # The table multi-selection drives the PLOTS only; the map's current-lap overlay
+        # follows the video position (and thus selection, since F1 seeks into the lap).
         self.plots.set_laps(ids)
-        self.map.highlight_laps(ids)
         # F1 seeks ONLY on user selection — not on programmatic re-select from
         # _select_default()/_on_lines(), or dragging a timing line would yank the video.
         if seek and ids:
@@ -106,6 +107,7 @@ class StudioWindow(QMainWindow):
 
         lap_id = self.session.lap_at_time(t)  # F3: which lap is on the video
         self.table.set_current_lap(lap_id)
+        self.map.set_current_lap(lap_id)  # highlight the current lap's trace on the map
         sp = self.session.speed_at_time(t)  # F2: time / speed / lap readout
         speed = f"{sp:.1f}" if sp is not None else "-"
         lap = lap_id if lap_id is not None else "-"
