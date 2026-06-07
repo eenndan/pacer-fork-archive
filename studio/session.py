@@ -1078,11 +1078,20 @@ class Session:
         return min(max(i, 0), n - 1)
 
     def lap_at_time(self, t: float) -> int | None:
-        """The valid lap whose [start_timestamp, start_timestamp+lap_time] window contains
-        `t` (media-clock seconds), else None — for the readout + current-lap highlight."""
+        """The valid lap whose [start_timestamp, start_timestamp+lap_time) window contains
+        `t` (media-clock seconds), else None — for the readout + current-lap highlight.
+
+        The upper bound is HALF-OPEN (`t < end`) on purpose: consecutive laps are contiguous
+        (lap N's finish timestamp == lap N+1's start), so an inclusive upper bound made a `t`
+        exactly on a lap's START resolve to the PREVIOUS lap (whose window also ends there).
+        That is precisely the time produced by selecting a lap — `start_timestamp(lap)` — so the
+        select→seek→auto-follow chain would jump the highlight/charts back one lap. Half-open ties
+        the shared boundary to the lap that STARTS at `t` (the one the user actually picked). The
+        sole side-effect — the exact finish instant of the LAST lap resolving to None — is a
+        harmless between-laps moment that auto-follow simply HOLDS through."""
         for lap_id in self.valid_lap_ids():
             t0 = self.laps.start_timestamp(lap_id)
-            if t0 <= t <= t0 + self.laps.lap_time(lap_id):
+            if t0 <= t < t0 + self.laps.lap_time(lap_id):
                 return lap_id
         return None
 

@@ -29,6 +29,11 @@ from .plots_view import PlotsView
 from .session import DEFAULT_SAMPLE, Session, fmt_time
 from .video_view import VideoView
 
+# When a lap is selected we seek a few ms INTO it rather than onto its exact start, so the
+# whole-ms seek quantization can't land the playback position just before the (contiguous) lap
+# boundary and resolve to the previous lap. Far smaller than a frame; invisible in a ~70 s lap.
+_LAP_SEEK_NUDGE_S = 0.010
+
 
 class StudioWindow(QMainWindow):
     def __init__(self, paths: list[str], interpolate: bool = False, full: bool = False):
@@ -244,7 +249,15 @@ class StudioWindow(QMainWindow):
         # F1 seeks ONLY on user selection — not on programmatic re-select from
         # _select_default()/_on_lines(), or dragging a timing line would yank the video.
         if seek and ids:
-            target = self.session.laps.start_timestamp(min(ids))
+            # Seek a hair INTO the selected lap, not onto its exact start. Laps are contiguous
+            # (lap N's finish == lap N+1's start) and the player quantizes the seek to whole ms
+            # (setPosition takes int(seconds*1000)), so a seek to the exact boundary lands a few
+            # tenths of a ms BELOW it — which then resolves to the PREVIOUS lap and makes the
+            # ▶ marker / map / auto-follow jump back one lap (the reported "clicking a lap selects
+            # a different lap" bug). Nudging by _LAP_SEEK_NUDGE_S (a few ms, imperceptible in a
+            # ~70 s lap) guarantees the ms-quantized playback position lands INSIDE the lap, so
+            # lap_at_time(position) == the lap the user clicked.
+            target = self.session.laps.start_timestamp(min(ids)) + _LAP_SEEK_NUDGE_S
             self.video.seek(target)
             # Don't let the auto-follow collapse a just-made (possibly multi-lap) comparison the
             # instant the seek's positionChanged lands: seed _followed_lap to the lap the seek
