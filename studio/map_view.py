@@ -21,7 +21,7 @@ from .theme import C
 # is the bright amber accent so the racing line pops. Timing lines + marker use distinct tokens.
 START_COLOR = C.accent              # start/finish line — accent so it's the clear anchor
 SECTOR_COLOR = C.text_dim           # sector lines — visible but quieter than the start line
-BEST_COLOR = C.border_strong        # faint reference line for the best lap (quiet backdrop)
+BEST_COLOR = C.text_muted           # quiet reference line for the best lap (legible, not loud)
 CURRENT_COLOR = C.accent            # highlighted current-lap trace (the racing line — pops)
 MARKER_COLOR = C.behind             # video position marker — warm coral, reads on the trace
 _MARKER_RGB = QColor(C.behind)      # for the translucent marker brush below
