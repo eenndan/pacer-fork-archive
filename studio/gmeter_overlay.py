@@ -1,7 +1,16 @@
 """GMeterOverlay: the classic friction-circle g-meter, painted ON the video.
 
-A transparent child widget of the QVideoWidget, drawn in a corner with a semi-transparent
-backdrop so it stays readable over footage. The template is the classic g-g diagram:
+A frameless, translucent, always-on-top top-level window positioned over the QVideoWidget's
+bottom-right corner, drawn with a semi-transparent backdrop so it stays readable over footage.
+
+Why a top-level window and not a plain child widget: on macOS a QVideoWidget renders through a
+NATIVE surface (its own QWindow) that the window-server composites independently of Qt's z-order
+for ordinary ("alien", non-native) child widgets. A child overlay therefore lands in the parent's
+backing store and is painted OVER by the native video layer — invisible on screen even though it
+exists in the widget tree (which is exactly why an offscreen `widget.grab()` of the Qt tree still
+showed it). Giving the overlay its own native top-level window makes the window-server composite
+it as a separate layer ABOVE the video surface, so it shows over live footage. The VideoView keeps
+it pinned to the video's corner on move/resize/show. The template is the classic g-g diagram:
 
   * concentric rings labelled 0.5 / 1.0 / 1.5 g,
   * a crosshair: horizontal axis = LATERAL g (left/right), vertical axis = LONGITUDINAL g
@@ -47,11 +56,17 @@ def _font(pt: float, bold: bool = False) -> QFont:
 
 class GMeterOverlay(QWidget):
     def __init__(self, parent: QWidget | None = None):
-        super().__init__(parent)
-        # Transparent, click-through child painted on top of the video.
+        # A frameless, translucent, always-on-top TOOL window — its own native layer so the
+        # window-server composites it ABOVE the QVideoWidget's native video surface (a plain
+        # child widget would be hidden behind that surface on macOS). `parent` is kept only for
+        # ownership/lifetime; the window is positioned in GLOBAL screen coords by the VideoView.
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+                         | Qt.WindowDoesNotAcceptFocus | Qt.NoDropShadowWindowHint)
+        # Transparent, click-through window painted on top of the video.
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setMinimumSize(180, 210)
         self._lat = 0.0
         self._long = 0.0
