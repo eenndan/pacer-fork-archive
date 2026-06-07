@@ -29,6 +29,11 @@ from .plots_view import PlotsView
 from .session import DEFAULT_SAMPLE, Session, fmt_time
 from .video_view import VideoView
 
+# When a lap is selected we seek a few ms INTO it rather than onto its exact start, so the
+# whole-ms seek quantization can't land the playback position just before the (contiguous) lap
+# boundary and resolve to the previous lap. Far smaller than a frame; invisible in a ~70 s lap.
+_LAP_SEEK_NUDGE_S = 0.010
+
 
 class StudioWindow(QMainWindow):
     def __init__(self, paths: list[str], interpolate: bool = False, full: bool = False):
@@ -70,6 +75,13 @@ class StudioWindow(QMainWindow):
         # The VideoView is driven by the session's ChapterMap so the slider spans the whole
         # session and playback switches sources / auto-advances across chapters.
         self.video = VideoView(self.session.chapters or self.session.video_path)
+        # g-meter overlay: label its source (accl/gps) and only offer the toggle when a g signal
+        # was actually computed (IMU present). The overlay itself is pacer-free — g comes from
+        # session via self.video.set_g at the tick.
+        self.video.set_gmeter_source(self.session.gmeter_source())
+        self.video.gmeter_btn.setEnabled(self.session.has_gmeter)
+        if not self.session.has_gmeter:
+            self.video.gmeter_btn.setToolTip("No accelerometer data in this recording")
         self.map = MapView(self.session)
         self.plots = PlotsView(self.session)
         self.table = LapTable(self.session)
@@ -237,7 +249,15 @@ class StudioWindow(QMainWindow):
         # F1 seeks ONLY on user selection — not on programmatic re-select from
         # _select_default()/_on_lines(), or dragging a timing line would yank the video.
         if seek and ids:
-            target = self.session.laps.start_timestamp(min(ids))
+            # Seek a hair INTO the selected lap, not onto its exact start. Laps are contiguous
+            # (lap N's finish == lap N+1's start) and the player quantizes the seek to whole ms
+            # (setPosition takes int(seconds*1000)), so a seek to the exact boundary lands a few
+            # tenths of a ms BELOW it — which then resolves to the PREVIOUS lap and makes the
+            # ▶ marker / map / auto-follow jump back one lap (the reported "clicking a lap selects
+            # a different lap" bug). Nudging by _LAP_SEEK_NUDGE_S (a few ms, imperceptible in a
+            # ~70 s lap) guarantees the ms-quantized playback position lands INSIDE the lap, so
+            # lap_at_time(position) == the lap the user clicked.
+            target = self.session.laps.start_timestamp(min(ids)) + _LAP_SEEK_NUDGE_S
             self.video.seek(target)
             # Don't let the auto-follow collapse a just-made (possibly multi-lap) comparison the
             # instant the seek's positionChanged lands: seed _followed_lap to the lap the seek
@@ -280,6 +300,11 @@ class StudioWindow(QMainWindow):
         lap = lap_id if lap_id is not None else "-"
         self.video.set_readout(f"t = {fmt_time(t)}   speed = {speed} km/h   lap {lap}")
         self._update_diff_box(t, sp)
+        # g-meter overlay: feed the vehicle-frame g at the current media time (a cheap lookup) and
+        # the current lap (so the max-G envelope resets at the lap boundary, showing THIS lap's
+        # grip). A no-op when the overlay is hidden; None outside a usable region blanks the dot.
+        self.video.set_gmeter_lap(lap_id)
+        self.video.set_g(self.session.g_at_time(t))
 
     def _follow_current_lap(self, lap_id: int | None, t: float):
         """Auto-follow the playhead's lap on the speed + delta charts (current lap vs best).

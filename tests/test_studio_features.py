@@ -159,6 +159,66 @@ def test_dropout_detection_interior_gap_over_threshold():
     print("test_dropout_detection_interior_gap_over_threshold OK")
 
 
+# ------------------------------------------------- lap_at_time boundary (bug: lap-click jump)
+class _FakeLaps:
+    """Minimal stand-in for the pacer laps object exposing the two methods lap_at_time needs.
+    `starts` are the per-lap start timestamps; laps are CONTIGUOUS (each lap ends exactly where
+    the next begins) — the arrangement that exposed the inclusive-boundary jump."""
+
+    def __init__(self, starts, end):
+        self._starts = starts
+        self._end = end  # finish timestamp of the last lap
+
+    def start_timestamp(self, lid):
+        return self._starts[lid]
+
+    def lap_time(self, lid):
+        nxt = self._starts[lid + 1] if lid + 1 < len(self._starts) else self._end
+        return nxt - self._starts[lid]
+
+
+def _bare_session_for_lap_at_time(starts, end, valid):
+    s = Session.__new__(Session)
+    s.laps = _FakeLaps(starts, end)
+    s.valid_lap_ids = lambda: list(valid)
+    return s
+
+
+def test_lap_at_time_boundary_resolves_to_starting_lap():
+    """A `t` exactly on a (contiguous) lap boundary must resolve to the lap that STARTS there,
+    not the one that ends there. This is the time `start_timestamp(lap)` produced when a lap is
+    selected, so an inclusive upper bound jumped the highlight/charts back one lap. The window is
+    half-open `[start, end)` so each lap's exact start belongs to THAT lap."""
+    starts = [10.0, 80.0, 150.0, 220.0]  # 4 contiguous laps, each 70 s
+    s = _bare_session_for_lap_at_time(starts, end=290.0, valid=[0, 1, 2, 3])
+    # Every lap's exact start resolves to itself — no off-by-one jump.
+    for lid, st in enumerate(starts):
+        assert s.lap_at_time(st) == lid, (lid, st, s.lap_at_time(st))
+    # Interior points still resolve normally.
+    assert s.lap_at_time(45.0) == 0
+    assert s.lap_at_time(115.0) == 1
+    # Just below a boundary stays in the previous lap (the half-open lower edge of the next lap).
+    assert s.lap_at_time(80.0 - 1e-6) == 0
+    # The exact finish of the LAST lap falls outside (a between-laps None that follow HOLDS).
+    assert s.lap_at_time(290.0) is None
+    # Before the first lap / after the session → None.
+    assert s.lap_at_time(0.0) is None and s.lap_at_time(1000.0) is None
+    print("test_lap_at_time_boundary_resolves_to_starting_lap OK")
+
+
+def test_lap_at_time_skips_invalid_lap_gap():
+    """When an invalid lap sits between two valid laps, the invalid lap's time span resolves to
+    None (not silently to a neighbour) — the half-open fix must not bridge that gap."""
+    starts = [10.0, 80.0, 150.0, 220.0]
+    # Lap 1 is INVALID (excluded) → its [80,150) span must be None, not lap 0 or lap 2.
+    s = _bare_session_for_lap_at_time(starts, end=290.0, valid=[0, 2, 3])
+    assert s.lap_at_time(100.0) is None       # inside the invalid lap → None
+    assert s.lap_at_time(80.0) is None        # invalid lap's start → None
+    assert s.lap_at_time(150.0) == 2          # valid lap 2's start resolves to 2
+    assert s.lap_at_time(45.0) == 0
+    print("test_lap_at_time_skips_invalid_lap_gap OK")
+
+
 # ----------------------------------------------------------- auto-follow (lap-change edge)
 class _Recorder:
     """A tiny stand-in for the table / plots / video collaborators, recording the calls the
@@ -208,6 +268,45 @@ def _follow_window(best_lap):
 
     w.session = _Sess()
     return w, rec
+
+
+def test_select_lap_seeks_into_lap_despite_ms_quantization():
+    """Selecting a lap must seek a hair INTO it so the player's whole-ms seek quantization can't
+    land just before the (contiguous) boundary and resolve to the previous lap. Asserts the
+    seeded `_followed_lap` and the lap resolved from the QUANTIZED seek position both equal the
+    clicked lap — the fix for 'clicking a lap selects a different lap'."""
+    from studio.app import StudioWindow
+
+    starts = [10.0, 80.000005, 150.000166, 220.000714]  # contiguous; non-ms-aligned boundaries
+    sess = _bare_session_for_lap_at_time(starts, end=290.0, valid=[0, 1, 2, 3])
+    sess.best_lap_id = lambda: 0
+
+    w = StudioWindow.__new__(StudioWindow)
+    w.session = sess
+    rec = _Recorder()
+    w.table = rec
+    w.plots = rec
+
+    class _Vid:
+        def __init__(self):
+            self.pos = None
+
+        def seek(self, t):
+            # mimic QMediaPlayer.setPosition(int(seconds*1000)) — truncate to whole ms
+            self.pos = int(t * 1000) / 1000.0
+
+    vid = _Vid()
+    w.video = vid
+
+    for lid in (1, 2, 3):
+        w._followed_lap = None
+        w._on_laps_selected([lid], seek=True)
+        # The seeded follow lap is the clicked lap (not the previous one).
+        assert w._followed_lap == lid, (lid, w._followed_lap)
+        # And the lap resolved from the ACTUAL (ms-quantized) seek position is also the clicked
+        # lap — i.e. when the post-seek tick runs lap_at_time(position) it won't jump back.
+        assert sess.lap_at_time(vid.pos) == lid, (lid, vid.pos, sess.lap_at_time(vid.pos))
+    print("test_select_lap_seeks_into_lap_despite_ms_quantization OK")
 
 
 def test_follow_switches_only_on_lap_edge():
@@ -267,8 +366,11 @@ if __name__ == "__main__":
     test_numeric_sort_key_blanks_sort_last()
     test_best_split_per_sector_is_column_min()
     test_dropout_detection_interior_gap_over_threshold()
+    test_lap_at_time_boundary_resolves_to_starting_lap()
+    test_lap_at_time_skips_invalid_lap_gap()
     test_nearest_index_in_lap_stays_in_lap()
     test_nearest_time_in_lap_clamps_to_window()
+    test_select_lap_seeks_into_lap_despite_ms_quantization()
     test_follow_switches_only_on_lap_edge()
     test_follow_holds_last_lap_on_none_region()
     test_follow_current_is_best_shows_single_lap()

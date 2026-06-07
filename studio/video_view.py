@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -39,6 +39,15 @@ from PySide6.QtWidgets import (
 )
 
 from . import chapters
+from .gmeter_overlay import GMeterOverlay
+
+# The g-meter overlay sits in the TOP-RIGHT corner of the video, sized as a FRACTION of the
+# video widget (not a fixed size) so it scales with the window and never dominates the frame.
+_OVERLAY_FRAC = 0.22        # target width = this fraction of the video width
+_OVERLAY_ASPECT = 1.12      # height / width (a touch taller than wide: title + dial + numbers)
+_OVERLAY_MIN_W = 120        # don't shrink below something legible
+_OVERLAY_MAX_W = 240        # don't grow huge on a very wide window
+_OVERLAY_PAD = 12           # px inset from the video corner
 
 
 class VideoView(QWidget):
@@ -66,6 +75,20 @@ class VideoView(QWidget):
         self._pending: tuple[int, float, bool] | None = None
 
         self.video = QVideoWidget()
+        # Classic friction-circle g-meter, drawn ON the video. It is a frameless translucent
+        # TOP-LEVEL window (not a plain child) so the window-server composites it ABOVE the
+        # QVideoWidget's native video surface — a child widget is painted behind that surface on
+        # macOS and never shows on screen. The VideoView pins it to the video's TOP-RIGHT corner
+        # in GLOBAL screen coords, sized as a fraction of the video, and keeps it there as the
+        # video moves/resizes. Driven by app.set_g at the ~30 Hz tick from session.g_at_time.
+        self.gmeter = GMeterOverlay(self)
+        self.gmeter.hide()  # off by default; the toggle reveals it
+        self._gmeter_on = False
+        # Keep the overlay window pinned to the video corner: the QVideoWidget's resize/move
+        # changes its on-screen rect, and dragging the whole app window moves it too. We watch
+        # the video widget (resize/move) here; VideoView's own move/resize are caught in our
+        # moveEvent/resizeEvent (a top-level overlay doesn't follow the parent automatically).
+        self.video.installEventFilter(self)
         self.player = QMediaPlayer()
         # F4: real audio output with a mute toggle. DEFAULT = muted (this is a telemetry tool —
         # avoid a surprise blast of 4K clip audio on launch). A reasonable volume is set so the
@@ -86,6 +109,13 @@ class VideoView(QWidget):
         self.mute_btn.setToolTip("Audio muted — click to unmute")
         self.mute_btn.clicked.connect(self.toggle_mute)
 
+        # g-meter show/hide toggle (the friction-circle overlay on the video).
+        self.gmeter_btn = QPushButton("G")
+        self.gmeter_btn.setCheckable(True)
+        self.gmeter_btn.setFixedWidth(36)
+        self.gmeter_btn.setToolTip("Show/hide the g-meter overlay")
+        self.gmeter_btn.toggled.connect(self.set_gmeter_visible)
+
         # The slider spans the WHOLE session (global ms 0..total). For a multi-chapter recording
         # its range is the summed duration; for a single file it's the file's own duration. The
         # value is always GLOBAL ms.
@@ -98,6 +128,7 @@ class VideoView(QWidget):
         row = QHBoxLayout()
         row.addWidget(self.play_btn)
         row.addWidget(self.mute_btn)
+        row.addWidget(self.gmeter_btn)
         row.addWidget(self.slider, 1)
 
         self.readout = QLabel("")  # F2: time / speed / current lap, driven by app
@@ -155,6 +186,104 @@ class VideoView(QWidget):
         self.mute_btn.setText("🔇" if muted else "🔊")
         self.mute_btn.setToolTip("Audio muted — click to unmute" if muted
                                  else "Audio on — click to mute")
+
+    # ------------------------------------------------------------- g-meter overlay
+    def set_gmeter_visible(self, on: bool):
+        """Show/hide the friction-circle g-meter overlay (the toggle button)."""
+        self._gmeter_on = bool(on)
+        if self._gmeter_on:
+            self._position_gmeter()
+            self.gmeter.show()
+            self.gmeter.raise_()
+        else:
+            self.gmeter.hide()
+        if self.gmeter_btn.isChecked() != self._gmeter_on:
+            self.gmeter_btn.setChecked(self._gmeter_on)
+
+    def _sync_gmeter(self):
+        """Re-pin the overlay window to the video corner if it's on (cheap; called on any geometry
+        change of the video widget or this view)."""
+        if self._gmeter_on:
+            self._position_gmeter()
+            self.gmeter.raise_()
+
+    def set_g(self, g):
+        """Feed the current (lateral_g, longitudinal_g, total_g) to the overlay (None blanks the
+        live dot). A no-op repaint cost when the overlay is hidden, so the app can call it every
+        tick unconditionally. Also keeps the overlay window pinned to the video corner: a top-level
+        window does NOT follow the parent when the WHOLE app window is dragged (no child moveEvent),
+        so re-pin from this existing ~30 Hz tick (cheap — _position_gmeter only moves it if the
+        corner actually changed)."""
+        if self._gmeter_on:
+            self._position_gmeter()
+            self.gmeter.set_g(g)
+
+    def set_gmeter_source(self, source: str):
+        self.gmeter.set_source(source)
+
+    def set_gmeter_lap(self, lap_id):
+        """Tell the overlay which lap is being driven so its max-G envelope resets at the lap
+        boundary (per-lap grip-usage scope). A no-op repaint cost when the overlay is hidden."""
+        self.gmeter.set_lap(lap_id)
+
+    def _position_gmeter(self):
+        """Pin the overlay window to the video's TOP-RIGHT corner, in GLOBAL screen coords (the
+        overlay is a top-level window, so it does NOT inherit the video's coordinate space), sized
+        as a FRACTION of the video so it scales on resize. Called on show and whenever the video
+        widget or this view moves/resizes."""
+        vw, vh = self.video.width(), self.video.height()
+        # Width = a fraction of the video, clamped to a sensible legible range; height follows the
+        # overlay's aspect. Cap both to the available video area so it never overflows a tiny video.
+        w = int(min(max(vw * _OVERLAY_FRAC, _OVERLAY_MIN_W), _OVERLAY_MAX_W,
+                    max(vw - 2 * _OVERLAY_PAD, 1)))
+        h = int(min(w * _OVERLAY_ASPECT, max(vh - 2 * _OVERLAY_PAD, 1)))
+        # Top-right corner of the video widget, mapped to the screen.
+        corner = self.video.mapToGlobal(QPoint(vw - w - _OVERLAY_PAD, _OVERLAY_PAD))
+        rect = QRect(corner.x(), corner.y(), w, h)
+        # Only move it if the target actually changed — _position_gmeter runs on the 30 Hz tick, so
+        # an unconditional setGeometry every frame would needlessly churn (and can flicker).
+        if self.gmeter.geometry() != rect:
+            self.gmeter.setGeometry(rect)
+
+    def eventFilter(self, obj, event):
+        # Keep the g-meter overlay window pinned to the QVideoWidget's corner as the video moves
+        # or resizes (the layout/splitters resize it; the native surface can also emit Move).
+        if obj is self.video and event.type() in (QEvent.Resize, QEvent.Move):
+            self._sync_gmeter()
+        return super().eventFilter(obj, event)
+
+    # Re-pin the overlay window when this view itself moves/resizes (e.g. the user drags the main
+    # window or moves a splitter) — a top-level overlay doesn't track its parent automatically.
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._sync_gmeter()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_gmeter()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Re-show + re-pin the overlay if it's meant to be on (it was hidden in hideEvent while the
+        # view was hidden); a bare _sync_gmeter would reposition but not bring it back.
+        if self._gmeter_on:
+            self._position_gmeter()
+            self.gmeter.show()
+            self.gmeter.raise_()
+
+    def hideEvent(self, event):
+        # When the video view is hidden (e.g. window minimised / reload teardown) hide the overlay
+        # window too, so a detached top-level can't linger on screen. _gmeter_on is left ON so
+        # showEvent brings it back.
+        super().hideEvent(event)
+        if self._gmeter_on:
+            self.gmeter.hide()
+
+    def closeEvent(self, event):
+        # Ensure the top-level overlay window is destroyed with the view (it has no parent window
+        # to close it). Belt-and-braces for the reload teardown.
+        self.gmeter.close()
+        super().closeEvent(event)
 
     def is_playing(self) -> bool:
         return self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
