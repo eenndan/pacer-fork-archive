@@ -45,8 +45,9 @@ class C:
     accent = "#F5A623"
     accent_hover = "#FFB838"
     accent_press = "#D98E12"
-    accent_tint = "rgba(245,166,35,0.16)"   # selection bg / fills
+    accent_tint = "rgba(245,166,35,0.16)"   # menu/combo selection bg / fills
     on_accent = "#15181E"                   # text/icon ON an amber fill
+    sel_bg = "#3A3326"                       # subtle warm-amber selected table row (solid)
 
     # --- semantics ---
     ahead = "#5DD6A0"           # ahead / success / best lap green
@@ -200,8 +201,8 @@ def _palette() -> QPalette:
     p.setColor(QPalette.ColorRole.ButtonText, text)
     p.setColor(QPalette.ColorRole.Button, surface)
     p.setColor(QPalette.ColorRole.BrightText, QColor(C.behind))
-    p.setColor(QPalette.ColorRole.Highlight, QColor(C.accent))
-    p.setColor(QPalette.ColorRole.HighlightedText, QColor(C.on_accent))
+    p.setColor(QPalette.ColorRole.Highlight, QColor(C.sel_bg))
+    p.setColor(QPalette.ColorRole.HighlightedText, QColor(C.text))
     p.setColor(QPalette.ColorRole.ToolTipBase, QColor(C.surface_hover))
     p.setColor(QPalette.ColorRole.ToolTipText, text)
     p.setColor(QPalette.ColorRole.PlaceholderText, muted)
@@ -449,7 +450,7 @@ QTableView, QTableWidget {{
     alternate-background-color: {C.surface_alt};
     gridline-color: {C.border};
     color: {C.text};
-    selection-background-color: {C.accent_tint};
+    selection-background-color: {C.sel_bg};
     selection-color: {C.text};
     border: none;
     outline: none;
@@ -458,7 +459,7 @@ QTableView::item, QTableWidget::item {{
     padding: 4px 8px;
 }}
 QTableView::item:selected, QTableWidget::item:selected {{
-    background-color: {C.accent_tint};
+    background-color: {C.sel_bg};
     color: {C.text};
 }}
 QTableCornerButton::section {{
