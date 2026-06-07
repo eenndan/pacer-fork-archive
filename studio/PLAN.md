@@ -74,10 +74,10 @@ Captured here so the negative results aren't re-litigated. Evidence in [`docs/`]
   crossing**, and the 10 Hz crossing is already sub-sample-interpolated, so dead-reckoning / Kalman /
   EKF can't change the lap times. (The IMU *is* bound — but only for the g-meter display.)
   ([docs/gps-accuracy-research.md](docs/gps-accuracy-research.md))
-- **C++ Adam `interpolate_timestamps`** (the notebook's parametric `t2` fit) — **diverges** on
-  long/noisy sessions (compresses lap times; broke a lap to ~64 s on 0060). Kept opt-in (`--interp`,
-  auto-rejected) with GPS9 the default, since GPS9 carries the true per-fix clock and supersedes it.
-  ([docs/upstream-20ms-investigation.md](docs/upstream-20ms-investigation.md))
+- **C++ Adam timestamp interpolation** (the upstream notebook's parametric `t2` fit) — **diverges** on
+  long/noisy sessions (compresses lap times; broke a lap to ~64 s on 0060). **Removed** — GPS9 carries
+  the true per-fix clock and supersedes it; the C++ `pacer/interpolation` module, its bindings, and the
+  `--interp` plumbing are gone. ([docs/upstream-20ms-investigation.md](docs/upstream-20ms-investigation.md))
 - **Doppler-aided position smoothing** (Doppler-velocity-pseudo-measurement RTS) — an overfit: best
   on 0062, **worst** on 0060. Rejected on the same out-of-sample principle as the clock-rate factor.
   ([docs/gps-accuracy-research.md](docs/gps-accuracy-research.md))
@@ -94,9 +94,9 @@ Captured here so the negative results aren't re-litigated. Evidence in [`docs/`]
   collapses onto an inner sub-loop and covers only ~30% of the real track footprint. It only feeds
   the **rarely-used** gap-fill reference *fallback* (never timing/segmentation), so it's low-impact,
   but it should be re-fit. ([docs/start-line-verification.md](docs/start-line-verification.md) §2 caveat)
-- **Pre-existing ruff warnings** in a few `studio/*.py` (`UP037` quoted annotations in `tracks.py` /
-  `session.py`, a `B905` zip-without-`strict` and a `B023` loop-binding in `spike_video_sync.py`) —
-  cosmetic, unrelated to the analysis path.
+- **Pre-existing ruff warnings** in a few Python files (`UP037` quoted annotations in `tracks.py` /
+  `session.py`; `B905` zip-without-`strict` / `B023` loop-binding in `session.py` and the moved
+  `studio/dev/{diagnose,demo_sync,spike_video_sync}.py`) — cosmetic, unrelated to the analysis path.
 - **nanobind shutdown "leaked function" warnings** on the GPS/IMU read callbacks at exit — harmless,
   a codebase convention.
 - **G-meter longitudinal per-lap correlation is modest** (lateral r ≈ 0.90 / 96.5% sign agreement is
@@ -116,7 +116,7 @@ Captured here so the negative results aren't re-litigated. Evidence in [`docs/`]
 
 - **More tracks** in `tracks.py` (only Daytona MK today) + **real track auto-detection**.
 - **Persist sector / start-line config per file** (a sidecar JSON so edits survive reloads).
-- **Fix the MK reference centerline ICP** (re-run `build_reference.py`; tighten the infield).
+- **Fix the MK reference centerline ICP** (re-run `studio/dev/build_reference.py`; tighten the infield).
 - **Expose the `_clean` / quality-gate thresholds in the UI** (and an optional snap-to-track toggle).
 - **Tune the g-meter full-scale** and verify multi-chapter g-sync live.
 - **More pure-Python `session.py` tests** (`_clean`, `valid_lap_ids`, delta-endpoint == laptime-diff,

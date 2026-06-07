@@ -120,7 +120,7 @@ timestamp; only the `GPS9` branch computes a true per-fix `days-since-2000 + sec
 
 ## 2. Our notebook vs upstream (the fork diff) + how it entered our repo
 
-Our `notebooks/interpolation.ipynb` is the upstream one, reworked — confirmed by `git log`:
+Our `notebooks/interpolation.ipynb` (since removed) was the upstream one, reworked — confirmed by `git log`:
 the lineage is upstream `22c03f9 add interpolation using gradient descent` → our
 `c2eb048 run against a local GoPro clip` → `30f8ee8 fix all cells` → `43476f8 reasonable output`
 → `ed08ed6 reduce GPS measurement noise in the lap graphs`. Substantive changes ours made:
@@ -134,10 +134,11 @@ the lineage is upstream `22c03f9 add interpolation using gradient descent` → o
 
 The author's interpolation was also ported to C++ in our repo (`pacer/interpolation/`,
 commits `d34cbf0 / e2f7ce9 / bd2380e`) as `pacer::InterpolateTimestamps` (the **t2** parametric
-fit, analytic gradient, torch-parity tested) and exposed to Python as
-`pacer.interpolate_timestamps`. It is wired into `Session.load(..., interpolate=True)` behind the
-opt-in `--interp` flag and **validated → rejected back to naive** if the result is non-monotonic
-or runs past the video duration (`Session._interpolated_or_naive`).
+fit, analytic gradient, torch-parity tested) and exposed to Python as a timestamp-fit binding.
+At the time it was wired into `Session.load(..., interpolate=True)` behind an opt-in `--interp`
+flag and **validated → rejected back to naive** if the result was non-monotonic or ran past the
+video duration. **That entire path (module, binding, and `--interp` plumbing) has since been
+removed** — GPS9's true per-fix clock supersedes it; what follows is the evidence that led to that.
 
 ## 3. The crux: GPS5-era recovery vs our GPS9 true clock (verified)
 
@@ -162,9 +163,11 @@ GPS9 removes — it is not "20 ms of transponder error".)
 
 ## 4. Empirical test — the author's interpolation vs GPS9 vs the transponder, BOTH recordings
 
-Harness: `/tmp/claude/validate_interp.py` (reuses `studio._validate_wallclock`'s pure
-alignment helpers verbatim; the only change is `Session.load(interpolate=True)` vs the default).
+Harness (as run at the time): a `validate_interp.py` that reused `studio.dev._validate_wallclock`'s
+pure alignment helpers verbatim; the only change was `Session.load(interpolate=True)` vs the default.
 Transponder ground truth = the Daytona-24h CSV; alignment = the same duration-correlation lock.
+**NOTE:** the C++ Adam interpolation path (and `validate_interp.py`) have since been removed — this
+section is the historical record of why. The numbers below are unchanged.
 
 | recording | timing | align corr | clean n | mean | median | **std** | RMS | k_fit |
 |---|---|---|---:|---:|---:|---:|---:|---:|
@@ -198,7 +201,7 @@ own Python code. This section closes that gap: it runs the **notebook's literal 
 optimizers** and lines the notebook-generated lap times up against our GPS9 timing and the
 transponder, lap by lap, on **both** recordings.
 
-**Harness:** `studio/docs/gps_research_scripts/notebook_vs_gps9.py`. The `notebook_t1` (free
+**Harness:** `studio/dev/research/notebook_vs_gps9.py`. The `notebook_t1` (free
 per-sample Adam) and `notebook_t2` (parametric `{phase, frequency}` Adam) functions are copied
 **verbatim** from `notebooks/interpolation.ipynb` cells `4c1dba4b` and `31c96b74` — same loss
 (`spacing + [floor,ceil]` constraints), same `[1e-1,1e-2,1e-3]` LR schedule, fresh `torch.optim.Adam`
@@ -317,28 +320,32 @@ variant (not ported) is more stable than t2 on 0060 but still does not beat GPS9
 
 ## 7. Reproduce
 
+> Historical: the `interpolate=True` / `validate_interp.py` / `test_interpolation_parity.py` steps
+> below exercised the C++ Adam interpolation path, which has since been removed. They are kept to
+> document how the §4/§4b numbers were produced. The GPS9 baseline step still runs.
+
 ```bash
 # upstream sources (sandbox-allowed hosts)
 curl -sL https://raw.githubusercontent.com/dendi239/pacer/main/notebooks/interpolation.ipynb -o /tmp/claude/upstream_interpolation.ipynb
 python3 /tmp/claude/decode_figs.py /tmp/claude/upstream_interpolation.ipynb 11 12 13 15   # decode plotly typed-arrays
 
 # GPS9 baseline (shipping) — per recording
-pixi run python -m studio._validate_wallclock -- /path/GX010060.MP4 "<transponder.csv>" \
+pixi run python -m studio.dev._validate_wallclock -- /path/GX010060.MP4 "<transponder.csv>" \
     --race-start "2026-05-23 12:00:00Z" --dump /tmp/claude/baseline_0060.json
 
 # GPS9-vs-our-C++-port comparison (Session.load interpolate=True), same alignment, BOTH recordings
-PYTHONPATH=. pixi run python studio/docs/gps_research_scripts/validate_interp.py /path/GX010060.MP4 "<csv>" \
+PYTHONPATH=. pixi run python studio/dev/research/validate_interp.py /path/GX010060.MP4 "<csv>" \
     --race-start "2026-05-23 12:00:00Z" --dump /tmp/claude/interp_cmp_0060.json
-PYTHONPATH=. pixi run python studio/docs/gps_research_scripts/validate_interp.py /path/GX010062.MP4 "<csv>" \
+PYTHONPATH=. pixi run python studio/dev/research/validate_interp.py /path/GX010062.MP4 "<csv>" \
     --race-start "2026-05-23 12:00:00Z" --dump /tmp/claude/interp_cmp_0062.json
 
 # §4b — the NOTEBOOK's OWN t1/t2 PyTorch pipeline vs GPS9 vs transponder, segmentation held
 # constant (only the time axis varies). OMP_NUM_THREADS=1 avoids a torch OpenMP tmp stall.
 OMP_NUM_THREADS=1 PYTHONPATH=. pixi run python -u \
-    studio/docs/gps_research_scripts/notebook_vs_gps9.py /path/GX010060.MP4 "<csv>" \
+    studio/dev/research/notebook_vs_gps9.py /path/GX010060.MP4 "<csv>" \
     --race-start "2026-05-23 12:00:00Z" --dump /tmp/claude/notebook_vs_gps9_0060.json
 OMP_NUM_THREADS=1 PYTHONPATH=. pixi run python -u \
-    studio/docs/gps_research_scripts/notebook_vs_gps9.py /path/GX010062.MP4 "<csv>" \
+    studio/dev/research/notebook_vs_gps9.py /path/GX010062.MP4 "<csv>" \
     --race-start "2026-05-23 12:00:00Z" --dump /tmp/claude/notebook_vs_gps9_0062.json
 
 # faithfulness: C++ port == the notebook's t2 (max |Δt| ~3.6e-15 s)
@@ -348,11 +355,11 @@ pixi run python tests/test_interpolation_parity.py
 PYTHONPATH=. pixi run python -c "see §3"
 ```
 
-Scripts (committed under `studio/docs/gps_research_scripts/`): `validate_interp.py` (GPS9 vs our
-C++ port), **`notebook_vs_gps9.py`** (§4b — the notebook's own t1/t2 PyTorch optimizers vs GPS9 vs
-transponder, segmentation held constant). `decode_upstream_figs.py` decodes the upstream plotly
-base64 typed-arrays. The transponder CSV and all `/tmp` dumps are **inputs/scratch only — never
-committed.**
+Scripts (committed under `studio/dev/research/`): **`notebook_vs_gps9.py`** (§4b — the notebook's own
+t1/t2 PyTorch optimizers vs GPS9 vs transponder, segmentation held constant) and
+`decode_upstream_figs.py` (decodes the upstream plotly base64 typed-arrays). `validate_interp.py`
+(§4 — GPS9 vs our C++ port) was **removed** along with the interpolation path it tested. The
+transponder CSV and all `/tmp` dumps are **inputs/scratch only — never committed.**
 
 ## Sources
 - [Upstream notebook (raw)](https://raw.githubusercontent.com/dendi239/pacer/main/notebooks/interpolation.ipynb)

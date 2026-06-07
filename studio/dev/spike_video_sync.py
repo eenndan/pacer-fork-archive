@@ -34,7 +34,7 @@ VIDEO = sys.argv[1] if len(sys.argv) > 1 else "3rdparty/gpmf-parser/samples/hero
 
 
 def build_telemetry(path):
-    """Reproduce timeline.cpp's ingest: per-sample (time, speed) on the MP4 clock."""
+    """Reproduce the old C++ ingest: per-sample (time, speed) on the MP4 clock."""
     src = pacer.GPMFSource(path)
     total = src.get_total_duration()
     times, speeds = [], []

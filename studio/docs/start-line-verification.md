@@ -74,7 +74,7 @@ Method: load each recording once, then re-segment the **same** `pacer.Laps` with
 line and with the line shifted ±8/15/25 m **along** the straight (and a deliberately bad
 infield-pinch line), holding the GPS9 true-clock timing axis fixed. For each, re-run the
 wall-clock validator's duration-correlation lock + clean-racing residual vs the transponder CSV.
-(`studio/_validate_wallclock.py` for the baseline; sweep harness in the commit.)
+(`studio/dev/_validate_wallclock.py` for the baseline; sweep harness in the commit.)
 
 ### Baseline — current line
 
