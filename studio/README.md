@@ -3,7 +3,7 @@
 A local **PySide6 + pyqtgraph** desktop app for race-telemetry analysis — a greenfield UI
 on top of the existing C++ `pacer` core (reused via its nanobind Python bindings). Chosen
 for a single-language, LLM-editable codebase that still nails draggable map handles and
-frame-accurate video↔telemetry sync (all in Python — see [the spike](spike_video_sync.py)).
+frame-accurate video↔telemetry sync (all in Python — see [the spike](dev/spike_video_sync.py)).
 
 ## Run
 
@@ -12,7 +12,6 @@ pixi run studio                              # short demo clip (hero6 sample, ma
 pixi run studio -- /path/to/GX010060.MP4     # one chapter only (DEFAULT — single-file, as before)
 pixi run studio -- --full /path/to/GX010060.MP4  # opt-in: discover + chain ALL sibling chapters
 pixi run studio -- a.MP4 b.MP4               # explicit chaptered recording (chained in order)
-pixi run studio -- --interp session.MP4      # opt in to C++ timestamp interpolation
 ```
 
 A long GoPro recording is split, at a file-size limit, into **chapters** (`GX<CC><NNNN>.MP4`:
@@ -27,15 +26,15 @@ manifest). Equivalent without pixi: `python -m studio [files]`.
 Diagnose a file headlessly (sample stats, GPS noise, time axis, lap segmentation):
 
 ```bash
-pixi run python -m studio.diagnose -- /path/to/file.MP4 [--interp] [--clean]
+pixi run python -m studio.dev.diagnose -- /path/to/file.MP4 [--clean]
 ```
 
 Render the map offscreen to PNG + print jitter/signal metrics (the GPS-denoise feedback loop;
 `--window N` overrides `SMOOTH_WINDOW`, `--window 1` = raw baseline, `--notebook-ref` adds the
-notebook's w=9 reference overlay):
+upstream notebook's w=9 reference overlay):
 
 ```bash
-pixi run python -m studio.denoise_check -- /path/to/file.MP4 [--window N] [--tag T] [--notebook-ref] [--gaps]
+pixi run python -m studio.dev.denoise_check -- /path/to/file.MP4 [--window N] [--tag T] [--notebook-ref] [--gaps]
 ```
 
 `--gaps` additionally prints per-lap GPS-gap reconstruction metrics (chord metres, borrow vs
@@ -88,13 +87,13 @@ gap-fill unit tests live in [`tests/test_gapfill.py`](../tests/test_gapfill.py) 
   load we drop fixes with no 3D lock (`fix<3`) or poor geometry (`dop>10`) — conservative. The
   older GPS5 stream carries neither (sentinels `fix=-1`, `dop=-1.0`) → "unknown" is always KEPT.
 - **GPS track smoothing (`session._smooth_track`, `SMOOTH_WINDOW=13`):** the original map plotted
-  RAW GPS coords, so ~3 m position jitter made the trace look noisy. We now apply the notebook's
-  proven boxcar moving average (`notebooks/interpolation.ipynb`) — edge-corrected and split at
+  RAW GPS coords, so ~3 m position jitter made the trace look noisy. We now apply the boxcar moving
+  average proven in the upstream interpolation notebook (since removed) — edge-corrected and split at
   time gaps — to lat/lon/alt ONCE at load, *before* the points reach the core. Because the source
   coordinates are smoothed, the trace and every derived quantity (distances, segmentation, delta,
   sector splits) stay consistent. w=13 (~1.3 s @ 10 Hz) cuts the high-frequency jitter ~39% / the
   heading jitter ~91% while preserving genuine lap-to-lap racing-line differences and NOT clipping
-  corner apexes (w≥21 starts cutting corners). Tune/measure with `studio/denoise_check.py`.
+  corner apexes (w≥21 starts cutting corners). Tune/measure with `studio/dev/denoise_check.py`.
 - **Lap time = two interpolated crossing instants.** The C++ core (`pacer::Split`) already
   interpolates each start/finish (and sector) crossing TIME along the chord between the two GPS
   points that straddle the line — `t = t0 + f·(t1−t0)` for the geometric fraction `f` — so lap
@@ -107,18 +106,18 @@ gap-fill unit tests live in [`tests/test_gapfill.py`](../tests/test_gapfill.py) 
   clock** (the transponder's clock). We take only its per-sample SPACING and re-anchor each
   contiguous run to that run's media time, so video sync / chapter offsets are unchanged while
   inter-sample spacing is the real wall-clock spacing. Degrades to naive for any sample without a
-  GPS9 timestamp (a GPS5-only stream). The C++ `interpolate_timestamps` Adam fit **diverges** on
-  long/noisy sessions; it stays opt-in via `--interp` (validated + auto-rejected).
+  GPS9 timestamp (a GPS5-only stream). (A C++ Adam timestamp-fit path was tried here but **diverged**
+  on long/noisy sessions and has since been removed — GPS9's true per-fix clock supersedes it.)
 - **GPS9 true-clock timing is unbiased — VALIDATED OUT-OF-SAMPLE, no calibration factor** (rate =
   1.0). Validated against the kart's real lap-timing **transponder** on a SECOND, independent
-  recording (0062) by `studio/_validate_wallclock.py`: clean-lap residual mean **+0.0015 s /
+  recording (0062) by `studio/dev/_validate_wallclock.py`: clean-lap residual mean **+0.0015 s /
   ±0.053 s** (0060: +0.0030 s / 0.087 s), each recording's own best-fit rate ≈1.0 (−22 / −46 ppm).
   A previously-committed clock-rate factor (0.999514) was **REMOVED** as an overfit to dropout-tail
   skew (it worsened the clean-lap RMS on both recordings). GPS-dropout laps are inherently ±noisy
   (their dropout is mid-lap) → **flagged** low-confidence, not absorbed into a clock rate. Full
   evidence + reproduction in [docs/upstream-20ms-investigation.md](docs/upstream-20ms-investigation.md)
   and [docs/gps-accuracy-research.md](docs/gps-accuracy-research.md); re-validate any recording with
-  `pixi run python -m studio._validate_wallclock -- <rec.MP4> <transponder.csv> --race-start <UTC>`.
+  `pixi run python -m studio.dev._validate_wallclock -- <rec.MP4> <transponder.csv> --race-start <UTC>`.
 - **Lap distance is gap-aware** (C++ `SegmentDistance` in `laps.cpp`, used by both
   `GetLapDistance` and the per-lap `cum_distances`). A normal segment is measured by the GPS chord
   (correct for well-sampled track); across a DROPOUT (a point-to-point time jump > 0.35 s) the

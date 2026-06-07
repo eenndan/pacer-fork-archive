@@ -1,9 +1,9 @@
 """Session: load GoPro/GPMF telemetry into a `pacer.Laps` and expose UI-friendly data.
 
-All the C++ analysis (lap/sector segmentation, distances, lap-vs-best delta resampling,
-timestamp interpolation) is reused via the bound `pacer` module. This file only adds the
-thin glue the old ImGui app kept inline in laps-display.cpp: building plot series, the
-delta computation, and writing dragged timing lines back to the core.
+All the C++ analysis (lap/sector segmentation, distances, crossing-instant lap timing,
+lap-vs-best delta resampling) is reused via the bound `pacer` module. This file only adds
+the thin Python glue around it: building plot series, the delta computation, and writing
+dragged timing lines back to the core.
 
 Coordinate note (verified against pacer/laps/laps.cpp): the track trace and the timing
 lines both live in LOCAL meters (cs.local). `pick_random_start()`/`update()` must run
@@ -23,7 +23,7 @@ from . import chapters, gapfill, gmeter, tracks
 
 DEFAULT_SAMPLE = "3rdparty/gpmf-parser/samples/hero6.mp4"  # a clip with real motion
 
-# Data-cleaning thresholds (see studio/diagnose.py; validated on real sessions).
+# Data-cleaning thresholds (see studio/dev/diagnose.py; validated on real sessions).
 MIN_START_SPEED = 3.0  # m/s — below this the car is stationary / GPS not yet locked
 SPIKE_STEP = 50.0  # m — a lone fix farther than this from BOTH neighbours is a glitch
 OFF_TRACK_MARGIN = 0.5  # drop points outside the inlier bbox (1-99 pct) expanded by this fraction
@@ -32,15 +32,15 @@ MIN_LAP_TIME = 5.0  # s — laps shorter than this are partial/phantom, not real
 MIN_LAP_SAMPLES = 20  # a real lap has at least this many GPS samples
 LAP_BAND_LO, LAP_BAND_HI = 0.5, 1.6  # "real lap" = lap_time within [lo, hi] x median lap time
 
-# --- GPS denoising (see notebooks/interpolation.ipynb + noise-investigation.ipynb) ---
-# Position smoothing window (samples). The notebook's gold-standard map smooths x/y/lat/lon
+# --- GPS denoising (originally derived from the upstream interpolation/noise notebooks, since removed) ---
+# Position smoothing window (samples). The upstream notebook's gold-standard map smoothed x/y/lat/lon
 # with a w=9 boxcar (~0.9 s @ 10 Hz) BEFORE measuring arc-length distance/delta; that cut the
 # delta jitter ~14% without erasing the real ~0.5 s lap-to-lap signal. We smooth the GPS
 # track ONCE at load (here), so every downstream quantity the C++ core derives — cum_distances,
 # lap segmentation, the delta resample, sector splits — uses the SAME smoothed coordinates.
-# w=13 (~1.3 s @ 10 Hz): tuned up from the notebook's w=9 baseline because the studio map
+# w=13 (~1.3 s @ 10 Hz): tuned up from that w=9 baseline because the studio map
 # feeds the SMOOTHED track straight back into segmentation/distance, so a touch more smoothing
-# buys a much cleaner trace. Verified on the real session (studio/denoise_check.py): w=13 cuts
+# buys a much cleaner trace. Verified on the real session (studio/dev/denoise_check.py): w=13 cuts
 # the high-frequency cross-track jitter ~39% and the point-to-point heading jitter ~91% while
 # the lap-to-lap racing-line signal is preserved and the corner APEXES are not clipped (a
 # close-up hairpin render shows w<=15 tracking the raw apex; w>=21 visibly cuts the corner).
@@ -59,7 +59,7 @@ MAX_DOP = 10.0  # GPS9 DOP: dilution of precision; >~10 is a poor-geometry fix. 
 
 
 def _smooth(a, w: int = SMOOTH_WINDOW):
-    """Edge-correct boxcar moving average — the notebook's `np.convolve(a, ones(w)/w, "same")`
+    """Edge-correct boxcar moving average — the upstream notebook's `np.convolve(a, ones(w)/w, "same")`
     in the interior, but normalized at the ends so the first/last w//2 points aren't dragged
     toward zero by the convolution's implicit zero-padding (a raw `"same"` boxcar tapers the
     edges; here those points are averaged over only the samples that actually exist).
@@ -191,8 +191,8 @@ def _read_imu(paths):
 # real WALL-CLOCK at a clean 10.000 Hz — the same clock a lap-timing transponder uses. Lap
 # time is a difference of two crossing instants, so the ~0.1% media-clock fast-rate
 # systematically COMPRESSES every lap (measured ~30 ms on the best lap). Timing off the GPS9
-# fix times removes that bias and is the physically-correct reference, with NONE of the
-# divergence of the global Adam `interpolate_timestamps` fit (which we keep opt-in only).
+# fix times removes that bias and is the physically-correct reference. (It supersedes an
+# earlier global Adam timestamp-fit experiment, since removed, that diverged on long sessions.)
 #
 # We don't trust the GPS9 ABSOLUTE epoch (it jumps at chapter boundaries / midnight and is UTC,
 # not the media clock the video layer maps against). We use only its per-sample SPACING, and
@@ -203,7 +203,7 @@ GPS9_MIN_DT_S = 0.02    # an inter-sample GPS9 delta below this is a duplicate/g
 GPS9_MAX_DT_S = 0.40    # …above this, the run is broken (chapter break / dropout / rollover)
 
 # NOTE: an earlier transponder-fit GPS9 clock-rate multiplier was REMOVED. The out-of-sample
-# validation (recording 0062, see studio/_validate_wallclock.py) proved it a 0060-specific
+# validation (recording 0062, see studio/dev/_validate_wallclock.py) proved it a 0060-specific
 # OVERFIT to GPS-dropout-tail skew, NOT a real clock rate: both recordings' true rate is ≈1.0
 # (−22 / −46 ppm, not the fitted −486 ppm), and applying the factor WORSENS the clean-lap RMS on
 # both. The plain GPS9 true-clock spacing (rate = 1.0) is already unbiased out of sample (0062
@@ -343,7 +343,7 @@ def _gate_quality(samples, spans, naive):
 def _clean(samples, spans, naive):
     """Trim the stationary lead-in/cool-down (where GPS spikes cluster), then drop lone
     teleport glitches (a fix far from BOTH neighbours while they stay close to each other).
-    Returns cleaned (samples, spans, naive). See studio/diagnose.py for the evidence."""
+    Returns cleaned (samples, spans, naive). See studio/dev/diagnose.py for the evidence."""
     n = len(samples)
     if n < 10:
         return samples, spans, naive
@@ -396,7 +396,7 @@ def _gap_segments(times, gap_s: float = SMOOTH_GAP_S):
 
 def _smooth_track(samples, times, w: int = SMOOTH_WINDOW):
     """Return NEW GPSSamples with lat/lon/altitude boxcar-smoothed in place, matching the
-    notebook's gold-standard map. Smoothing the SOURCE coordinates (not a render-time copy)
+    upstream notebook's gold-standard map. Smoothing the SOURCE coordinates (not a render-time copy)
     means every downstream quantity the C++ core derives — arc-length cum_distances, lap
     segmentation, the lap-vs-best delta, sector splits — is computed from the SAME smoothed
     track, so the trace and all metrics stay consistent. Speed fields are left untouched.
@@ -459,22 +459,18 @@ class Session:
 
     # ---------------------------------------------------------------- loading
     @classmethod
-    def load(cls, paths: list[str], interpolate: bool = False,
-             smooth_window: int = SMOOTH_WINDOW) -> "Session":
-        """True-clock timing by default — the per-sample time comes from the GPS9 fix
+    def load(cls, paths: list[str], smooth_window: int = SMOOTH_WINDOW) -> "Session":
+        """True-clock timing — the per-sample time comes from the GPS9 fix
         timestamps' real 10 Hz spacing, re-anchored per run to the media clock (see
         `_gps9_times`); this removes the ~0.1% media-clock fast-rate that was systematically
         compressing every lap, while staying on the media axis the video layer maps against.
         It degrades to the old naive media-payload-fraction timing for any sample lacking a
-        GPS9 timestamp (e.g. a GPS5-only stream). `interpolate=True` instead enables the C++
-        global Adam fit, which DIVERGES on long/noisy sessions (see studio/diagnose.py) and is
-        validated + rejected back to naive if non-monotonic or past the video duration — kept
-        opt-in only.
+        GPS9 timestamp (e.g. a GPS5-only stream).
 
         The GPS track is quality-gated (drop no-3D-lock / high-DOP fixes) and boxcar-smoothed
         (window `smooth_window`, default SMOOTH_WINDOW) BEFORE the points are handed to the
         core, so the map trace and every distance/delta/sector derived from it match the smooth
-        notebook reference. `smooth_window=1` disables smoothing (raw trace, for baselines)."""
+        upstream-notebook reference. `smooth_window=1` disables smoothing (raw trace, for baselines)."""
         laps = pacer.Laps()
         empty = pacer.CoordinateSystem(pacer.GPSSample())
         video_path = paths[0] if paths else None
@@ -489,11 +485,8 @@ class Session:
         if not samples:
             return cls(laps, empty, video_path, chapter_map)
 
-        if interpolate and len(samples) >= 8:
-            times = cls._interpolated_or_naive(samples, spans, naive)
-        else:
-            # GPS9 true-clock spacing (re-anchored to the media clock); naive otherwise.
-            times = _gps9_times(samples, spans, naive)
+        # GPS9 true-clock spacing (re-anchored to the media clock); naive otherwise.
+        times = _gps9_times(samples, spans, naive)
 
         # Smooth the GPS positions once, here — over the cleaned, time-ordered trace, guarded
         # against averaging across chapter/dropout gaps. All downstream geometry follows.
@@ -561,25 +554,6 @@ class Session:
         elif gm.has_data:
             print(f"studio: g-meter using {gm.source}-derived g "
                   f"({len(gm)} samples, no cross-check).", flush=True)
-
-    @staticmethod
-    def _interpolated_or_naive(samples, spans, naive) -> list[float]:
-        duration = max(b for _, b in spans)
-        try:
-            res = pacer.interpolate_timestamps(samples, spans, pacer.CoordinateSystem(samples[0]))
-            ts = np.array(res.timestamps)
-        except Exception as e:  # noqa: BLE001 — interpolation is best-effort
-            print(f"studio: interpolation failed ({e!r}); naive timing.")
-            return list(naive)
-        ok = (len(ts) == len(samples)
-              and bool(np.all(np.diff(ts) >= -1e-6))
-              and ts.min() >= -1.0
-              and ts.max() <= duration * 1.05)
-        if not ok:
-            print(f"studio: interpolation rejected (range {ts.min():.1f}..{ts.max():.1f}s "
-                  f"vs duration {duration:.1f}s); using naive timing.")
-            return list(naive)
-        return list(ts)
 
     # ----------------------------------------------------------- timing lines
     @property

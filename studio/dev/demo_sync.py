@@ -36,7 +36,7 @@ VIDEO = sys.argv[1] if len(sys.argv) > 1 else "3rdparty/gpmf-parser/samples/hero
 
 
 def telemetry(path):
-    """(time_s, speed_kmh) per GPS sample on the MP4 clock (mirrors timeline.cpp)."""
+    """(time_s, speed_kmh) per GPS sample on the MP4 clock (mirrors the old C++ ingest)."""
     src = pacer.GPMFSource(path)
     times, speeds = [], []
     src.seek(0)

@@ -1,10 +1,10 @@
 """Headless diagnostics for a telemetry file — root-cause studio issues without the GUI.
 
-Reports raw sample stats, GPS-noise (consecutive-step jumps), the time axis (naive vs
-interpolated, monotonicity), and lap segmentation (count + lap-time distribution) so we can
+Reports raw sample stats, GPS-noise (consecutive-step jumps), the time axis (naive
+monotonicity), and lap segmentation (count + lap-time distribution) so we can
 see WHY lap times / map sync / plots look wrong.
 
-Run:  pixi run python -m studio.diagnose -- /path/to/file.MP4 [--interp]
+Run:  pixi run python -m studio.dev.diagnose -- /path/to/file.MP4 [--clean]
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import numpy as np
 
 import pacer
 
-from .session import DEFAULT_SAMPLE, _read_gpmf
+from ..session import DEFAULT_SAMPLE, _read_gpmf
 
 
 def pct(a, ps):
@@ -100,7 +100,6 @@ def build_laps(samples, times, label, widen_start=1.0):
 
 def main():
     args = sys.argv[1:]
-    do_interp = "--interp" in args
     paths = [a for a in args if not a.startswith("-")] or [DEFAULT_SAMPLE]
     print("file:", paths)
 
@@ -144,20 +143,6 @@ def main():
         cs_, csp_, cn_ = clean(samples, spans, naive, cs_mid)
         build_laps(cs_, cn_, "cleaned, naive timing, 5m start")
         build_laps(cs_, cn_, "cleaned, naive timing, 3x start", widen_start=3.0)
-
-    if do_interp:
-        print("\n--- INTERPOLATION ---")
-        keep = [i for i, s in enumerate(samples) if s.full_speed > 1e-6]
-        ss = [samples[i] for i in keep]
-        sp = [spans[i] for i in keep]
-        t1 = time.time()
-        res = pacer.interpolate_timestamps(ss, sp, pacer.CoordinateSystem(ss[0]))
-        it = np.array(res.timestamps)
-        print(f"interp: {time.time() - t1:.1f}s  freq={res.frequency:.4f} loss={res.loss:.5g}")
-        print(f"  result monotonic={bool(np.all(np.diff(it) >= 0))}  range={it.min():.1f}..{it.max():.1f}")
-        d = np.diff(it)
-        print(f"  inter-sample dt pctiles(s): {pct(d, [0, 5, 50, 95, 100])}")
-        build_laps(ss, it, "interp timing, moving samples")
     return 0
 
 

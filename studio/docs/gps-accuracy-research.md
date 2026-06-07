@@ -24,7 +24,7 @@ priority) an IMU-curved gap-fill for the map.
 
 ## 0. Baseline reproduced (the bar to beat)
 
-`studio/_validate_wallclock.py`, default shipping pipeline (GPS9 true-clock, rate=1.0, boxcar w=13),
+`studio/dev/_validate_wallclock.py`, default shipping pipeline (GPS9 true-clock, rate=1.0, boxcar w=13),
 auto-locked to the transponder by duration-correlation:
 
 | recording | CSV laps | corr | clean-lap residual (app−transponder) | racing std | dropout laps |
@@ -41,7 +41,7 @@ quality sets the floor**, a fact that recurs throughout.
 ## 1. What actually limits us (measured, not assumed)
 
 Before evaluating techniques we instrumented the *real* error structure (scripts in
-`studio/docs/gps_research_scripts/`). This reshaped the whole problem:
+`studio/dev/research/`). This reshaped the whole problem:
 
 **1a. The crossing interpolation is NOT the bottleneck.** Lap time = (finish crossing instant) −
 (start crossing instant); each instant is interpolated along the chord between the two real GPS
@@ -92,7 +92,7 @@ gap-bridging problem. This is the lens for evaluating every technique below.
 ## 2. Is the IMU even there? (GPMF stream inventory)
 
 Yes — confirmed by parsing the recordings with GoPro's own `gpmf-parser`
-(`gps_research_scripts/inventory.c`). Per chapter of 0062 (1730 s):
+(`studio/dev/research/inventory.c`). Per chapter of 0062 (1730 s):
 
 | stream | rate | content |
 |--------|------|---------|
@@ -193,7 +193,7 @@ our "already done / already unbiased" status.
 
 ## 4. Empirical validation — the prototypes, out of sample, on BOTH recordings
 
-`gps_research_scripts/proto_smooth.py` reuses the exact studio load + the exact validator alignment,
+`studio/dev/research/proto_smooth.py` reuses the exact studio load + the exact validator alignment,
 swapping **only** the position-smoothing step, then re-times every lap and reports the residual vs the
 transponder. Methods: `boxcar` (shipping w=13), `raw` (no smoothing), `rts` (CV Kalman+RTS on
 position), `rts_dop` (RTS + Doppler-speed velocity pseudo-measurement, the T3 idea).
@@ -256,20 +256,20 @@ hypothesis assumed.*
 
 ```bash
 # baseline (per recording)
-pixi run python -m studio._validate_wallclock -- /path/GX010060.MP4 "<transponder.csv>" \
+pixi run python -m studio.dev._validate_wallclock -- /path/GX010060.MP4 "<transponder.csv>" \
     --race-start "2026-05-23 12:00:00Z" --dump /tmp/claude/baseline_0060.json
 
 # smoother prototypes (boxcar/raw/rts/rts_dop), both recordings
-PYTHONPATH=. python studio/docs/gps_research_scripts/proto_smooth.py /path/GX010060.MP4 "<csv>"
-PYTHONPATH=. python studio/docs/gps_research_scripts/proto_smooth.py /path/GX010062.MP4 "<csv>"
+PYTHONPATH=. python studio/dev/research/proto_smooth.py /path/GX010060.MP4 "<csv>"
+PYTHONPATH=. python studio/dev/research/proto_smooth.py /path/GX010062.MP4 "<csv>"
 
 # error-structure diagnostics (need a baseline dump for residuals)
-PYTHONPATH=. python studio/docs/gps_research_scripts/diag_gap_irrelevant.py /path/GX010060.MP4 dump.json
-PYTHONPATH=. python studio/docs/gps_research_scripts/diag_corr.py /path/GX010060.MP4 dump.json
-PYTHONPATH=. python studio/docs/gps_research_scripts/diag_dop.py  /path/GX010060.MP4 dump.json
+PYTHONPATH=. python studio/dev/research/diag_gap_irrelevant.py /path/GX010060.MP4 dump.json
+PYTHONPATH=. python studio/dev/research/diag_corr.py /path/GX010060.MP4 dump.json
+PYTHONPATH=. python studio/dev/research/diag_dop.py  /path/GX010060.MP4 dump.json
 
 # GPMF stream inventory + IMU heading analysis (C tools build against the bundled gpmf-parser)
-cc -O2 -I3rdparty/gpmf-parser -o /tmp/inventory studio/docs/gps_research_scripts/inventory.c \
+cc -O2 -I3rdparty/gpmf-parser -o /tmp/inventory studio/dev/research/inventory.c \
    3rdparty/gpmf-parser/GPMF_parser.c 3rdparty/gpmf-parser/GPMF_utils.c \
    3rdparty/gpmf-parser/demo/GPMF_mp4reader.c
 /tmp/inventory /path/GX010062.MP4

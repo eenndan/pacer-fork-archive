@@ -114,10 +114,8 @@ def autogenerate() -> None:
     header_files = [
         repository_dir / "pacer/datatypes/datatypes.hpp",
         repository_dir / "pacer/geometry/geometry.hpp",
-        repository_dir / "pacer/interpolation/interpolation.hpp",
         repository_dir / "pacer/laps/laps.hpp",
         repository_dir / "pacer/gps-source/gps-source.hpp",
-        repository_dir / "pacer/laps-display/laps-display.hpp",
     ]
 
     output_cpp_pydef_file = repository_dir / "bindings/pacer/nanobind_pacer.cpp"
