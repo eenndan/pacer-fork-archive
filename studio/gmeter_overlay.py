@@ -1,34 +1,55 @@
-"""GMeterOverlay: the classic friction-circle g-meter, painted ON the video.
+"""GMeterOverlay: a subtle "G meter" dial painted OVER the video (felt-force convention).
 
-A frameless, translucent, always-on-top top-level window positioned over the QVideoWidget's
-bottom-right corner, drawn with a semi-transparent backdrop so it stays readable over footage.
+A frameless, translucent, always-on-top top-level window pinned to the QVideoWidget's TOP-RIGHT
+corner and sized as a fraction of the video, drawn with a faint backdrop so it sits subtly over
+footage. It shows the inertial reaction the DRIVER'S BODY feels (not the raw acceleration
+vector), a translucent red max-G envelope of the grip used this lap, and the peak g reached in
+each cardinal direction.
 
 Why a top-level window and not a plain child widget: on macOS a QVideoWidget renders through a
 NATIVE surface (its own QWindow) that the window-server composites independently of Qt's z-order
 for ordinary ("alien", non-native) child widgets. A child overlay therefore lands in the parent's
 backing store and is painted OVER by the native video layer — invisible on screen even though it
-exists in the widget tree (which is exactly why an offscreen `widget.grab()` of the Qt tree still
-showed it). Giving the overlay its own native top-level window makes the window-server composite
-it as a separate layer ABOVE the video surface, so it shows over live footage. The VideoView keeps
-it pinned to the video's corner on move/resize/show. The template is the classic g-g diagram:
+exists in the widget tree. Giving the overlay its own native top-level window makes the
+window-server composite it as a separate layer ABOVE the video surface, so it shows over live
+footage. The VideoView keeps it pinned to the video's corner on move/resize/show.
 
-  * concentric rings labelled 0.5 / 1.0 / 1.5 g,
-  * a crosshair: horizontal axis = LATERAL g (left/right), vertical axis = LONGITUDINAL g
-    (UP = acceleration, DOWN = braking — the racing-driver convention),
-  * a floating dot whose ANGLE is the force DIRECTION and whose RADIUS is the force MAGNITUDE
-    (g). A short fading trail shows the recent path; a faint peak-hold ring marks the session's
-    largest combined g so far while playing.
-  * a numeric readout: lateral g, longitudinal g, and total (combined) g.
+THE FELT-FORCE CONVENTION (the pointer = what the driver's body feels, not the accel vector)
+-------------------------------------------------------------------------------------------
+`session.g_at_time` reports the kart-frame ACCELERATION in g (validated in studio/gmeter.py):
+  +lateral      = turning LEFT,     -lateral      = turning RIGHT
+  +longitudinal = ACCELERATING,     -longitudinal = BRAKING
+The body feels the inertial REACTION — the opposite of the acceleration. We map that felt force
+onto the dial so it reads like the g-meter in a car:
+  * BRAKING (long<0)  -> pointer UP    (you're thrown forward / "up" on the meter)
+  * ACCELERATING      -> pointer DOWN
+  * turning RIGHT     -> pointer LEFT  (you're thrown to the left)
+  * turning LEFT      -> pointer RIGHT
+Screen mapping (screen +x = right, screen +y = down):
+  dx =  +lateral * scale        (left-turn -> right; right-turn -> left)
+  dy =  +longitudinal * scale   (braking long<0 -> up; accelerating long>0 -> down)
+i.e. the pointer is the felt force −(accel) expressed in the dial's up=forward-thrown frame.
+
+HELMET-SHAKE FILTERING (the GoPro is chin-mounted; the accel carries head/mount jitter)
+---------------------------------------------------------------------------------------
+The gross g is good (lateral cross-check r≈0.90) but a chin mount adds high-frequency shake on
+top of the real vehicle g. So the DOT is driven by a short exponential moving average of the
+felt-force g (smooth but still responsive to real braking/cornering), and the ENVELOPE / peak-g
+NUMBERS use that filtered signal PLUS a high-percentile (robust) peak so a single shake spike
+can't blow the envelope or the cardinal numbers out to a spurious huge value.
+
+MAX-G ENVELOPE (the red blob) + cardinal peaks
+----------------------------------------------
+Filtered felt-force points are accumulated and their swept area is filled in translucent red
+(a convex hull of the points) — the grip envelope used in the current scope. The four cardinal
+numbers are the robust peak felt-g reached forward/back/left/right. Scope defaults to the
+CURRENT LAP and resets at the lap boundary (`set_lap` drives this); change `_RESET_ON_LAP` or
+call `reset_envelope()` for other scopes.
 
 This widget is `pacer`-free: it knows nothing about the telemetry source. The app feeds it
-`(lateral_g, longitudinal_g, total_g)` from `session.g_at_time` at the existing ~30 Hz tick
-(a cheap precomputed lookup — no per-frame computation). `set_g(None)` blanks the dot/readout
-(outside a valid lap / no IMU). A toggle controls visibility.
-
-Sign convention (matches session.g_at_time): +lateral = turning LEFT, +longitudinal =
-accelerating. We map +lateral to the RIGHT on screen (the dot swings toward the OUTSIDE of the
-corner — i.e. the direction the driver feels thrown, which is the classic g-meter reading) and
-+longitudinal to UP.
+`set_g((lateral_g, longitudinal_g, total_g))` and `set_lap(lap_id)` at the ~30 Hz tick. The
+convention flip + filtering are DISPLAY concerns and live here; the validated g values in
+`session`/`gmeter.py` are untouched.
 """
 
 from __future__ import annotations
@@ -36,15 +57,27 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QRadialGradient
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF, QRadialGradient
 from PySide6.QtWidgets import QWidget
 
-# Visual scale: the outer ring is this many g (so 1.5 g sits at 0.75 of the radius and a 2 g
-# spike still lands inside the widget). Tunable; the ring labels follow _RINGS.
-_FULL_SCALE_G = 2.0
-_RINGS = (0.5, 1.0, 1.5)         # labelled rings (g)
-_TRAIL_LEN = 18                  # recent dot positions kept for the fading trail
-_MARGIN = 14                     # px padding inside the widget for the ring + labels
+# Visual scale: the outer ring is this many g (so a 1.0 g corner sits well inside and a ~1.5 g
+# spike still lands within the dial). The labelled rings follow _RINGS.
+_FULL_SCALE_G = 1.6
+_RINGS = (0.5, 1.0)              # labelled rings (g)
+
+# Pointer low-pass: exponential moving average factor per ~30 Hz sample. Smaller = smoother but
+# laggier. ~0.30 gives a ~0.1 s time-constant — tames chin-mount/helmet shake while staying
+# responsive to a real brake/turn transition.
+_DOT_EMA_ALPHA = 0.30
+
+# Envelope robustness: we keep a rolling window of recent FILTERED felt-force points and grow
+# the per-direction peaks only from a high PERCENTILE of the magnitude in each direction, so a
+# lone helmet-shake spike never sets a cardinal peak or pushes the hull out. The hull is built
+# from the filtered points themselves (already de-spiked by the EMA + the percentile gate).
+_PEAK_PERCENTILE = 90.0          # cardinal peak = this percentile of recent felt-g (robust)
+_PEAK_WINDOW = 90                # samples (~3 s at 30 Hz) feeding the percentile peak
+_ENVELOPE_MAX_PTS = 240          # cap on hull input points per scope (ring buffer)
+_RESET_ON_LAP = True             # reset the envelope + peaks at each lap boundary
 
 
 def _font(pt: float, bold: bool = False) -> QFont:
@@ -67,62 +100,126 @@ class GMeterOverlay(QWidget):
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setMinimumSize(180, 210)
-        self._lat = 0.0
-        self._long = 0.0
-        self._total = 0.0
+        self.setMinimumSize(120, 140)
+        # Live felt-force pointer (filtered) in g; dial axes are felt: +x = thrown right,
+        # +y(down) = thrown back (accelerating), -y(up) = thrown forward (braking).
+        self._fx = 0.0                 # filtered felt-force lateral (= +lateral g)
+        self._fy = 0.0                 # filtered felt-force longitudinal (= +longitudinal g)
         self._have = False             # is there a current g reading to draw the dot for?
-        self._trail: list[tuple[float, float]] = []  # recent (lat, long) for the fade trail
-        self._peak = 0.0               # peak combined g seen since the last reset (peak-hold)
+        self._ema_init = False         # has the EMA been seeded yet?
         self._source = "accl"
+        # Envelope + robust peaks, accumulated over the current scope (default: this lap).
+        self._hull_pts: list[tuple[float, float]] = []     # filtered felt points (ring buffer)
+        self._recent: list[tuple[float, float]] = []       # rolling window for percentile peaks
+        # Cardinal peak felt-g: forward (brake), back (accel), left, right (all >= 0).
+        self._peak_fwd = 0.0           # braking  (felt UP)
+        self._peak_back = 0.0          # accel    (felt DOWN)
+        self._peak_left = 0.0          # turning right (felt LEFT)
+        self._peak_right = 0.0         # turning left  (felt RIGHT)
+        self._lap: int | None = None   # current lap id (for the per-lap reset)
 
     # ------------------------------------------------------------------ data in
     def set_g(self, g: tuple[float, float, float] | None) -> None:
-        """Push the current (lateral_g, longitudinal_g, total_g). None blanks the live dot
-        (keeps the template). Records the trail + peak-hold. Triggers a repaint."""
+        """Push the current kart-frame (lateral_g, longitudinal_g, total_g). None blanks the live
+        dot (keeps the template + the accumulated envelope). Applies the felt-force convention and
+        the shake low-pass, grows the envelope + robust cardinal peaks, and repaints."""
         if g is None:
             if self._have:
                 self._have = False
                 self.update()
             return
-        lat, lon, total = g
-        self._lat, self._long, self._total = lat, lon, total
+        lat, lon, _total = g
+        # Felt-force convention: pointer is the inertial reaction the body feels (see module doc).
+        #   felt x = +lateral      (turn left -> right on the dial; turn right -> left)
+        #   felt y = +longitudinal (braking long<0 -> up; accelerating long>0 -> down)
+        fx, fy = lat, lon
+        # Shake low-pass (EMA) for a smooth dot that tracks vehicle g, not head/mount jitter.
+        if not self._ema_init:
+            self._fx, self._fy, self._ema_init = fx, fy, True
+        else:
+            a = _DOT_EMA_ALPHA
+            self._fx += a * (fx - self._fx)
+            self._fy += a * (fy - self._fy)
         self._have = True
-        self._trail.append((lat, lon))
-        if len(self._trail) > _TRAIL_LEN:
-            self._trail.pop(0)
-        if total > self._peak:
-            self._peak = total
+        self._accumulate(self._fx, self._fy)
         self.update()
+
+    def _accumulate(self, fx: float, fy: float) -> None:
+        """Grow the per-lap envelope + robust cardinal peaks from the FILTERED felt point.
+
+        Robustness to chin-mount shake (two layers): the cardinal numbers track a high PERCENTILE
+        of the recent filtered magnitude in each direction (not the instantaneous max), so a lone
+        spike that slips through the EMA can't set a peak; and the hull point is CLAMPED to those
+        robust per-direction peaks before it's added, so a single spike can never push the blob
+        past the robust envelope either. (The EMA already de-spikes the dot itself.)"""
+        self._recent.append((fx, fy))
+        if len(self._recent) > _PEAK_WINDOW:
+            self._recent.pop(0)
+        # Per-direction robust peak from the rolling window: the felt extent reached in each of
+        # the four cardinals, taken at _PEAK_PERCENTILE so a single shake sample doesn't win.
+        xs = [p[0] for p in self._recent]
+        ys = [p[1] for p in self._recent]
+        right = [x for x in xs if x > 0]
+        left = [-x for x in xs if x < 0]
+        back = [y for y in ys if y > 0]     # accelerating (felt down)
+        fwd = [-y for y in ys if y < 0]     # braking (felt up)
+        self._peak_right = max(self._peak_right, _pct(right, _PEAK_PERCENTILE))
+        self._peak_left = max(self._peak_left, _pct(left, _PEAK_PERCENTILE))
+        self._peak_back = max(self._peak_back, _pct(back, _PEAK_PERCENTILE))
+        self._peak_fwd = max(self._peak_fwd, _pct(fwd, _PEAK_PERCENTILE))
+        # Clamp the hull candidate to the robust per-direction peaks so one spike can't balloon the
+        # blob (the peaks themselves are percentile-gated). A tiny margin keeps the dot inside.
+        hx = min(fx, self._peak_right) if fx >= 0 else max(fx, -self._peak_left)
+        hy = min(fy, self._peak_back) if fy >= 0 else max(fy, -self._peak_fwd)
+        self._hull_pts.append((hx, hy))
+        if len(self._hull_pts) > _ENVELOPE_MAX_PTS:
+            self._hull_pts.pop(0)
+
+    def set_lap(self, lap_id: int | None) -> None:
+        """Tell the meter which lap is being driven. When it CHANGES to a new valid lap (and
+        _RESET_ON_LAP), the envelope + cardinal peaks reset so the blob shows THIS lap's grip
+        usage. `None` (lead-in / between laps) is held — never resets — so the envelope persists
+        across the brief no-lap gaps."""
+        if lap_id is None or lap_id == self._lap:
+            return
+        if _RESET_ON_LAP and self._lap is not None:
+            self.reset_envelope()
+        self._lap = lap_id
 
     def set_source(self, source: str) -> None:
         """Label which sensor drives the meter ("accl" or "gps"); shown small in the corner."""
         self._source = source
         self.update()
 
-    def reset_peak(self) -> None:
-        self._peak = 0.0
-        self._trail.clear()
+    def reset_envelope(self) -> None:
+        """Clear the accumulated max-G envelope + cardinal peaks (new scope, e.g. a new lap)."""
+        self._hull_pts.clear()
+        self._recent.clear()
+        self._peak_fwd = self._peak_back = self._peak_left = self._peak_right = 0.0
         self.update()
 
     # ------------------------------------------------------------------ painting
     def _geom(self):
-        """Centre + radius of the dial, fit to the widget with room for labels."""
+        """Centre + radius of the dial. A slim title strip up top; the cardinal numbers sit just
+        outside the outer ring, so reserve a uniform margin for them."""
         w, h = self.width(), self.height()
-        # Reserve a strip at the bottom for the numeric readout.
-        dial_h = h - 46
-        r = (min(w, dial_h) - 2 * _MARGIN) / 2.0
-        r = max(r, 10.0)
+        title_h = 18
+        margin = 18                       # room for the cardinal peak numbers outside the ring
+        dial_top = title_h
+        dial_h = h - title_h
+        r = (min(w, dial_h) - 2 * margin) / 2.0
+        r = max(r, 8.0)
         cx = w / 2.0
-        cy = _MARGIN + r
+        cy = dial_top + (dial_h) / 2.0
         return cx, cy, r
 
-    def _to_screen(self, cx, cy, r, lat, lon):
-        """Map (lateral_g, longitudinal_g) to a screen point. +lateral -> RIGHT, +long -> UP.
-        Clamped to the dial circle so a huge spike stays on the edge (direction preserved)."""
+    def _to_screen(self, cx, cy, r, fx, fy):
+        """Map a felt-force point (felt-x, felt-y in g) to a dial pixel. +felt-x -> RIGHT,
+        +felt-y -> DOWN (accelerating); braking (felt-y<0) -> UP. Clamped to the dial circle so a
+        big value stays on the rim with its direction preserved."""
         scale = r / _FULL_SCALE_G
-        dx = lat * scale          # +lateral to the right
-        dy = -lon * scale         # +longitudinal up (screen y grows downward)
+        dx = fx * scale
+        dy = fy * scale
         d = math.hypot(dx, dy)
         if d > r:
             dx, dy = dx / d * r, dy / d * r
@@ -132,97 +229,114 @@ class GMeterOverlay(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         cx, cy, r = self._geom()
+        w = self.width()
 
-        # --- semi-transparent backdrop so the dial reads over bright footage ---
-        backdrop = QRectF(2, 2, self.width() - 4, self.height() - 4)
-        p.setBrush(QColor(10, 12, 16, 150))
-        p.setPen(QPen(QColor(255, 255, 255, 40), 1))
-        p.drawRoundedRect(backdrop, 10, 10)
+        # --- faint, subtle backdrop (more see-through than a solid panel) ---
+        backdrop = QRectF(1, 1, w - 2, self.height() - 2)
+        p.setBrush(QColor(8, 10, 14, 96))
+        p.setPen(QPen(QColor(255, 255, 255, 28), 1))
+        p.drawRoundedRect(backdrop, 12, 12)
 
-        # --- concentric rings + labels ---
-        grid = QColor(210, 220, 235, 110)
+        # --- title: "G meter" ---
+        p.setPen(QPen(QColor(228, 233, 240, 200)))
+        p.setFont(_font(8.5, bold=True))
+        p.drawText(QRectF(0, 3, w, 14), Qt.AlignHCenter | Qt.AlignVCenter, "G meter")
+
+        # --- concentric rings (thin, clean) ---
         p.setBrush(Qt.NoBrush)
         for gval in _RINGS:
             rr = r * (gval / _FULL_SCALE_G)
-            p.setPen(QPen(grid, 1.2))
+            p.setPen(QPen(QColor(210, 220, 235, 70), 1.0))
             p.drawEllipse(QPointF(cx, cy), rr, rr)
-        # outer boundary ring (full scale)
-        p.setPen(QPen(QColor(230, 238, 250, 160), 1.6))
+        # outer boundary ring
+        p.setPen(QPen(QColor(228, 236, 248, 120), 1.2))
         p.drawEllipse(QPointF(cx, cy), r, r)
-
-        # ring labels (along the upper-right diagonal so they don't sit on the axes)
-        p.setPen(QPen(QColor(200, 210, 225, 150)))
-        p.setFont(_font(7.5))
-        for gval in _RINGS:
-            rr = r * (gval / _FULL_SCALE_G)
-            lx = cx + rr * 0.707 + 2
-            ly = cy - rr * 0.707 - 1
-            p.drawText(QPointF(lx, ly), f"{gval:g}")
-
-        # --- crosshair axes ---
-        axis = QColor(210, 220, 235, 90)
-        p.setPen(QPen(axis, 1.0))
+        # faint crosshair guides
+        guide = QColor(210, 220, 235, 40)
+        p.setPen(QPen(guide, 0.8))
         p.drawLine(QPointF(cx - r, cy), QPointF(cx + r, cy))
         p.drawLine(QPointF(cx, cy - r), QPointF(cx, cy + r))
-        # axis hint letters: ACC (up), BRK (down), L / R (sides)
-        p.setPen(QPen(QColor(170, 185, 205, 170)))
-        p.setFont(_font(7.0, bold=True))
-        p.drawText(QRectF(cx - 18, cy - r - 1, 36, 12), Qt.AlignCenter, "ACCEL")
-        p.drawText(QRectF(cx - 18, cy + r - 11, 36, 12), Qt.AlignCenter, "BRAKE")
 
-        # --- peak-hold ring (faint) ---
-        if self._peak > 0.05:
-            pr = min(self._peak, _FULL_SCALE_G) / _FULL_SCALE_G * r
-            p.setPen(QPen(QColor(255, 209, 102, 120), 1.0, Qt.DashLine))
-            p.setBrush(Qt.NoBrush)
-            p.drawEllipse(QPointF(cx, cy), pr, pr)
+        # --- filled max-G envelope (translucent red blob = grip used this lap) ---
+        if len(self._hull_pts) >= 3:
+            hull = _convex_hull(self._hull_pts)
+            if len(hull) >= 3:
+                poly = QPolygonF([QPointF(*self._to_screen(cx, cy, r, hx, hy))
+                                  for (hx, hy) in hull])
+                path = QPainterPath()
+                path.addPolygon(poly)
+                path.closeSubpath()
+                p.setPen(QPen(QColor(239, 71, 111, 150), 1.2))
+                p.setBrush(QColor(239, 71, 111, 64))
+                p.drawPath(path)
 
-        # --- fading trail ---
-        n = len(self._trail)
-        for k, (lat, lon) in enumerate(self._trail):
-            tx, ty = self._to_screen(cx, cy, r, lat, lon)
-            alpha = int(20 + 90 * (k + 1) / max(n, 1))
-            rad = 1.5 + 2.0 * (k + 1) / max(n, 1)
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(6, 214, 160, alpha))
-            p.drawEllipse(QPointF(tx, ty), rad, rad)
+        # --- cardinal peak-g numbers (robust max felt-g per direction) ---
+        p.setFont(_font(8.0, bold=True))
+        p.setPen(QPen(QColor(255, 209, 102, 230)))   # amber/gold, like the reference
+        off = 11
+        # forward (braking) at top, back (accel) at bottom, left/right on the sides
+        p.drawText(QRectF(cx - 22, cy - r - off - 6, 44, 12), Qt.AlignCenter,
+                   f"{self._peak_fwd:.1f}")
+        p.drawText(QRectF(cx - 22, cy + r + off - 6, 44, 12), Qt.AlignCenter,
+                   f"{self._peak_back:.1f}")
+        p.drawText(QRectF(cx - r - off - 22, cy - 6, 44, 12), Qt.AlignRight | Qt.AlignVCenter,
+                   f"{self._peak_left:.1f}")
+        p.drawText(QRectF(cx + r + off - 22, cy - 6, 44, 12), Qt.AlignLeft | Qt.AlignVCenter,
+                   f"{self._peak_right:.1f}")
 
-        # --- the floating dot (direction = angle, magnitude = radius) ---
+        # --- the live dot (NO line from centre to the dot — just a soft glow + dot) ---
         if self._have:
-            dx, dy = self._to_screen(cx, cy, r, self._lat, self._long)
-            # a short line from centre to the dot makes the direction unmistakable
-            p.setPen(QPen(QColor(6, 214, 160, 160), 1.6))
-            p.drawLine(QPointF(cx, cy), QPointF(dx, dy))
-            # glowing dot
-            grad = QRadialGradient(QPointF(dx, dy), 9)
-            grad.setColorAt(0.0, QColor(120, 255, 210, 255))
-            grad.setColorAt(1.0, QColor(6, 214, 160, 60))
+            dx, dy = self._to_screen(cx, cy, r, self._fx, self._fy)
+            grad = QRadialGradient(QPointF(dx, dy), 8)
+            grad.setColorAt(0.0, QColor(255, 255, 255, 235))
+            grad.setColorAt(1.0, QColor(120, 200, 255, 0))
             p.setPen(Qt.NoPen)
             p.setBrush(grad)
             p.drawEllipse(QPointF(dx, dy), 7, 7)
-            p.setBrush(QColor(255, 255, 255, 235))
-            p.drawEllipse(QPointF(dx, dy), 3, 3)
+            p.setBrush(QColor(255, 255, 255, 245))
+            p.drawEllipse(QPointF(dx, dy), 2.6, 2.6)
 
-        # --- numeric readout ---
-        ry = cy + r + 8
-        p.setPen(QPen(QColor(235, 240, 248, 235)))
-        p.setFont(_font(8.5, bold=True))
-        if self._have:
-            lat_dir = "R" if self._lat >= 0 else "L"
-            lon_dir = "accel" if self._long >= 0 else "brake"
-            line1 = f"lat {abs(self._lat):.2f}g {lat_dir}   long {abs(self._long):.2f}g {lon_dir}"
-            line2 = f"total {self._total:.2f} g"
-        else:
-            line1 = "lat —   long —"
-            line2 = "total — g"
-        p.drawText(QRectF(4, ry, self.width() - 8, 16), Qt.AlignCenter, line1)
-        p.setFont(_font(9.5, bold=True))
-        p.setPen(QPen(QColor(6, 214, 160, 245)))
-        p.drawText(QRectF(4, ry + 15, self.width() - 8, 18), Qt.AlignCenter, line2)
-
-        # source tag (tiny, bottom-left)
-        p.setPen(QPen(QColor(150, 165, 185, 160)))
-        p.setFont(_font(6.5))
-        p.drawText(QRectF(8, self.height() - 14, 60, 12), Qt.AlignLeft, self._source.upper())
+        # --- source tag (tiny, bottom-right) ---
+        p.setPen(QPen(QColor(150, 165, 185, 130)))
+        p.setFont(_font(6.0))
+        p.drawText(QRectF(w - 44, self.height() - 13, 40, 11), Qt.AlignRight, self._source.upper())
 
         p.end()
+
+
+def _pct(vals, q):
+    """The q-th percentile of `vals` (a robust peak), or 0.0 if empty. Pure-Python (no numpy in
+    the per-tick paint path) — the lists are tiny (<= _PEAK_WINDOW)."""
+    if not vals:
+        return 0.0
+    s = sorted(vals)
+    if len(s) == 1:
+        return s[0]
+    pos = (q / 100.0) * (len(s) - 1)
+    lo = int(math.floor(pos))
+    hi = min(lo + 1, len(s) - 1)
+    frac = pos - lo
+    return s[lo] + (s[hi] - s[lo]) * frac
+
+
+def _convex_hull(points):
+    """Andrew's monotone-chain convex hull of `points` (list of (x,y)). Returns the hull vertices
+    CCW. O(n log n); n <= _ENVELOPE_MAX_PTS, recomputed per paint (cheap at these sizes)."""
+    pts = sorted(set(points))
+    if len(pts) <= 2:
+        return pts
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower = []
+    for pt in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], pt) <= 0:
+            lower.pop()
+        lower.append(pt)
+    upper = []
+    for pt in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], pt) <= 0:
+            upper.pop()
+        upper.append(pt)
+    return lower[:-1] + upper[:-1]

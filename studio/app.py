@@ -300,8 +300,10 @@ class StudioWindow(QMainWindow):
         lap = lap_id if lap_id is not None else "-"
         self.video.set_readout(f"t = {fmt_time(t)}   speed = {speed} km/h   lap {lap}")
         self._update_diff_box(t, sp)
-        # g-meter overlay: feed the vehicle-frame g at the current media time (a cheap lookup).
-        # A no-op when the overlay is hidden; None outside a usable region blanks the live dot.
+        # g-meter overlay: feed the vehicle-frame g at the current media time (a cheap lookup) and
+        # the current lap (so the max-G envelope resets at the lap boundary, showing THIS lap's
+        # grip). A no-op when the overlay is hidden; None outside a usable region blanks the dot.
+        self.video.set_gmeter_lap(lap_id)
         self.video.set_g(self.session.g_at_time(t))
 
     def _follow_current_lap(self, lap_id: int | None, t: float):
