@@ -36,10 +36,9 @@ _LAP_SEEK_NUDGE_S = 0.010
 
 
 class StudioWindow(QMainWindow):
-    def __init__(self, paths: list[str], interpolate: bool = False, full: bool = False):
+    def __init__(self, paths: list[str], full: bool = False):
         super().__init__()
         self.resize(1340, 840)
-        self._interpolate = interpolate
         self._tick_timer = None  # created on the first _build_ui; reused across reloads
         self._build_menu()
         # If opt-in full-recording was requested on the CLI, discover the sibling chapters of the
@@ -57,7 +56,7 @@ class StudioWindow(QMainWindow):
         of which captures `session` at construction — simple and free of stale references."""
         self._paths = list(paths)
         print("studio: loading telemetry…", flush=True)
-        self.session = Session.load(paths, interpolate=self._interpolate)
+        self.session = Session.load(paths)
         n_ch = len(self.session.chapters) if self.session.chapters else 1
         print(f"studio: {self.session.laps.point_count()} points, "
               f"{self.session.lap_count()} laps, {n_ch} chapter(s).", flush=True)
@@ -423,13 +422,12 @@ class StudioWindow(QMainWindow):
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    interpolate = "--interp" in argv  # off by default; the C++ fit diverges on long sessions
     # Opt-in full-recording: discover & chain ALL sibling chapters of the single opened file.
     # DEFAULT (no flag) is unchanged — only the passed file(s) load. Explicit multiple paths
     # still chain exactly those, in order, regardless of the flag.
     full = "--full" in argv or "--chaptered" in argv
     paths = [a for a in argv if not a.startswith("-")] or [DEFAULT_SAMPLE]
     app = QApplication(sys.argv)
-    window = StudioWindow(paths, interpolate=interpolate, full=full)
+    window = StudioWindow(paths, full=full)
     window.show()
     return app.exec()
