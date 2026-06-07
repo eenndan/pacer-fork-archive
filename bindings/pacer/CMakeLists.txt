@@ -21,7 +21,6 @@ target_link_libraries(pacer INTERFACE
   pacer::interpolation
   pacer::laps
   pacer::gps-source
-  pacer::laps-display
 )
 
 if (SKBUILD)

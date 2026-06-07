@@ -1,15 +1,6 @@
-[submodule "3rdparty/imgui"]
-	path = 3rdparty/imgui
-	url = https://github.com/ocornut/imgui.git
-[submodule "3rdparty/implot"]
-	path = 3rdparty/implot
-	url = https://github.com/epezent/implot.git
 [submodule "3rdparty/gpmf-parser"]
 	path = 3rdparty/gpmf-parser
 	url = https://github.com/gopro/gpmf-parser.git
 [submodule "3rdparty/nanobind"]
 	path = 3rdparty/nanobind
 	url = https://github.com/wjakob/nanobind
-[submodule "3rdparty/hello_imgui"]
-	path = 3rdparty/hello_imgui
-	url = https://github.com/pthom/hello_imgui.git
