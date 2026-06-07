@@ -1,8 +1,8 @@
 """Parse a lap-timing transponder CSV (the ground-truth lap times) — pure Python, no pacer.
 
-Used to CALIBRATE the GPS9 clock-rate factor (`session.GPS9_RATE_FACTOR`) against real
-transponder data, and to re-derive it for a new camera/recording. The transponder CSV is a
-reference INPUT only (never committed to the repo).
+Used by `studio/_validate_wallclock.py` to VALIDATE the GPS9 true-clock lap timing against real
+transponder data out of sample. The transponder CSV is a reference INPUT only (never committed to
+the repo).
 
 The export from the timing system (e.g. "Team MIND, 24 Hour Race, Daytona 24 Hours 2026.csv")
 has columns `Lap,Pos,Lap Time,Diff to Last Lap,Diff to Best Lap,Gap in Front,Diff to P1,Speed`.

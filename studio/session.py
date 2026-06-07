@@ -172,33 +172,15 @@ def _read_gpmf(paths):
 GPS9_MIN_DT_S = 0.02    # an inter-sample GPS9 delta below this is a duplicate/garbage fix
 GPS9_MAX_DT_S = 0.40    # …above this, the run is broken (chapter break / dropout / rollover)
 
-# --- Transponder-calibrated GPS9 clock-rate factor ----------------------------------------
-# CALIBRATED against the real lap-timing transponder for THIS camera/recording (re-derived from
-# the real --full load by studio/_calib.py). After the per-run re-anchoring above, the app's 57
-# valid laps were aligned 1:1 to the kart's transponder lap times (Daytona 24h 2026, the 0060
-# recording = CSV stint laps 298–358; alignment correlation 0.995, anchored on the mutual best
-# lap + the in/out-lap endpoints — unambiguous, every other sequence offset correlates ~0). The
-# residual (app − transponder) over the 55 clean racing laps had mean +0.029 s, median +0.004 s,
-# std 0.158 s: i.e. the re-anchored gps9 axis was a small, CONSISTENT ~+0.05 % too LONG (a
-# least-squares clock-rate fit gives this), on top of irreducible ±0.16 s per-lap GPS noise
-# (10 Hz can't resolve a sub-100 ms crossing instant). Scaling the within-run GPS9 SPACING by
-# this one factor recenters the mean/median residual to ~0 (mean −0.005 s) and GENERALIZES —
-# 10-fold cross-validation held-out RMS 0.161 s, mean −0.0001 s (the fit is on a held-OUT-lap
-# basis, not the laps it was tuned on). One physical parameter (a clock rate), cross-validated,
-# NOT a per-lap fudge.
-#
-# Applied to the SPACING only, leaving each run still anchored at its naive (media-clock) start,
-# so video sync / chapter offsets are unchanged (the within-run skew a 0.05 % rate adds over a
-# ~245 s run is ≲0.13 s, the same order as the re-anchoring drift the gps9 axis already had).
-# Re-derive with `pixi run python -m studio._calib -- <rec.MP4> <transponder.csv> <lo> <hi>`
-# against a fresh transponder CSV if the camera changes. NOTE: the session-best lap's ~−0.19 s
-# residual after this is GPS NOISE, NOT a rate — it cannot be driven to the transponder value
-# without OVERfitting that single negative-tail outlier (it would need an implausible 9.978 Hz
-# and would push every OTHER lap ~+0.19 s long), so it is intentionally left unforced.
-GPS9_RATE_FACTOR = 0.999514  # multiply within-run GPS9 spacing; <1 = the gps9 axis ran long
+# NOTE: an earlier transponder-fit GPS9 clock-rate multiplier was REMOVED. The out-of-sample
+# validation (recording 0062, see studio/_validate_wallclock.py) proved it a 0060-specific
+# OVERFIT to GPS-dropout-tail skew, NOT a real clock rate: both recordings' true rate is ≈1.0
+# (−22 / −46 ppm, not the fitted −486 ppm), and applying the factor WORSENS the clean-lap RMS on
+# both. The plain GPS9 true-clock spacing (rate = 1.0) is already unbiased out of sample (0062
+# clean-lap mean +0.0015 s, ±0.053 s), so the timing below uses the GPS9 spacing verbatim.
 
 
-def _gps9_times(samples, spans, naive, rate_factor: float = GPS9_RATE_FACTOR):
+def _gps9_times(samples, spans, naive, rate_factor: float = 1.0):
     """Per-sample times built from the GPS9 fix timestamps' true spacing, re-anchored per
     contiguous run to the media (naive) clock. Falls back to the naive time for any sample
     whose GPS9 timestamp is absent/sentinel or sits across a run break, so a GPS5-only stream
@@ -209,9 +191,11 @@ def _gps9_times(samples, spans, naive, rate_factor: float = GPS9_RATE_FACTOR):
     run that would overtake the next run's anchor is clamped (can't happen for sane 10 Hz data
     but keeps the axis safe for video sync).
 
-    `rate_factor` (default GPS9_RATE_FACTOR) scales the WITHIN-RUN GPS9 spacing — the single
-    transponder-calibrated clock-rate correction (see GPS9_RATE_FACTOR). It multiplies only the
-    spacing, so each run stays anchored at its media-clock start (video sync unchanged)."""
+    `rate_factor` (default 1.0 = no correction) optionally scales the WITHIN-RUN GPS9 spacing.
+    It multiplies only the spacing, so each run stays anchored at its media-clock start (video
+    sync unchanged). It exists ONLY so the out-of-sample validator can probe an explicit `--rate`;
+    the load path leaves it at 1.0 because the GPS9 wall-clock spacing is already unbiased (the
+    former transponder-fit factor was an overfit — see the module note above)."""
     n = len(samples)
     if n == 0:
         return []
@@ -229,7 +213,7 @@ def _gps9_times(samples, spans, naive, rate_factor: float = GPS9_RATE_FACTOR):
         while (j + 1 < n and have[j + 1]
                and GPS9_MIN_DT_S <= (ts[j + 1] - ts[j]) / 1000.0 <= GPS9_MAX_DT_S):
             j += 1
-        if j > i:  # a real run [i, j]: anchor at its naive start, add rate-scaled GPS9 spacing
+        if j > i:  # a real run [i, j]: anchor at its naive start, add GPS9 spacing (rate=1.0)
             base_naive = naive[i]
             base_ts = ts[i]
             out[i:j + 1] = base_naive + rate_factor * (ts[i:j + 1] - base_ts) / 1000.0

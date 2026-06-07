@@ -49,36 +49,29 @@ How it works (key decisions, all done & verified):
   time so video sync / chapter offsets are unchanged; degrades to naive when no GPS9 timestamp is
   present. `--interp` still opts into the C++ gradient-descent fit, validated and auto-rejected
   when it diverges on long sessions (it does — keep it opt-in).
-- **Lap timing — transponder-calibrated GPS9 clock rate** (`session.GPS9_RATE_FACTOR = 0.999514`).
-  The re-anchored gps9 axis was cross-checked against the kart's REAL lap-timing transponder
-  (Daytona 24h 2026, the 0060 recording = CSV stint laps 298–358, parsed by
-  `studio/transponder.py`). The app's 57 valid laps aligned 1:1 to the transponder (correlation
-  **0.995**, anchored on the mutual best lap + the in/out-lap endpoints; every other sequence
-  offset correlates ~0 ⇒ unambiguous). Residual app−transponder over 55 clean racing laps was
-  mean **+0.029 s** / median +0.004 s / **std 0.158 s** — a small, consistent ~+0.05 % too-long
-  rate on top of ±0.16 s irreducible GPS noise. Scaling the within-run GPS9 SPACING by this one
-  clock-rate factor recenters the residual to mean **−0.005 s** and GENERALIZES (10-fold CV
-  held-out mean **−0.0001 s**, RMS **0.161 s**). One cross-validated physical parameter, NOT a
-  per-lap fudge; applied to spacing only so each run keeps its media-clock anchor (video sync
-  intact). Re-derive via `studio/_calib.py` if the camera changes. The session-best lap's ~−0.19 s
-  residual is a GPS-noise outlier (it cannot reach the transponder value without overfitting that
-  one lap → an implausible 9.978 Hz) and is the irreducible limit of 10 Hz GPS — NOT fudged.
-  - **OUT-OF-SAMPLE VALIDATION (recording 0062, report-only — `studio/_validate_wallclock.py`).**
-    The 0062 footage was matched to CSV laps **856–920** by four agreeing signals: GPS9 wall-clock
-    UTC start (2026-05-24 05:54:30 UTC, read straight from `GPSSample.timestamp_ms`, the absolute
-    UTC ms the core already computes), elapsed-time (17h54m after the 12:00 UTC race start), the
-    pit brackets (long lap 854 before / 921 after the stint), and a duration-correlation LOCK
-    (**corr 0.97** at offset 856, ≈0 elsewhere). Result: on the same basis the 0060 factor was fit
-    (clean racing laps), 0062's UNcalibrated GPS9 residual is mean **+0.029 s** — identical to 0060
-    — and the factor recenters it. BUT a re-run that EXCLUDES GPS-dropout laps (a single ~2 s hole
-    near S/F adds ~+0.85 s) shows the +0.029 s is **entirely dropout-tail skew, not a clock rate**:
-    dropout-excluded the uncalibrated mean is **+0.0015 s** (0060: +0.0030 s) and each recording's
-    own best-fit rate is **≈1.0** (0062 −22 ppm, 0060 −46 ppm — not the committed −486 ppm).
-    **VERDICT: GPS9 true-clock timing is unbiased and GENERALIZES (per-lap noise ±0.05–0.16 s); the
-    `GPS9_RATE_FACTOR` does NOT — it over-fits a 0060 dropout artifact and mildly HURTS the clean
-    laps on both recordings (shifts them to −0.032 s, RMS up).** Recommendation (orchestrator/user
-    decide; value left UNCHANGED here): make the factor opt-in / default 1.0 (or drop it) and use a
-    robust centre statistic for any future fit. Re-run for any recording with `_validate_wallclock`.
+- **Lap timing — GPS9 true-clock axis is unbiased; VALIDATED OUT-OF-SAMPLE (no calibration).**
+  The re-anchored GPS9 wall-clock spacing (rate = 1.0, NO factor) is the default and was validated
+  against the kart's REAL lap-timing transponder (Daytona 24h 2026, parsed by
+  `studio/transponder.py`) on a SECOND, independent recording — **0062** — via
+  `studio/_validate_wallclock.py`. The 0062 footage was matched to CSV laps **856–920** by four
+  agreeing signals: GPS9 wall-clock UTC start (2026-05-24 05:54:30 UTC, read straight from
+  `GPSSample.timestamp_ms`, the absolute UTC ms the core already computes), elapsed-time (17h54m
+  after the 12:00 UTC race start), the pit brackets (long lap 854 before / 921 after the stint),
+  and a duration-correlation LOCK (**corr 0.97** at offset 856, ≈0 elsewhere). On the clean racing
+  laps (GPS-dropout laps excluded), the GPS9 residual app−transponder is mean **+0.0015 s** /
+  ±**0.053 s** (0060: +0.0030 s), and each recording's own best-fit clock rate is **≈1.0** (0062
+  −22 ppm, 0060 −46 ppm). So the timing GENERALIZES and needs no correction.
+  - **An earlier transponder-fit clock-rate factor (0.999514, −486 ppm) was REMOVED.** It was a
+    0060-specific OVERFIT to GPS-dropout-tail skew, not a real clock rate: the apparent ~+0.029 s
+    "bias" it was tuned to remove is **entirely dropout-tail skew** (a single ~2 s GPS hole near
+    S/F adds ~+0.85 s to that lap) — present identically on 0060 AND 0062 — and applying the factor
+    WORSENS the clean-lap RMS on both (0062 0.053→0.062 s, 0060 0.087→0.092 s). Both recordings'
+    true rate is ≈1.0, nowhere near −486 ppm. `_validate_wallclock.py --rate <k>` can re-probe any
+    explicit rate to reproduce this; the load path applies none.
+  - **GPS-dropout laps are a SEPARATE, already-tracked issue (future work).** Timing a lap whose
+    S/F crossing sits inside a ~2 s GPS hole is inherently ±0.85 s; such a lap is a candidate to
+    FLAG as low-confidence rather than to absorb into a global clock rate (the gap-aware distance
+    already handles the map side). Use a robust centre statistic for any future calibration.
 - **Lap distance — gap-aware** (C++ `SegmentDistance` in `pacer/laps/laps.cpp`, feeding both
   `GetLapDistance` and the per-lap `cum_distances`): normal segments use the GPS chord; a segment
   spanning a DROPOUT (point-to-point Δt > 0.35 s) uses the trapezoidal speed integral
@@ -227,8 +220,8 @@ How it works (key decisions, all done & verified):
   **Plot-cursor scrub seeks are coalesced to ≤1 per tick** (latest target wins) — never seek
   per-mouse-move; the drag↔`positionChanged` feedback loop is gated (`_user_dragging`/`_suppress`).
 - Module map: `session.py` (data/analysis — only pacer user) · `tracks.py` (track registry) ·
-  `transponder.py` (lap-timing-CSV parser, pure-Python, no pacer — the GPS9 rate calibration's
-  ground-truth) · `gapfill.py` (GPS-gap reconstruction, pure numpy) · `reference.py` + `mk_centerline.json` /
+  `transponder.py` (lap-timing-CSV parser, pure-Python, no pacer — the ground-truth the GPS9 timing
+  is validated against by `_validate_wallclock.py`) · `gapfill.py` (GPS-gap reconstruction, pure numpy) · `reference.py` + `mk_centerline.json` /
   `build_reference.py` (georeferenced fallback centerline) · `map_view.py` · `plots_view.py` ·
   `lap_table.py` · `video_view.py` · `app.py` (wiring) · `diagnose.py` / `denoise_check.py`
   (`--gaps` renders the filled map + prints gap metrics) / `_smoke.py` / `_analysis_dump.py`

@@ -1,10 +1,13 @@
-"""Out-of-sample validation of the GPS9 timing (and its `session.GPS9_RATE_FACTOR`) against a
-lap-timing transponder CSV — and the wall-clock AUTO-DISCOVERY of which CSV laps a recording
-covers (so a validation can be re-run for ANY recording without hand-entering a lap range).
+"""Out-of-sample validation of the GPS9 true-clock lap timing against a lap-timing transponder
+CSV — and the wall-clock AUTO-DISCOVERY of which CSV laps a recording covers (so a validation can
+be re-run for ANY recording without hand-entering a lap range).
 
-Companion to `studio/_calib.py`: `_calib` *fits* the clock-rate factor on one recording, this
-*validates* it (report-only) on a second, independent recording. The CSV is a reference INPUT
-only — never committed.
+This is the evidence that the default GPS9 wall-clock timing (rate = 1.0, no calibration) is
+UNBIASED out of sample: on recording 0062 the clean-lap residual is mean +0.0015 s, ±0.053 s. It
+also proved that an earlier transponder-fit clock-rate multiplier was a 0060-specific overfit to
+GPS-dropout-tail skew (both recordings' true rate is ≈1.0), so that factor was removed; the
+optional `--rate` arg (default 1.0 = the shipping behaviour) lets you re-probe any explicit rate to
+reproduce that finding. The CSV is a reference INPUT only — never committed.
 
 The matching CSV lap window is reconstructed from FOUR independent signals, which must agree:
 
@@ -43,10 +46,10 @@ import sys
 import numpy as np
 
 from studio import chapters, transponder
-from studio.session import GPS9_RATE_FACTOR, Session, _read_gpmf
+from studio.session import Session, _read_gpmf
 
 PIT_LAP_S = 120.0   # a lap at/above this is a pit / driver-change lap, not a racing lap
-RACING_MAX_S = 72.0  # the "clean racing lap" cap used for residual stats (matches _calib)
+RACING_MAX_S = 72.0  # the "clean racing lap" cap used for residual stats
 DROPOUT_GAP_S = 0.35  # an interior point-to-point time jump above this is a GPS dropout
 
 
@@ -163,7 +166,8 @@ def _parse_when(text: str) -> dt.datetime:
 
 # --------------------------------------------------------------------------------- main
 def run(recording: str, csv_path: str, race_start: dt.datetime,
-        local_start: dt.datetime | None = None, dump: str | None = None) -> dict:
+        local_start: dt.datetime | None = None, dump: str | None = None,
+        rate: float = 1.0) -> dict:
     paths = chapters.discover_siblings(recording)
     print(f"recording: {chapters.recording_label(paths)} ({len(paths)} chapter(s))")
 
@@ -204,17 +208,21 @@ def run(recording: str, csv_path: str, race_start: dt.datetime,
               f"({laps[pit_before]:.1f} s pit/driver-change); "
               f"closes at CSV lap {pit_after_end} ({laps.get(pit_after_end, float('nan')):.1f} s)")
 
-    # --- app valid laps (calibrated + uncalibrated) ---
+    # --- app valid laps on the shipping GPS9 true-clock axis (rate = 1.0, no calibration) ---
     sess = Session.load(paths)
     valid = sess.valid_lap_ids()
-    cal = np.array([sess.laps.lap_time(i) for i in valid])
-    uncal = cal / GPS9_RATE_FACTOR  # a lap inside one run scales linearly with the factor
-    print(f"\napp valid laps: n={len(valid)} best={cal.min():.4f}s median={np.median(cal):.4f}s")
+    app = np.array([sess.laps.lap_time(i) for i in valid])
+    # Optional explicit rate probe: a lap inside one contiguous run scales linearly with the
+    # within-run spacing, so a hypothetical `rate` axis is `rate * app`. `rate == 1.0` (default,
+    # the shipping behaviour) makes `scaled == app` and the before/after columns coincide.
+    scaled = rate * app
+    print(f"\napp valid laps: n={len(valid)} best={app.min():.4f}s median={np.median(app):.4f}s "
+          f"(rate={rate})")
 
     # --- SIGNAL 4: duration-correlation LOCK (search a window around the elapsed-time guess) ---
     lo = max(min(laps), drv_start - 12)
     hi = drv_start + 12
-    start, corr, offsets = best_offset(uncal, laps, lo, hi)
+    start, corr, offsets = best_offset(app, laps, lo, hi)
     if start is None:
         print("could not lock an alignment (no high-correlation offset found).")
         return {}
@@ -226,45 +234,46 @@ def run(recording: str, csv_path: str, race_start: dt.datetime,
         mark = "  <== LOCKED" if s == start else ""
         print(f"    start={s}: corr={c:+.4f} (n_racing={nrac}){mark}")
 
-    # --- residuals BEFORE vs AFTER calibration ---
-    r_uncal = uncal - csv_t
-    r_cal = cal - csv_t
-    m = (uncal <= RACING_MAX_S) & (csv_t <= RACING_MAX_S)
+    # --- residuals: the default (rate=1.0) axis, plus the explicit-rate probe if rate != 1.0 ---
+    r_def = app - csv_t
+    r_scaled = scaled - csv_t
+    m = (app <= RACING_MAX_S) & (csv_t <= RACING_MAX_S)
     # Per-lap GPS dropout flag (a dropout near S/F distorts the crossing instant).
     dropout = np.array([_has_dropout(sess, i) for i in valid])
     clean = m & ~dropout
 
     def report(mask, label):
-        su, sc = residual_stats(r_uncal[mask]), residual_stats(r_cal[mask])
+        sd = residual_stats(r_def[mask])
         print(f"\n{label} (n={int(mask.sum())}):")
-        print(f"  BEFORE cal (rate=1.0):       mean={su['mean']:+.4f} median={su['median']:+.4f} "
-              f"std={su['std']:.4f} RMS={su['rms']:.4f}")
-        print(f"  AFTER  cal (rate={GPS9_RATE_FACTOR}): mean={sc['mean']:+.4f} "
-              f"median={sc['median']:+.4f} std={sc['std']:.4f} RMS={sc['rms']:.4f}")
-        return su, sc
+        print(f"  default (rate=1.0):  mean={sd['mean']:+.4f} median={sd['median']:+.4f} "
+              f"std={sd['std']:.4f} RMS={sd['rms']:.4f}")
+        if rate != 1.0:
+            ss = residual_stats(r_scaled[mask])
+            print(f"  probe (rate={rate}): mean={ss['mean']:+.4f} "
+                  f"median={ss['median']:+.4f} std={ss['std']:.4f} RMS={ss['rms']:.4f}")
+        return sd
 
-    su_all, sc_all = report(np.ones(len(valid), bool), "ALL aligned laps")
-    su_rac, sc_rac = report(m, "CLEAN racing laps (<=72 s both)")
-    su_cln, sc_cln = report(clean, "CLEAN racing laps, GPS-dropout laps excluded")
+    sd_all = report(np.ones(len(valid), bool), "ALL aligned laps")
+    sd_rac = report(m, "CLEAN racing laps (<=72 s both)")
+    sd_cln = report(clean, "CLEAN racing laps, GPS-dropout laps excluded")
 
-    # 0062's own best-fit rate (out-of-sample for the committed factor).
-    a, c = uncal[clean], csv_t[clean]
+    # This recording's own best-fit clock rate on the clean laps — the proof the true rate is ≈1.0
+    # (a calibration factor far from 1.0 would be an overfit; this is exactly why one was removed).
+    a, c = app[clean], csv_t[clean]
     k_fit = float(np.sum(a * c) / np.sum(a * a))
     print(f"\nthis recording's best-fit clock rate (clean laps): k={k_fit:.6f} "
-          f"((k-1)={(k_fit - 1) * 1e6:+.0f} ppm); committed={GPS9_RATE_FACTOR} "
-          f"((k-1)={(GPS9_RATE_FACTOR - 1) * 1e6:+.0f} ppm)")
+          f"((k-1)={(k_fit - 1) * 1e6:+.0f} ppm) — ≈1.0 confirms the default axis needs no factor")
 
     # Per-lap table.
-    print(f"\n{'k':>3} {'app':>4} {'csv':>4} {'csv_s':>8} {'uncal':>8} {'cal':>8} "
-          f"{'r_uncal':>8} {'r_cal':>8} {'flag':>10}")
+    print(f"\n{'k':>3} {'app':>4} {'csv':>4} {'csv_s':>8} {'app_s':>8} {'r_def':>8} {'flag':>10}")
     rows = []
     for k, lid in enumerate(valid):
         flag = "racing" if clean[k] else ("dropout" if dropout[k] else "pit/slow")
-        print(f"{k:>3} {lid:>4} {csv_ids[k]:>4} {csv_t[k]:>8.3f} {uncal[k]:>8.3f} {cal[k]:>8.3f} "
-              f"{r_uncal[k]:>+8.3f} {r_cal[k]:>+8.3f} {flag:>10}")
+        print(f"{k:>3} {lid:>4} {csv_ids[k]:>4} {csv_t[k]:>8.3f} {app[k]:>8.3f} "
+              f"{r_def[k]:>+8.3f} {flag:>10}")
         rows.append({"k": k, "app_lap": int(lid), "csv_lap": csv_ids[k],
-                     "csv_s": float(csv_t[k]), "uncal_s": float(uncal[k]), "cal_s": float(cal[k]),
-                     "r_uncal": float(r_uncal[k]), "r_cal": float(r_cal[k]), "flag": flag})
+                     "csv_s": float(csv_t[k]), "app_s": float(app[k]),
+                     "r_def": float(r_def[k]), "flag": flag})
 
     result = {
         "recording": chapters.recording_label(paths),
@@ -273,9 +282,8 @@ def run(recording: str, csv_path: str, race_start: dt.datetime,
         "csv_lap_range": [csv_ids[0], csv_ids[-1]],
         "pit_brackets": [pit_before, pit_after_end],
         "duration_corr": corr, "alignment_offsets": offsets,
-        "rate_factor": GPS9_RATE_FACTOR, "k_fit_this_recording": k_fit,
-        "before_cal": {"all": su_all, "racing": su_rac, "clean": su_cln},
-        "after_cal": {"all": sc_all, "racing": sc_rac, "clean": sc_cln},
+        "rate": rate, "k_fit_this_recording": k_fit,
+        "default_cal": {"all": sd_all, "racing": sd_rac, "clean": sd_cln},
         "per_lap": rows,
     }
     if dump:
@@ -303,9 +311,13 @@ def main(argv) -> int:
     ap.add_argument("--local-start", default=None,
                     help="stated wall-clock the footage began (sanity check of the UTC offset)")
     ap.add_argument("--dump", default=None, help="write the full result JSON to this path")
+    ap.add_argument("--rate", type=float, default=1.0,
+                    help="optional explicit clock-rate multiplier to PROBE against the default "
+                         "rate=1.0 axis (the shipping behaviour); e.g. 0.999514 reproduces the "
+                         "removed-overfit finding. Default 1.0 = no probe.")
     args = ap.parse_args([a for a in argv if a != "--"])
     run(args.recording, args.csv, _parse_when(args.race_start),
-        _parse_when(args.local_start) if args.local_start else None, args.dump)
+        _parse_when(args.local_start) if args.local_start else None, args.dump, args.rate)
     return 0
 
 

@@ -62,7 +62,7 @@ gap-fill unit tests live in [`tests/test_gapfill.py`](../tests/test_gapfill.py) 
 |------|------|
 | [session.py](session.py) | Loads GPMF → `pacer.Laps`; exposes trace/lap/delta arrays + timing-line write-back. Owns the load/segmentation pipeline (primary `pacer` user). |
 | [tracks.py](tracks.py) | Registry of known tracks (Daytona MK); detects the track by centroid and gives its fixed start/finish line. The only other module that names `pacer` (geometry only). |
-| [transponder.py](transponder.py) | Pure-Python (no `pacer`): defensive parser for a lap-timing **transponder CSV** (the ground truth that calibrated `session.GPS9_RATE_FACTOR`). Reads only the `Lap` + `Lap Time` columns (the later columns embed commas/quotes). A reference **input** only — the CSV is never committed. Unit-tested in [`tests/test_calibration.py`](../tests/test_calibration.py). |
+| [transponder.py](transponder.py) | Pure-Python (no `pacer`): defensive parser for a lap-timing **transponder CSV** (the ground truth the GPS9 timing is **validated** against, out of sample, by [`_validate_wallclock.py`](_validate_wallclock.py)). Reads only the `Lap` + `Lap Time` columns (the later columns embed commas/quotes). A reference **input** only — the CSV is never committed. |
 | [video_view.py](video_view.py) | `QMediaPlayer` + `QVideoWidget` + `QAudioOutput`; emits `positionChanged(s)` in **global session time**, exposes `seek(s)` (global) + `is_playing()`/`pause()`/`play()` + a **mute/unmute toggle** (🔇/🔊, default muted). For a **chaptered** recording it holds the `ChapterMap`, switches source on a cross-chapter seek, and **auto-advances** to the next chapter at end-of-media — one source at a time, one continuous global slider. |
 | [chapters.py](chapters.py) | Pure-Python (no `pacer`): the GoPro chaptered-filename parser, sibling **discovery/grouping** (same recording number, same folder, ordered by chapter), and the **`ChapterMap`** global↔chapter time mapping (per-chapter offset table). Unit-tested in [`tests/test_chapters.py`](../tests/test_chapters.py). |
 | [map_view.py](map_view.py) | Best lap (faint) + current/playing lap (highlighted) + **freely-draggable** start/sector timing lines + video marker (drag **constrained to the current lap** so it never jumps laps). Each lap is drawn as measured (solid) + reconstructed gap-fill (dashed/dimmed) segments. The full all-laps trace is intentionally not drawn (perf + clarity). |
@@ -110,26 +110,29 @@ gap-fill unit tests live in [`tests/test_gapfill.py`](../tests/test_gapfill.py) 
   `interpolate_timestamps` global Adam fit DIVERGES on long/noisy sessions (compresses lap times,
   overruns the video); it stays opt-in via `--interp`, validated (monotonic + within the video
   duration) and falling back to naive if bad.
-- **Transponder-calibrated GPS9 clock rate** (`session.GPS9_RATE_FACTOR = 0.999514`). The
-  re-anchored gps9 axis was validated against the kart's real lap-timing **transponder** (Daytona
-  24h 2026, the 0060 recording = CSV stint laps 298–358; parsed defensively by
-  `studio/transponder.py`). The app's 57 valid laps aligned **1:1** to the transponder laps
-  (correlation **0.995**, anchored on the mutual best lap + the in/out-lap endpoints — every
-  other sequence offset correlates ~0, so the mapping is unambiguous). The residual
-  (app − transponder) over the 55 clean racing laps was mean **+0.029 s** / median +0.004 s /
-  **std 0.158 s**: the re-anchored axis ran a small, *consistent* ~**+0.05 %** long on top of
-  irreducible ±0.16 s per-lap GPS noise. Scaling the within-run GPS9 spacing by this one
-  clock-rate factor recenters the residual to **mean −0.005 s / median −0.030 s** and
-  **generalizes** — 10-fold cross-validation held-out mean **−0.0001 s**, RMS **0.161 s** (fit on
-  held-OUT laps, not the laps it was tuned on). One physical parameter (a clock rate),
-  cross-validated, applied to the *spacing only* so each run stays anchored at its media-clock
-  start (**video sync unchanged**). Re-derive with
-  `pixi run python -m studio._calib -- <rec.MP4> <transponder.csv> <lo> <hi>` against a fresh
-  transponder CSV if the camera changes. NB: the session-best lap's ~**−0.19 s** residual is GPS
-  noise (a single negative-tail outlier — the kart's fastest lap happened to clock ~0.19 s short),
-  **not** a rate: it cannot be driven to the transponder value without OVERfitting that one lap (it
-  would need an implausible 9.978 Hz and push every *other* lap ~+0.19 s long), so it is left
-  unforced — 10 Hz GPS cannot resolve a sub-100 ms crossing instant.
+- **GPS9 true-clock timing is unbiased — VALIDATED OUT-OF-SAMPLE, no calibration factor.** The
+  re-anchored GPS9 wall-clock axis (rate = 1.0, *no* multiplier) was validated against the kart's
+  real lap-timing **transponder** (Daytona 24h 2026; CSV parsed defensively by
+  `studio/transponder.py`) on a SECOND, independent recording — **0062** — by
+  `studio/_validate_wallclock.py`. The 0062 footage auto-locked to CSV laps **856–920** by four
+  agreeing signals (GPS9 UTC start, elapsed-time, pit brackets, and a duration-correlation LOCK at
+  **corr 0.97**, ≈0 elsewhere). On the clean racing laps (GPS-dropout laps excluded) the residual
+  app − transponder is mean **+0.0015 s** / **±0.053 s** (0060: +0.0030 s), and each recording's
+  own best-fit clock rate is **≈1.0** (0062 −22 ppm, 0060 −46 ppm). So the timing GENERALIZES and
+  needs no correction. Re-validate any recording with
+  `pixi run python -m studio._validate_wallclock -- <rec.MP4> <transponder.csv> --race-start <UTC>`.
+  - **A previously-committed transponder-fit clock-rate factor (0.999514, −486 ppm) was REMOVED**
+    after this validation. It was a 0060-specific OVERFIT to GPS-dropout-tail skew, **not** a real
+    clock rate: the apparent ~+0.029 s "bias" it cancelled is **entirely dropout-tail skew** — a
+    single ~2 s GPS hole near the start/finish adds ~+0.85 s to that one lap, present identically
+    on 0060 *and* 0062 — and applying the factor WORSENS the clean-lap RMS on both (0062
+    0.053 → 0.062 s; 0060 0.087 → 0.092 s). Both true rates are ≈1.0, nowhere near −486 ppm. The
+    validator's optional `--rate <k>` re-probes any explicit rate to reproduce this; the load path
+    applies none.
+  - **GPS-dropout laps are a separate, already-tracked issue (future work).** Timing a lap whose
+    S/F crossing sits inside a ~2 s GPS hole is inherently ±0.85 s — a candidate to FLAG as
+    low-confidence rather than absorb into a global clock rate (the gap-aware distance below already
+    handles the map side).
 - **Lap distance is gap-aware** (C++ `SegmentDistance` in `laps.cpp`, used by both
   `GetLapDistance` and the per-lap `cum_distances`). A normal segment is measured by the GPS chord
   (correct for well-sampled track); across a DROPOUT (a point-to-point time jump > 0.35 s) the
