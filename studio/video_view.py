@@ -281,6 +281,17 @@ class VideoView(QWidget):
         if self._compare and self.secondary is not None:
             self.secondary.pause()
 
+    def pause_if_playing(self):
+        """Pause each pane ONLY if it is actually playing. Pausing a freshly-loaded pane that has
+        never played leaves QMediaPlayer in StoppedState, and a subsequent play() from StoppedState
+        restarts from position 0 — discarding a seek-to-S/F. So the compare reset uses this instead
+        of pause(): it stops a playing pane (which then resumes from the seek on play) but never
+        disturbs an already-stopped/paused pane, keeping its seeked lap-start position intact."""
+        if self.pane.is_playing():
+            self.pane.pause()
+        if self._compare and self.secondary is not None and self.secondary.is_playing():
+            self.secondary.pause()
+
     def toggle(self):
         # Drive both panes from the PRIMARY's state so they stay in lockstep (a single source of
         # truth for the transport icon, which follows the primary).
