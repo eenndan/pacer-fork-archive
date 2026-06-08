@@ -158,6 +158,7 @@ class _PaneCell(QWidget):
 class VideoView(QWidget):
     positionChanged = Signal(float)  # GLOBAL seconds on the session clock (forwarded from the pane)
     chapterChanged = Signal(int)     # current chapter index (forwarded from the PRIMARY pane)
+    seamLoading = Signal(bool)       # PRIMARY pane is reopening the next chapter at a seam (app hint)
     compareToggled = Signal(bool)    # the "Compare videos" toggle flipped (app seeds/tears down)
     # A pane's lap picker was used: (side, lap_id) — app repoints that side (lap+window+caption+
     # chart overlay + badge). side is PRIMARY (0) or SECONDARY (1).
@@ -173,6 +174,9 @@ class VideoView(QWidget):
         self.pane.positionChanged.connect(self._on_pane_position)
         self.pane.chapterChanged.connect(self.chapterChanged)
         self.pane.playbackStateChanged.connect(self._on_state)
+        # Forward the PRIMARY pane's seam-reopen hint so the app can show a brief "loading next
+        # chapter…" indicator. Only the primary drives chrome (the secondary is video-only).
+        self.pane.seamLoading.connect(self.seamLoading)
 
         # Compare-mode state. The secondary pane + cells exist ONLY while compare is on (lazy).
         self._compare = False

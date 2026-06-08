@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QUrl, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import QVBoxLayout, QWidget
@@ -64,6 +64,13 @@ _OVERLAY_PAD = 12           # px inset from the video corner
 # be overshot by a frame nor under-resolved by the ms quantization. Far smaller than a frame.
 _WINDOW_STOP_TOL_S = 0.002
 
+# Bounded-resume watchdog for the cross-chapter seam. The reopen is normally near-instant once the
+# switch gate lets the deferred seek+resume fire on the genuine load (~0.1 s on the 12 GB chapters),
+# but a recording/disk hiccup must NEVER leave the player hung. If a pending cross-chapter seek
+# hasn't been applied within this budget after the source switch, the watchdog force-applies it
+# (seek + resume) regardless of the status sequence, so playback always resumes within a bound.
+_SEAM_RESUME_WATCHDOG_MS = 8000
+
 
 class PlayerPane(QWidget):
     """One single-lap player: its own decoder + video surface + audio + g-meter overlay.
@@ -75,6 +82,10 @@ class PlayerPane(QWidget):
     positionChanged = Signal(float)  # GLOBAL seconds on the session clock
     chapterChanged = Signal(int)     # current chapter index (for the UI label)
     playbackStateChanged = Signal(object)  # forwards QMediaPlayer.PlaybackState to the shell
+    # True while a cross-chapter source switch is reopening the next chapter (the shell shows a
+    # brief "loading next chapter…" indicator so a seam hitch reads as intentional); False once the
+    # next chapter has loaded and the deferred seek+resume has been applied.
+    seamLoading = Signal(bool)
 
     def __init__(self, source: str | chapters.ChapterMap | None):
         super().__init__()
@@ -95,6 +106,15 @@ class PlayerPane(QWidget):
         # also covers the auto-advance (EndOfMedia -> load next chapter at local 0, keep playing),
         # so a stale EndOfMedia from the old source while a switch is pending is safely ignored.
         self._pending: tuple[int, float, bool] | None = None
+        # A source switch is in flight: setSource() is async AND the Qt/FFmpeg backend SYNCHRONOUSLY
+        # re-emits the OLD source's leftover statuses (a spurious LoadedMedia, and a stale EndOfMedia)
+        # the instant setSource is called — BEFORE it has begun parsing the new file. Honouring the
+        # pending seek+play on that spurious LoadedMedia consumes _pending, then the REAL load (which
+        # always passes through LoadingMedia) resets the player and the seek+play is silently
+        # discarded — the player sits idle forever (the chapter-seam stall). So a switch is gated:
+        # we ignore loaded/end statuses until the load genuinely begins (a LoadingMedia transition,
+        # or a real load completion arriving after the synchronous burst), then apply _pending once.
+        self._switching = False
         self._latest_global = 0.0  # last emitted global time (for current_global_time())
         # Compare-mode lap window: when set to (start_global, end_global) the pane plays "time
         # into lap" — it pauses + clamps at `end_global` instead of running to the end of the
@@ -139,6 +159,15 @@ class PlayerPane(QWidget):
         self.player.playbackStateChanged.connect(self._on_state)
         self.player.mediaStatusChanged.connect(self._on_media_status)
 
+        # Bounded-resume watchdog: a one-shot armed when a cross-chapter switch defers a seek+resume,
+        # disarmed the instant the seek is applied on the genuine load. If it ever fires, the reopen
+        # took longer than the budget (a disk/recording hiccup) — force-apply the pending seek+resume
+        # so playback can NEVER hang at a seam. Parented to the pane so it's torn down with it.
+        self._seam_watchdog = QTimer(self)
+        self._seam_watchdog.setSingleShot(True)
+        self._seam_watchdog.setInterval(_SEAM_RESUME_WATCHDOG_MS)
+        self._seam_watchdog.timeout.connect(self._on_seam_watchdog)
+
         if self._chapters is not None:
             self._set_source(0)
 
@@ -167,14 +196,25 @@ class PlayerPane(QWidget):
 
     def _set_source(self, index: int):
         """Load chapter `index` as the player's source (no seek/play here — callers arrange the
-        post-load seek via self._pending, applied on LoadedMedia)."""
+        post-load seek via self._pending, applied once the NEW media has genuinely loaded).
+
+        Arms the switch gate (_switching): the backend re-emits the old source's leftover
+        LoadedMedia/EndOfMedia synchronously inside setSource(), before it parses the new file, so
+        _on_media_status must ignore those until the real load begins (see _switching / the gate)."""
         if self._chapters is None:
             return
         index = min(max(index, 0), len(self._chapters) - 1)
         self._current_chapter = index
+        # Arm the switch gate BEFORE setSource so the synchronous spurious statuses it emits are
+        # ignored (only relevant when a post-load action is pending; harmless otherwise).
+        self._switching = True
         path = self._chapters.chapters[index].path
         self.player.setSource(QUrl.fromLocalFile(os.path.abspath(path)))
         self.chapterChanged.emit(index)
+        # If this switch defers a seek+resume, arm the bounded-resume watchdog so a stuck reopen
+        # can't hang playback. Restarted here (idempotent) and stopped when _pending is applied.
+        if self._pending is not None:
+            self._seam_watchdog.start()
 
     # ------------------------------------------------------------- transport
     def is_playing(self) -> bool:
@@ -339,6 +379,7 @@ class PlayerPane(QWidget):
     def stop(self):
         """Stop the decoder AND close the overlay window — clean disposal for a reload / Phase B
         pane teardown (the overlay is a top-level window with no parent window to close it)."""
+        self._seam_watchdog.stop()  # no stray seam timer firing into a torn-down player
         self.player.stop()
         self.gmeter.close()
 
@@ -350,6 +391,7 @@ class PlayerPane(QWidget):
         decoder open. So: stop the decoder, detach the video/audio sinks, close the overlay window,
         and explicitly deleteLater() the player + audio so the FFmpeg decoder + the audio device
         are released promptly. The pane widget itself is deleteLater'd by the caller. Idempotent."""
+        self._seam_watchdog.stop()  # no stray seam timer firing into a deleted player
         try:
             self.player.stop()
             self.player.setVideoOutput(None)
@@ -385,8 +427,27 @@ class PlayerPane(QWidget):
         self.positionChanged.emit(global_s)
 
     def _on_media_status(self, status):
-        """Apply a deferred cross-chapter seek once the new source has loaded, and auto-advance
-        to the next chapter at end-of-media so playback flows across the whole recording."""
+        """Apply a deferred cross-chapter seek once the new source has GENUINELY loaded, and
+        auto-advance to the next chapter at end-of-media so playback flows across the whole
+        recording.
+
+        THE CHAPTER-SEAM GATE (_switching). setSource() is async, but the Qt/FFmpeg backend
+        SYNCHRONOUSLY re-emits the OLD source's leftover statuses the instant setSource is called —
+        a spurious LoadedMedia and a stale EndOfMedia — BEFORE it begins parsing the new file. The
+        real load then arrives a beat later as LoadingMedia -> LoadedMedia/BufferedMedia. If we
+        honour _pending on that spurious LoadedMedia we consume it, the subsequent real load resets
+        the player, and the seek+resume play() is silently discarded — playback never resumes (the
+        seam stall). So while _switching is set we IGNORE every status until LoadingMedia confirms
+        the real load has begun; only then is the next LoadedMedia/BufferedMedia the genuine one we
+        apply _pending on. The stale EndOfMedia is likewise ignored while switching."""
+        if self._switching:
+            # The real load always passes through LoadingMedia; that transition marks the end of the
+            # synchronous spurious burst. Open the gate there and wait for the genuine load.
+            if status == QMediaPlayer.MediaStatus.LoadingMedia:
+                self._switching = False
+            # Ignore the spurious LoadedMedia/EndOfMedia emitted before the real load begins.
+            return
+
         loaded = status in (
             QMediaPlayer.MediaStatus.LoadedMedia,
             QMediaPlayer.MediaStatus.BufferedMedia,
@@ -394,24 +455,49 @@ class PlayerPane(QWidget):
         if loaded and self._pending is not None:
             index, local, resume = self._pending
             if index == self._current_chapter:
-                self._pending = None
-                self.player.setPosition(int(local * 1000))
-                if resume:
-                    self.player.play()
+                self._apply_pending(local, resume)
             return
 
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
             self._on_end_of_media()
 
+    def _apply_pending(self, local: float, resume: bool):
+        """Apply the deferred cross-chapter seek (to `local` seconds) and optionally resume play,
+        clearing _pending + the seam state. Shared by the genuine-load path and the watchdog so the
+        resume is identical however it's triggered."""
+        self._pending = None
+        self._switching = False
+        self._seam_watchdog.stop()
+        self.player.setPosition(int(local * 1000))
+        if resume:
+            self.player.play()
+        # Seam reopen finished: drop the "loading next chapter…" indicator.
+        self.seamLoading.emit(False)
+
+    def _on_seam_watchdog(self):
+        """Bounded-resume fallback: the deferred cross-chapter seek wasn't applied within the budget
+        (a slow/hiccuping reopen). Force-apply it so playback resumes regardless of the status
+        sequence — playback must NEVER hang at a seam. No-op if _pending was already cleared."""
+        if self._pending is None:
+            return
+        index, local, resume = self._pending
+        # Only force-apply if the intended chapter is in fact the loaded source (it is, since
+        # _set_source set _current_chapter synchronously); apply the seek+resume regardless of gate.
+        if index == self._current_chapter:
+            self._apply_pending(local, resume)
+
     def _on_end_of_media(self):
         """Chapter i reached its end. If there's a next chapter, load it and continue playing from
         0 (seamless auto-advance); otherwise it's the true end of the session — leave it paused at
-        the end. A brief reopen hitch at the seam is expected (QMediaPlayer reopens the file)."""
+        the end. The reopen is fast (the gate in _on_media_status makes the deferred seek+resume
+        fire on the GENUINE load), but signal seamLoading so the shell can show a brief, clearly
+        styled "loading next chapter…" hint for the reopen window."""
         if self._chapters is None:
             return
         nxt = self._current_chapter + 1
         if nxt < len(self._chapters):
             # Auto-advance: keep playing into the next chapter from its start.
+            self.seamLoading.emit(True)
             self._pending = (nxt, 0.0, True)
             self._set_source(nxt)
 
