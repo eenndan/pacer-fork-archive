@@ -18,9 +18,14 @@ exactly as today — its `positionChanged` still feeds the app. The SECONDARY (r
 created LAZILY on toggle-on (its own source = the session ChapterMap), is VIDEO-ONLY (its
 `positionChanged` is NOT forwarded to the app), is always muted, and is torn down (stop +
 deleteLater the player+audio, .close() its g-meter overlay) on toggle-off and on any reload, so
-no decoder/overlay leaks. Each pane shows a caption ("lap N  m:ss.mmm"), a compact lap picker to
-repoint that side (emits `paneRepointRequested`), and a "Δ vs other" badge the app updates. Play/
-pause/mute fan out to BOTH panes; the g-meter toggle applies per-pane (both default off).
+no decoder/overlay leaks. Each pane shows a caption ("lap N · m:ss.mmm", ★ on the best lap), a
+compact lap picker to repoint that side (its items carry the lap time too; emits
+`paneRepointRequested`), and a "Δ vs other" badge the app updates. Play/pause/mute fan out to
+BOTH panes; the g-meter toggle applies per-pane (both default off).
+
+EVERY change to the compared pair (enter, either picker repoint) re-seeks BOTH panes to their
+lap's start line and PAUSES both, so the two videos are always realigned at S/F and ready to roll
+together on the next Play — the app owns this reset (see _reset_pair_to_start).
 
 A recording can be a single file OR a chaptered multi-file recording. The slider + the emitted
 position are in GLOBAL session time (0..sum-of-durations); the pane maps global<->chapter time and
@@ -68,6 +73,7 @@ class _PaneCell(QWidget):
         self.pane = pane
         self.side = side
         self._lap_ids: list[int] = []
+        self._labels: list[str] = []   # last-applied picker item labels (guards the repopulate)
 
         self.caption = QLabel("")
         self.caption.setObjectName("PaneCaption")
@@ -100,16 +106,28 @@ class _PaneCell(QWidget):
         lay.addLayout(strip)
         lay.addWidget(self.pane, 1)
 
-    def set_lap_choices(self, lap_ids: list[int], current: int):
-        """(Re)populate the picker with `lap_ids` and select `current` WITHOUT emitting a repoint
-        (a programmatic re-seed must not look like a user pick)."""
-        self._lap_ids = list(lap_ids)
+    def set_lap_choices(self, lap_ids: list[int], current: int,
+                        labels: list[str] | None = None):
+        """(Re)populate the picker with `lap_ids` (shown with `labels` if given — the app builds
+        them with the lap time + a ★ on the best lap, e.g. "lap 25  (1:08.325)") and select
+        `current` WITHOUT emitting a repoint (a programmatic re-seed must not look like a user pick).
+
+        Skips the (expensive) clear+repopulate when the ids+labels are UNCHANGED: only the current
+        selection is re-pinned. A repoint re-seeds both panes' pickers each time, so guarding the
+        rebuild avoids a per-repoint QComboBox churn when the lap set hasn't actually changed."""
+        ids = list(lap_ids)
+        labels = list(labels) if labels is not None else [f"lap {lid}" for lid in ids]
         self.picker.blockSignals(True)
-        self.picker.clear()
-        for lid in self._lap_ids:
-            self.picker.addItem(f"lap {lid}", lid)
+        if ids != self._lap_ids or labels != self._labels:
+            self._lap_ids = ids
+            self._labels = labels
+            self.picker.clear()
+            for lid, text in zip(ids, labels):
+                self.picker.addItem(text, lid)
         if current in self._lap_ids:
-            self.picker.setCurrentIndex(self._lap_ids.index(current))
+            idx = self._lap_ids.index(current)
+            if self.picker.currentIndex() != idx:
+                self.picker.setCurrentIndex(idx)
         self.picker.blockSignals(False)
 
     def set_caption(self, text: str):
@@ -342,7 +360,7 @@ class VideoView(QWidget):
     def set_compare(self, lap_a: int, lap_b: int,
                     window_a: tuple[float, float], window_b: tuple[float, float],
                     caption_a: str, caption_b: str,
-                    lap_choices: list[int]):
+                    lap_choices: list[int], lap_choice_labels: list[str] | None = None):
         """Enter (or re-seed) compare mode: swap the single-pane stage for a horizontal QSplitter
         of TWO equal PlayerPanes. The PRIMARY pane is the existing self.pane (telemetry driver);
         the SECONDARY pane is created LAZILY here on first entry (its own source = the session
@@ -390,11 +408,12 @@ class VideoView(QWidget):
         self.secondary.set_lap_window(*window_b)
         self._cell_a.set_caption(caption_a)
         self._cell_b.set_caption(caption_b)
-        self._cell_a.set_lap_choices(lap_choices, lap_a)
-        self._cell_b.set_lap_choices(lap_choices, lap_b)
+        self._cell_a.set_lap_choices(lap_choices, lap_a, lap_choice_labels)
+        self._cell_b.set_lap_choices(lap_choices, lap_b, lap_choice_labels)
 
     def reseed_pane(self, side: int, lap_id: int, window: tuple[float, float],
-                    caption: str, lap_choices: list[int]):
+                    caption: str, lap_choices: list[int],
+                    lap_choice_labels: list[str] | None = None):
         """Repoint ONE pane (after its lap picker was used): update its lap window + caption +
         keep the picker selection in sync. The app re-seeks this pane to its new lap start and
         refreshes the chart overlay + Δ badge. Used so a repoint never disturbs the other pane."""
@@ -404,7 +423,7 @@ class VideoView(QWidget):
             return
         pane.set_lap_window(*window)
         cell.set_caption(caption)
-        cell.set_lap_choices(lap_choices, lap_id)
+        cell.set_lap_choices(lap_choices, lap_id, lap_choice_labels)
 
     def exit_compare(self):
         """Leave compare mode: tear the secondary pane down (stop + deleteLater player+audio,

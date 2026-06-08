@@ -563,8 +563,17 @@ class StudioWindow(QMainWindow):
 
     # ------------------------------------------------------------- compare videos (Phase B)
     def _lap_caption(self, lap_id: int) -> str:
-        """Per-pane caption "lap N  m:ss.mmm" for a lap id."""
-        return f"lap {lap_id}  {fmt_time(self.session.laps.lap_time(lap_id))}"
+        """Per-pane caption "lap N · m:ss.mmm" for a lap id, marking the best lap with a ★, so the
+        user can confirm which lap is loaded in each pane without opening the picker."""
+        star = " ★" if lap_id == self.session.best_lap_id() else ""
+        return f"lap {lap_id} · {fmt_time(self.session.laps.lap_time(lap_id))}{star}"
+
+    def _lap_choice_labels(self, lap_ids: list[int]) -> list[str]:
+        """Picker item labels "lap N  (m:ss.mmm)" (★ on the best lap) so picking the right lap
+        doesn't require guessing. Parallel to `lap_ids`; computed once per (re)seed, not per tick."""
+        best = self.session.best_lap_id()
+        return [f"lap {lid}  ({fmt_time(self.session.laps.lap_time(lid))})"
+                f"{'  ★' if lid == best else ''}" for lid in lap_ids]
 
     def _seek_pane_to_lap_start(self, side: int, lap_id: int):
         """Seek one pane to a hair INTO its lap (the _LAP_SEEK_NUDGE_S nudge keeps the ms-quantized
@@ -606,7 +615,8 @@ class StudioWindow(QMainWindow):
         if wa is None or wb is None:
             self._compare = False
             return
-        self.video.set_compare(a, b, wa, wb, self._lap_caption(a), self._lap_caption(b), valid)
+        self.video.set_compare(a, b, wa, wb, self._lap_caption(a), self._lap_caption(b),
+                                valid, self._lap_choice_labels(valid))
         # Each pane plays "time into lap": park both on their lap starts.
         self._seek_pane_to_lap_start(0, a)  # PRIMARY
         self._seek_pane_to_lap_start(1, b)  # SECONDARY
@@ -647,7 +657,8 @@ class StudioWindow(QMainWindow):
         window = self.session.lap_window(lap_id)
         if window is None:
             return
-        self.video.reseed_pane(side, lap_id, window, self._lap_caption(lap_id), valid)
+        self.video.reseed_pane(side, lap_id, window, self._lap_caption(lap_id),
+                               valid, self._lap_choice_labels(valid))
         self._seek_pane_to_lap_start(side, lap_id)
         self.video.set_pane_gmeter_lap(side, lap_id)
         # Refresh the chart overlay with the new pair; freeze auto-follow on the (new) primary lap.
