@@ -165,8 +165,12 @@ class StudioWindow(QMainWindow):
         self.chapter_label = QLabel("")
         self.chapter_label.setObjectName("ChapterBanner")
         self.chapter_label.setAlignment(Qt.AlignCenter)
+        self._seam_loading = False  # True while a chapter is reopening at a seam (banner hint)
         self._update_chapter_label(self.video.current_chapter())
         self.video.chapterChanged.connect(self._update_chapter_label)
+        # Brief, clearly-styled "loading next chapter…" hint on the banner during a seam reopen, so a
+        # momentary hitch reads as intentional rather than a freeze. Reuses the ChapterBanner strip.
+        self.video.seamLoading.connect(self._on_seam_loading)
         # Only show the banner for a real (>1 chapter) chaptered session; a single file is
         # exactly as before (no banner clutter).
         self.chapter_label.setVisible(self.video.is_multi)
@@ -315,13 +319,28 @@ class StudioWindow(QMainWindow):
             self._load(sibs)
 
     def _update_chapter_label(self, chapter_index: int):
-        """Banner text: the recording label plus, for a chaptered session, the current chapter."""
+        """Banner text: the recording label plus, for a chaptered session, the current chapter.
+        Suppressed while a seam reopen is in flight (the "loading next chapter…" hint owns the banner
+        until the next chapter has presented, at which point _on_seam_loading(False) restores this)."""
+        if getattr(self, "_seam_loading", False):
+            return
         label = chapters.recording_label(self._paths)
         if self.video.is_multi:
             self.chapter_label.setText(f"{label}  —  chapter {chapter_index + 1} of "
                                        f"{len(self.session.chapters)}")
         else:
             self.chapter_label.setText(label)
+
+    def _on_seam_loading(self, loading: bool):
+        """Show/clear a brief "loading next chapter…" hint on the chapter banner during a seam
+        reopen. On (EndOfMedia → reopen): a clearly-styled hint so the momentary hitch reads as
+        intentional. Off (next chapter loaded + resumed): restore the normal current-chapter text.
+        chapterChanged fires during the switch, so it's gated on _seam_loading to not clobber this."""
+        self._seam_loading = bool(loading)
+        if loading:
+            self.chapter_label.setText("loading next chapter…")
+        else:
+            self._update_chapter_label(self.video.current_chapter())
 
     def _select_default(self):
         """Pre-select the two fastest laps so speed + a real delta-to-best show on launch.
