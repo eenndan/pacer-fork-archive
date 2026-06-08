@@ -186,18 +186,19 @@ class VideoView(QWidget):
         self.gmeter_btn.toggled.connect(self._on_gmeter_toggled)
         self.gmeter_btn.toggled.connect(self.set_gmeter_visible)
 
-        # "Compare videos" toggle (Phase B): a checkable button that reveals a 2nd, equal video
-        # pane side-by-side. Off by default; enabled only when ≥2 valid laps (app drives the
-        # enable flag). The toggle itself only flips _compare + emits compareToggled — the app
-        # owns the lap-pair seeding and calls back into set_compare/exit_compare.
+        # "Compare videos" toggle (Phase B): a LABELED checkable button that reveals a 2nd, equal
+        # video pane side-by-side. Off by default; enabled only when ≥2 valid laps (app drives the
+        # enable flag). The toggle itself only flips _compare + emits compareToggled — the app owns
+        # the lap-pair seeding and calls back into set_compare/exit_compare. Its label + fill swap
+        # between states in _set_compare_btn_state so it's obvious both what it does (adds a 2nd
+        # comparison video) and whether it's currently on ("⧉ Compare" ghost → "Comparing ✕" amber).
         self.compare_btn = QPushButton()
-        self.compare_btn.setIcon(theme.icon("ph.columns"))
         self.compare_btn.setIconSize(QSize(_ICON_PX, _ICON_PX))
-        self.compare_btn.setFixedSize(_ICON_BTN)
+        self.compare_btn.setFixedHeight(_ICON_BTN.height())
         self.compare_btn.setCheckable(True)
         self.compare_btn.setEnabled(False)
-        self.compare_btn.setToolTip("Compare two laps' videos side-by-side (needs ≥2 valid laps)")
         self.compare_btn.toggled.connect(self._on_compare_toggled)
+        self._set_compare_btn_state(False)
 
         # The slider spans the WHOLE session (global ms 0..total). For a multi-chapter recording
         # its range is the summed duration; for a single file it's the file's own duration. The
@@ -309,12 +310,33 @@ class VideoView(QWidget):
     def is_compare(self) -> bool:
         return self._compare
 
+    def _set_compare_btn_state(self, on: bool):
+        """Drive the labeled compare toggle's appearance for its OFF/ON state. OFF: a ghost/neutral
+        "⧉ Compare" (columns glyph + text) that reads as "click to add a 2nd comparison video". ON:
+        an accent-FILLED "Comparing ✕" (the variant=primary amber fill via the QSS) with a small
+        close affordance so it's obviously active and reads as "click to exit". Only called on a
+        state change (enter/exit + the initial build) — never per tick."""
+        if on:
+            self.compare_btn.setIcon(theme.icon("ph.columns", color=theme.C.on_accent))
+            self.compare_btn.setText(" Comparing  ✕")
+            self.compare_btn.setToolTip("Comparing two laps' videos — click to exit")
+            self.compare_btn.setProperty("variant", "primary")
+        else:
+            self.compare_btn.setIcon(theme.icon("ph.columns"))
+            self.compare_btn.setText(" Compare")
+            self.compare_btn.setToolTip(
+                "Compare two laps' videos side-by-side (needs ≥2 valid laps)")
+            self.compare_btn.setProperty("variant", "")
+        # A dynamic-property change needs an explicit style re-polish to take effect (Qt caches
+        # the resolved QSS until the property is re-evaluated). Done only on the state flip.
+        self.compare_btn.style().unpolish(self.compare_btn)
+        self.compare_btn.style().polish(self.compare_btn)
+
     def _on_compare_toggled(self, on: bool):
-        """The toggle flipped: recolour the glyph and emit compareToggled so the app seeds the lap
-        pair (enter) or restores single-pane (exit). The actual pane build/teardown happens in
-        set_compare / exit_compare, which the app calls back. Guard against a redundant emit."""
-        self.compare_btn.setIcon(theme.icon("ph.columns", color=theme.C.accent if on
-                                            else theme.C.text))
+        """The toggle flipped: swap its labeled OFF/ON appearance and emit compareToggled so the app
+        seeds the lap pair (enter) or restores single-pane (exit). The actual pane build/teardown
+        happens in set_compare / exit_compare, which the app calls back."""
+        self._set_compare_btn_state(bool(on))
         self.compareToggled.emit(bool(on))
 
     def set_compare(self, lap_a: int, lap_b: int,
