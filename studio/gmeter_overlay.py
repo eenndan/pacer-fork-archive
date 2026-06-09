@@ -203,10 +203,16 @@ class GMeterOverlay(QWidget):
         self.update()
 
     def reset_envelope(self) -> None:
-        """Clear the accumulated max-G envelope + cardinal peaks (new scope, e.g. a new lap)."""
+        """Clear the accumulated max-G envelope + cardinal peaks (new scope, e.g. a new lap), AND
+        re-seed the live-dot EMA so the filtered pointer starts fresh on the new scope's first
+        sample instead of carrying the previous lap's filtered value (which would make the dot drift
+        in from the old lap's position on a per-lap reset)."""
         self._hull_pts.clear()
         self._recent.clear()
         self._peak_fwd = self._peak_back = self._peak_left = self._peak_right = 0.0
+        # Re-seed the dot EMA: the next set_g seeds _fx/_fy from its own value (no carry-over).
+        self._ema_init = False
+        self._fx = self._fy = 0.0
         self.update()
 
     # ------------------------------------------------------------------ painting

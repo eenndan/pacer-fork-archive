@@ -59,17 +59,39 @@ def _best_split_per_sector_impl(splits_by_lap: dict[int, list[float]],
     return best
 
 
+def _is_blank(v) -> bool:
+    """A cell key is "blank" when it's absent or NaN (a partial lap with fewer splits)."""
+    return v is None or (isinstance(v, float) and math.isnan(v))
+
+
 class _NumItem(QTableWidgetItem):
     """A table cell that sorts by a numeric key (Qt.UserRole) rather than its display text, so
-    e.g. lap times "1:08.408" sort as 68.408 s and blank cells sort to the end."""
+    e.g. lap times "1:08.408" sort as 68.408 s, and blank cells (partial laps) sort LAST in BOTH
+    directions — never above a real value.
+
+    Qt's view sort reverses the `<` result for a descending column, so a fixed `__lt__` that puts
+    blanks last ascending would float them to the TOP descending. To keep blanks last either way,
+    the blank ordering is flipped to match the active direction: LapTable sets `_descending` to the
+    column's sort order right before each sort (header click or programmatic), so `__lt__` makes
+    blanks compare as the extreme that lands them at the bottom after Qt's reversal."""
+
+    _descending = False  # active sort direction, set by LapTable before each sort
 
     def __lt__(self, other: QTableWidgetItem) -> bool:  # noqa: D401 (Qt sort hook)
         a = self.data(NUM_ROLE)
         b = other.data(NUM_ROLE)
-        if a is None or (isinstance(a, float) and math.isnan(a)):
-            return False  # blanks/NaN sort to the bottom regardless of direction
-        if b is None or (isinstance(b, float) and math.isnan(b)):
-            return True
+        a_blank = _is_blank(a)
+        b_blank = _is_blank(b)
+        if a_blank or b_blank:
+            if a_blank and b_blank:
+                return False  # two blanks: equal, stable order
+            # Exactly one is blank. Blanks must end up LAST after Qt's optional descending reversal:
+            #   ascending  -> blank is "greatest" (blank < x is False, x < blank is True);
+            #   descending -> Qt reverses the result, so blank must be "smallest" here (blank < x is
+            #                 True, x < blank is False) to STILL land at the bottom after reversal.
+            if a_blank:        # self is the blank
+                return self._descending
+            return not self._descending  # other is the blank, self is real
         return float(a) < float(b)
 
 
@@ -146,8 +168,8 @@ class LapTable(QWidget):
             for i in range(n_splits):
                 if i < len(splits):
                     cells.append((f"{splits[i]:.2f}", float(splits[i])))
-                else:  # a partial lap may have fewer splits than columns — blank, sorts last
-                    cells.append(("", float("nan")))
+                else:  # a partial lap may have fewer splits than columns — blank (NaN key),
+                    cells.append(("", float("nan")))  # sorts LAST in both directions (_NumItem)
             for c, (text, key) in enumerate(cells):
                 item = _NumItem(text)
                 item.setData(NUM_ROLE, key)
@@ -161,6 +183,8 @@ class LapTable(QWidget):
             self.table.item(r, 0).setData(LAP_ROLE, lap_id)
         self.table.blockSignals(False)
         # Re-apply the user's chosen sort (lap-ascending by default) on the freshly-filled rows.
+        # Tell _NumItem the direction first so blanks land LAST after any descending reversal.
+        _NumItem._descending = self._sort_order == Qt.DescendingOrder
         self.table.setSortingEnabled(True)
         self.table.sortByColumn(self._sort_col, self._sort_order)
         self._best_split = best_split  # cached so re-highlight after a sort needn't recompute
@@ -264,6 +288,14 @@ class LapTable(QWidget):
         # keyed by lap id so they follow the laps to their new rows.
         self._sort_col = col
         self._sort_order = order
+        # Qt's header-click sort ran with the PREVIOUS direction flag, which can mis-place blank
+        # cells (they must stay LAST in both directions). Set the flag to the new direction and
+        # re-sort so blanks land at the bottom whichever way the column is now ordered. Guarded so
+        # the re-sort's own sortIndicatorChanged (same col/order) doesn't recurse.
+        descending = order == Qt.DescendingOrder
+        if _NumItem._descending != descending:
+            _NumItem._descending = descending
+            self.table.sortByColumn(col, order)
         self._apply_highlights()
 
     def set_current_lap(self, lap_id):
