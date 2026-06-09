@@ -35,10 +35,9 @@ INFERRED_DARKEN = 0.55  # blend the lap colour toward black for the fill pen
 class _TimingLine:
     """Two draggable handles + a connecting segment, all in data (local-meter) coords."""
 
-    def __init__(self, plot, seg: Seg, color, on_changed, session):
+    def __init__(self, plot, seg: Seg, color, on_changed):
         self.plot = plot
         self.on_changed = on_changed
-        self.session = session
         pen = pg.mkPen(color, width=2)
         self.line = pg.PlotDataItem([seg.x1, seg.x2], [seg.y1, seg.y2], pen=pen)
         self.h1 = pg.TargetItem((seg.x1, seg.y1), size=11, movable=True, pen=pen)
@@ -201,8 +200,8 @@ class MapView(QWidget):
         for tl in [self._start, *self._sectors]:
             if tl:
                 tl.remove()
-        self._start = _TimingLine(self.plot, start, START_COLOR, self._emit, self.session)
-        self._sectors = [_TimingLine(self.plot, s, SECTOR_COLOR, self._emit, self.session)
+        self._start = _TimingLine(self.plot, start, START_COLOR, self._emit)
+        self._sectors = [_TimingLine(self.plot, s, SECTOR_COLOR, self._emit)
                          for s in sectors]
 
     def _current(self) -> tuple[Seg, list[Seg]]:

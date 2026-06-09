@@ -166,9 +166,7 @@ class PlotsView(QWidget):
         # Hover dot on the delta plot: a marker that rides the delta curve under the mouse, with
         # a small label showing the Δ value (and the distance/time there). Independent of the
         # playback cursor — lets the user inspect ANY point. Hidden until the mouse is over the
-        # plot. The handler does a cheap nearest-index lookup on the cached curve (no re-plot).
-        self._hover_xs = None   # x samples of the curve the hover dot snaps to (delta plot)
-        self._hover_ys = None   # matching Δ values
+        # plot. The handler does a cheap nearest-index lookup on `_delta_curves` (no re-plot).
         self.hover_dot = pg.ScatterPlotItem(size=9, brush=HOVER_DOT_BRUSH, pen=HOVER_DOT_PEN)
         self.hover_dot.setZValue(20)
         self.hover_dot.setVisible(False)

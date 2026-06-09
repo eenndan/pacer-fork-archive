@@ -242,7 +242,7 @@ not at a lap), so a lap can span a chapter boundary.
 - **UI.** The window title and a banner above the video show e.g. `recording 0060 · 3 chapters`
   and the current chapter (`— chapter 2 of 3`); the banner is hidden for a single file.
 - **Sources:** GPMF/GoPro `.MP4` only — the u-blox `.dat` reader isn't bound yet. pacer supplies the telemetry time axis; the app brings its own video player (pacer doesn't decode pixels).
-- `_smoke.py` is a headless self-test: `python -m studio._smoke`.
+- `dev/_smoke.py` is a headless self-test: `python -m studio.dev._smoke`.
 
 ### G-meter overlay (friction circle, from the real accelerometer)
 

@@ -230,7 +230,7 @@ def main(argv):
     native_raw = [(s, sp) for s, sp in zip(raw_samples, raw_spans, strict=True) if s.full_speed > 3.0]
     samples, spans, naive = _gate_quality(raw_samples, raw_spans, raw_naive)
     samples, spans, naive = _clean(samples, spans, naive)
-    gps9 = _gps9_times(samples, spans, naive)
+    gps9 = _gps9_times(samples, naive)
 
     # Smooth the GPS positions exactly as Session.load does, so the SEGMENTATION here is the
     # shipping one — same smoothed track => same lap boundaries the app produces. The notebook

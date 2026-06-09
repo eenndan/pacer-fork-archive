@@ -18,7 +18,7 @@ and `GX0062`. Lap timing is **validated unbiased vs a real lap-timing transponde
 both recordings** (see §"Established conclusion").
 
 The four panels — **Map**, **Speed + Δ-to-best charts**, **Lap table**, **Video** — are wired
-together with two-way video↔telemetry sync. The headless self-test `python -m studio._smoke` prints
+together with two-way video↔telemetry sync. The headless self-test `python -m studio.dev._smoke` prints
 `SMOKE OK`.
 
 ---

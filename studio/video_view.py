@@ -82,8 +82,6 @@ class _PaneCell(QWidget):
         # Compact lap picker: lists valid laps; repoints this side without touching the other.
         self.picker = QComboBox()
         self.picker.setToolTip("Pick the lap shown in this pane")
-        self.picker.setSizePolicy(self.picker.sizePolicy().horizontalPolicy(),
-                                  self.picker.sizePolicy().verticalPolicy())
         self.picker.currentIndexChanged.connect(self._on_pick)
 
         # "Δ vs other" badge — app drives the text + colour per tick (transparent inline label).
@@ -346,9 +344,6 @@ class VideoView(QWidget):
         if not self._compare_enabled and self.compare_btn.isChecked():
             self.compare_btn.setChecked(False)  # -> _on_compare_toggled(False) tears down
 
-    def is_compare(self) -> bool:
-        return self._compare
-
     def _set_compare_btn_state(self, on: bool):
         """Drive the labeled compare toggle's appearance for its OFF/ON state. OFF: a ghost/neutral
         "⧉ Compare" (columns glyph + text) that reads as "click to add a 2nd comparison video". ON:
@@ -516,8 +511,6 @@ class VideoView(QWidget):
         self.pane.set_gmeter_visible(on)
         if self.secondary is not None:
             self.secondary.set_gmeter_visible(on)
-        if self.gmeter_btn.isChecked() != self.pane.is_gmeter_visible():
-            self.gmeter_btn.setChecked(self.pane.is_gmeter_visible())
 
     def set_g(self, g):
         """Feed the current g to the PRIMARY pane's overlay (None blanks the dot). A no-op when the

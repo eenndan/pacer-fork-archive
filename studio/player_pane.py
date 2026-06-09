@@ -226,17 +226,6 @@ class PlayerPane(QWidget):
     def pause(self):
         self.player.pause()
 
-    def toggle(self):
-        if self.is_playing():
-            self.player.pause()
-        else:
-            self.player.play()
-
-    def set_playback_rate(self, rate: float = 1.0):
-        """Passthrough to QMediaPlayer.setPlaybackRate (Phase B may roll a pane faster/slower;
-        default 1.0 keeps today's behaviour)."""
-        self.player.setPlaybackRate(rate)
-
     # ------------------------------------------------------------- audio (mute)
     def is_muted(self) -> bool:
         return self.audio.isMuted()

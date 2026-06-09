@@ -210,7 +210,7 @@ GPS9_MAX_DT_S = 0.40    # …above this, the run is broken (chapter break / drop
 # clean-lap mean +0.0015 s, ±0.053 s), so the timing below uses the GPS9 spacing verbatim.
 
 
-def _gps9_times(samples, spans, naive, rate_factor: float = 1.0):
+def _gps9_times(samples, naive, rate_factor: float = 1.0):
     """Per-sample times built from the GPS9 fix timestamps' true spacing, re-anchored per
     contiguous run to the media (naive) clock. Falls back to the naive time for any sample
     whose GPS9 timestamp is absent/sentinel or sits across a run break, so a GPS5-only stream
@@ -431,13 +431,13 @@ class Session:
         # is what the VIDEO layer uses to switch sources / span the slider across chapters.
         self.chapters = chapter_map
         self._lap_cache: dict[int, object] = {}
-        # Per-lap (times, dists) arrays for distance_in_lap_at_time — rebuilding these from the
-        # bound lap object every ~30 Hz cursor tick is wasteful; cache and clear on re-segment.
+        # Per-lap (times, dists) arrays for _lap_time_dist (the cursor/video x<->time
+        # conversions) — rebuilding these from the bound lap object every ~30 Hz cursor tick is
+        # wasteful; cache and clear on re-segment.
         self._dist_cache: dict[int, tuple] = {}
         # Per-lap gap-filled draw segments (measured + inferred runs). MAP RENDERING ONLY —
         # computed once per lap on first draw, never per frame; cleared on re-segment.
         self._seg_cache: dict[int, list] = {}
-        self._fills_cache: dict[int, list] = {}
         self._reference_xy = None  # lazily-built georeferenced track centerline (fallback donor)
         # Vehicle-frame g (lateral/longitudinal in g) precomputed from the GoPro ACCL+GRAV+CORI,
         # cross-checked against GPS-derived g. Built in load() (needs the trace arrays below);
@@ -486,7 +486,7 @@ class Session:
             return cls(laps, empty, video_path, chapter_map)
 
         # GPS9 true-clock spacing (re-anchored to the media clock); naive otherwise.
-        times = _gps9_times(samples, spans, naive)
+        times = _gps9_times(samples, naive)
 
         # Smooth the GPS positions once, here — over the cleaned, time-ordered trace, guarded
         # against averaging across chapter/dropout gaps. All downstream geometry follows.
@@ -573,7 +573,6 @@ class Session:
         self._lap_cache.clear()
         self._dist_cache.clear()
         self._seg_cache.clear()
-        self._fills_cache.clear()
 
     def suggest_sector(self, existing: int = 0) -> Seg:
         """A line perpendicular to the track at a DISTINCT fraction of the way round, so each
@@ -737,7 +736,7 @@ class Session:
             return self._reference_xy if len(self._reference_xy) else None
         from . import reference  # local import: optional, only on the fallback path
         agg = np.column_stack([self.tx, self.ty]) if len(self.tx) else None
-        self._reference_xy = reference.centerline_local(self.cs, agg)
+        self._reference_xy = reference.centerline_local(agg)
         return self._reference_xy if len(self._reference_xy) else None
 
     def lap_trace_segments(self, lap_id: int):
@@ -751,18 +750,9 @@ class Session:
             return cached
         xs, ys, ts = self._lap_trace_xyt(lap_id)
         donors = self._donors_for(lap_id)
-        segs, fills = gapfill.reconstruct_lap(xs, ys, ts, donors, med_dt=self._median_sample_dt())
+        segs, _fills = gapfill.reconstruct_lap(xs, ys, ts, donors, med_dt=self._median_sample_dt())
         self._seg_cache[lap_id] = segs
-        self._fills_cache[lap_id] = fills
         return segs
-
-    def lap_gap_report(self, lap_id: int) -> list[dict]:
-        """Per-gap fill report for a lap (for metrics/diagnostics): each dict has the gap's
-        chord length, dt, n_missing, fill source, filled length and endpoint error. Computed
-        as a side effect of `lap_trace_segments` (cached)."""
-        if lap_id not in self._fills_cache:
-            self.lap_trace_segments(lap_id)
-        return self._fills_cache.get(lap_id, [])
 
     def lap_window(self, lap_id: int) -> tuple[float, float] | None:
         if not (0 <= lap_id < self.laps.laps_count()):
@@ -892,13 +882,6 @@ class Session:
             td = (times, dists)
             self._dist_cache[lap_id] = td
         return td
-
-    def distance_in_lap_at_time(self, lap_id: int, t: float) -> float | None:
-        td = self._lap_time_dist(lap_id)
-        if td is None:
-            return None
-        times, dists = td
-        return float(np.interp(t, times, dists))
 
     # ------------------------------------------------ cursor scrub: x <-> media time
     # The plot cursors are DRAGGABLE; dragging seeks the video within the *current* lap.
@@ -1172,10 +1155,11 @@ class Session:
     # The red map marker is draggable; dragging seeks the video. Searching the WHOLE trace for
     # the nearest point makes the marker JUMP to another lap wherever the laps overlap
     # spatially. So constrain the search to the CURRENT lap's own trace — the same lap-scoped
-    # behaviour as the scrub cursor. Pure numpy on the lap's cached local-metre points; no pacer.
+    # behaviour as the scrub cursor. Pure numpy on the lap's local-metre points; no pacer.
     def _lap_xy_t(self, lap_id: int):
-        """Cached (xs, ys, times) for one lap in local metres + media-clock seconds. Reuses the
-        per-lap cache so the marker drag is a cheap O(n_lap) nearest-point lookup, not a rebuild."""
+        """(xs, ys, times) for one lap in local metres + media-clock seconds. Rebuilds the lap's
+        local-metre arrays each call (an O(n_lap) pass); cheap enough for the marker-drag
+        nearest-point lookup. Returns None if the lap is degenerate."""
         td = self._lap_time_dist(lap_id)  # ensures the lap is segmented/usable
         if td is None:
             return None

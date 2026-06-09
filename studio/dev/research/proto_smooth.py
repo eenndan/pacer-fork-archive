@@ -135,7 +135,7 @@ def build_laps(paths, method, **kw):
     samples, spans, naive, durations = _read_gpmf(paths)
     samples, spans, naive = _gate_quality(samples, spans, naive)
     samples, spans, naive = _clean(samples, spans, naive)
-    times = _gps9_times(samples, spans, naive)
+    times = _gps9_times(samples, naive)
     samples = smooth_track(samples, times, method, **kw)
     laps = pacer.Laps()
     for s, t in zip(samples, times):

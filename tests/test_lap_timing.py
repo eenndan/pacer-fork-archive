@@ -35,11 +35,10 @@ def test_gps9_uses_true_spacing_reanchored_to_media():
     rng = np.random.default_rng(0)
     naive = list(1000.0 + np.cumsum(0.1001 + rng.normal(0, 0.003, n)))
     samples = [_sample(500_000 + i * 100) for i in range(n)]  # exact 10.000 Hz wall clock
-    spans = [(0.0, 0.0)] * n  # spans unused by _gps9_times
 
     # rate_factor=1.0 isolates the SPACING behaviour from the transponder clock-rate calibration
     # (the default factor, tested in tests/test_calibration.py, scales the spacing by ~0.9994).
-    out = np.asarray(_gps9_times(samples, spans, naive, rate_factor=1.0))
+    out = np.asarray(_gps9_times(samples, naive, rate_factor=1.0))
     assert len(out) == n
     # Anchored at the first naive time (so the axis stays on the media clock for video sync).
     assert abs(out[0] - naive[0]) < 1e-9
@@ -56,7 +55,7 @@ def test_gps9_falls_back_to_naive_without_timestamps():
     n = 50
     naive = [10.0 + i * 0.1 for i in range(n)]
     samples = [_sample(0) for _ in range(n)]  # no GPS9 timestamp
-    out = _gps9_times(samples, [(0.0, 0.0)] * n, naive)
+    out = _gps9_times(samples, naive)
     assert np.allclose(out, naive, atol=1e-12)
     print("test_gps9_falls_back_to_naive_without_timestamps OK")
 
@@ -74,7 +73,7 @@ def test_gps9_reanchors_after_a_run_break():
     tsB = [10_000 + i * 100 for i in range(20)]  # epoch jumped BACK by ~790 s
     samples = [_sample(t) for t in tsA + tsB]
     # rate_factor=1.0 to assert the raw 100 ms spacing (the calibration is tested separately).
-    out = np.asarray(_gps9_times(samples, [(0.0, 0.0)] * 40, naive, rate_factor=1.0))
+    out = np.asarray(_gps9_times(samples, naive, rate_factor=1.0))
     # Monotonic non-decreasing across the seam (no backwards jump from the epoch reset).
     assert np.all(np.diff(out) >= -1e-9), np.diff(out).min()
     # Run B re-anchored near its own naive start (not dragged back to run A's epoch).
