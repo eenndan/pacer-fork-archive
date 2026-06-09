@@ -23,6 +23,8 @@ from . import chapters, gapfill, gmeter, tracks
 
 DEFAULT_SAMPLE = "3rdparty/gpmf-parser/samples/hero6.mp4"  # a clip with real motion
 
+_UNSET = object()  # sentinel for "cache not yet computed" where None is a valid cached value
+
 # Data-cleaning thresholds (see studio/dev/diagnose.py; validated on real sessions).
 MIN_START_SPEED = 3.0  # m/s — below this the car is stationary / GPS not yet locked
 SPIKE_STEP = 50.0  # m — a lone fix farther than this from BOTH neighbours is a glitch
@@ -431,13 +433,26 @@ class Session:
         # is what the VIDEO layer uses to switch sources / span the slider across chapters.
         self.chapters = chapter_map
         self._lap_cache: dict[int, object] = {}
-        # Per-lap (times, dists) arrays for _lap_time_dist (the cursor/video x<->time
+        # Per-lap (times, dists, elapsed) arrays for _lap_time_dist (the cursor/video x<->time
         # conversions) — rebuilding these from the bound lap object every ~30 Hz cursor tick is
-        # wasteful; cache and clear on re-segment.
+        # wasteful; cache and clear on re-segment. `elapsed` (= times - times[0]) is precomputed
+        # once so the per-tick delta math doesn't re-subtract every call.
         self._dist_cache: dict[int, tuple] = {}
+        # Per-lap (xs, ys, times) local-metre arrays (map highlight + marker-drag nearest). Built
+        # once per lap (an O(n_lap) cs.local pass); cleared on re-segment. Killing the double
+        # rebuild the marker drag used to do per mouse-move.
+        self._xyt_cache: dict[int, tuple] = {}
         # Per-lap gap-filled draw segments (measured + inferred runs). MAP RENDERING ONLY —
         # computed once per lap on first draw, never per frame; cleared on re-segment.
         self._seg_cache: dict[int, list] = {}
+        # Memoized "real lap" sets — the 30 Hz tick resolves valid_lap_ids()/best_lap_id() many
+        # times each frame (lap_at_time, delta_at_time, the readout, the map/table highlights).
+        # Computed once and reused; cleared on re-segment (the only point they can change).
+        self._valid_cache: list[int] | None = None
+        self._best_cache: object = _UNSET   # sentinel: None is a legal "no best lap" result
+        # Cached lap [start, end) windows on the GLOBAL clock for the O(log n) lap_at_time binary
+        # search (parallel arrays over valid laps, in start order). Cleared on re-segment.
+        self._lap_windows: tuple | None = None
         self._reference_xy = None  # lazily-built georeferenced track centerline (fallback donor)
         # Vehicle-frame g (lateral/longitudinal in g) precomputed from the GoPro ACCL+GRAV+CORI,
         # cross-checked against GPS-derived g. Built in load() (needs the trace arrays below);
@@ -572,7 +587,13 @@ class Session:
         self.laps.update()
         self._lap_cache.clear()
         self._dist_cache.clear()
+        self._xyt_cache.clear()
         self._seg_cache.clear()
+        # The single re-segmentation point: every memoized "real lap" set + window table is now
+        # stale (lap ids / times shifted), so drop them. They lazily recompute on next access.
+        self._valid_cache = None
+        self._best_cache = _UNSET
+        self._lap_windows = None
 
     def suggest_sector(self, existing: int = 0) -> Seg:
         """A line perpendicular to the track at a DISTINCT fraction of the way round, so each
@@ -621,18 +642,30 @@ class Session:
     def valid_lap_ids(self) -> list[int]:
         """Real laps only. A fixed threshold is too crude (short double-crossings of the
         start line pass it and pollute the 'best' lap), so accept laps whose time is within
-        a band around the MEDIAN lap time — this adapts to any track length."""
+        a band around the MEDIAN lap time — this adapts to any track length.
+
+        Memoized — the 30 Hz tick (lap_at_time, the highlights, delta) hits this many times per
+        frame and the result only changes on re-segmentation (cleared in set_timing_lines)."""
+        if self._valid_cache is not None:
+            return self._valid_cache
         basic = [(i, self.laps.lap_time(i)) for i in range(self.laps.laps_count())
                  if self.laps.sample_count(i) >= MIN_LAP_SAMPLES and self.laps.lap_time(i) >= MIN_LAP_TIME]
         if not basic:
-            return []
+            self._valid_cache = []
+            return self._valid_cache
         med = float(np.median([t for _, t in basic]))
         lo, hi = LAP_BAND_LO * med, LAP_BAND_HI * med
-        return [i for i, t in basic if lo <= t <= hi]
+        self._valid_cache = [i for i, t in basic if lo <= t <= hi]
+        return self._valid_cache
 
     def best_lap_id(self) -> int | None:
+        """The valid lap with the fastest time, else None. Memoized (same lifetime as
+        valid_lap_ids; cleared on re-segment) — resolved several times per tick."""
+        if self._best_cache is not _UNSET:
+            return self._best_cache
         valid = self.valid_lap_ids()
-        return min(valid, key=self.laps.lap_time) if valid else None
+        self._best_cache = min(valid, key=self.laps.lap_time) if valid else None
+        return self._best_cache
 
     def best_lap_total_distance(self) -> float | None:
         """The best lap's total odometer distance (metres) — the basis the delta plot's x-axis is
@@ -680,26 +713,27 @@ class Session:
 
     def lap_trace_xy(self, lap_id: int):
         """Local-meter (xs, ys) of a single lap's trace, for highlighting on the map."""
-        lap = self._get_lap(lap_id)
-        xs, ys = [], []
-        for p in lap.points:
-            v = self.cs.local(p.point)
-            xs.append(v[0])
-            ys.append(v[1])
+        xs, ys, _ = self._lap_trace_xyt(lap_id)
         return xs, ys
 
     # ------------------------------------------------- map gap-fill (rendering only)
     def _lap_trace_xyt(self, lap_id: int):
-        """Per-lap (xs, ys, times): local metres + media-clock seconds. Used only to build
-        the gap-filled DRAW segments — never feeds the analysis pipeline."""
-        lap = self._get_lap(lap_id)
-        xs, ys, ts = [], [], []
-        for p in lap.points:
-            v = self.cs.local(p.point)
-            xs.append(v[0])
-            ys.append(v[1])
-            ts.append(p.time)
-        return np.asarray(xs), np.asarray(ys), np.asarray(ts)
+        """Cached per-lap (xs, ys, times) as numpy arrays — local metres + media-clock seconds,
+        built once with a single cs.local pass over the lap's kept points (cleared on re-segment).
+        The single source the map highlight, the gap-fill draw, and the marker-drag nearest-point
+        lookup all slice from, so a marker drag no longer rebuilds these on every mouse-move."""
+        got = self._xyt_cache.get(lap_id)
+        if got is None:
+            lap = self._get_lap(lap_id)
+            xs, ys, ts = [], [], []
+            for p in lap.points:
+                v = self.cs.local(p.point)
+                xs.append(v[0])
+                ys.append(v[1])
+                ts.append(p.time)
+            got = (np.asarray(xs), np.asarray(ys), np.asarray(ts))
+            self._xyt_cache[lap_id] = got
+        return got
 
     def _median_sample_dt(self) -> float:
         """Median inter-sample interval over the whole trace (s) — used to size gaps."""
@@ -869,6 +903,16 @@ class Session:
         """Cached (times, dists) for a lap: media-clock seconds + per-lap odometer (metres),
         both monotonic and aligned. The single source the cursor↔video conversions interpolate
         on — built once per lap, cleared on re-segment. Returns None if the lap is degenerate."""
+        td = self._lap_time_dist_elapsed(lap_id)
+        if td is None:
+            return None
+        times, dists, _elapsed = td
+        return times, dists
+
+    def _lap_time_dist_elapsed(self, lap_id: int):
+        """Cached (times, dists, elapsed) for a lap. `elapsed` (= times - times[0]) is computed
+        ONCE here so the per-tick delta math (delta_at_time / delta_between, each ~30 Hz) reads it
+        instead of re-subtracting times[0] every call. Cleared on re-segment. None if degenerate."""
         td = self._dist_cache.get(lap_id)
         if td is None:
             lap = self._get_lap(lap_id)
@@ -879,7 +923,14 @@ class Session:
                 return None
             times = np.array([lap.points[i].time for i in range(m)])
             dists = np.array([cds[i] for i in range(m)])
-            td = (times, dists)
+            elapsed = times - times[0]
+            td = (times, dists, elapsed)
+            self._dist_cache[lap_id] = td
+        elif len(td) == 2:
+            # A pre-seeded (times, dists) entry (e.g. a unit test stubs the cache directly) — derive
+            # and memoize elapsed once so the rest of the code always sees the 3-tuple form.
+            times, dists = td
+            td = (times, dists, times - times[0])
             self._dist_cache[lap_id] = td
         return td
 
@@ -1034,6 +1085,25 @@ class Session:
         i = int(np.searchsorted(self.tt, t))
         return min(max(i, 0), n - 1)
 
+    def _lap_window_table(self):
+        """Cached parallel arrays (starts, ends, lap_ids) over the VALID laps, sorted by start
+        time, for the O(log n) `lap_at_time` binary search. Built once per (re)segment and cleared
+        in set_timing_lines. `starts`/`ends` are the same [start_timestamp, start+lap_time) windows
+        the old linear scan tested, so the resolved lap id is identical."""
+        # getattr so a bare Session built via __new__ (unit tests) still resolves — it just
+        # recomputes each call instead of caching (no __init__ ran to create the slot).
+        if getattr(self, "_lap_windows", None) is None:
+            valid = self.valid_lap_ids()
+            rows = [(self.laps.start_timestamp(i),
+                     self.laps.start_timestamp(i) + self.laps.lap_time(i), i)
+                    for i in valid]
+            rows.sort(key=lambda r: r[0])  # by start time (valid is already id-ascending => time-ascending)
+            starts = np.array([r[0] for r in rows], dtype=float)
+            ends = np.array([r[1] for r in rows], dtype=float)
+            ids = [r[2] for r in rows]
+            self._lap_windows = (starts, ends, ids)
+        return self._lap_windows
+
     def lap_at_time(self, t: float) -> int | None:
         """The valid lap whose [start_timestamp, start_timestamp+lap_time) window contains
         `t` (media-clock seconds), else None — for the readout + current-lap highlight.
@@ -1045,11 +1115,21 @@ class Session:
         select→seek→auto-follow chain would jump the highlight/charts back one lap. Half-open ties
         the shared boundary to the lap that STARTS at `t` (the one the user actually picked). The
         sole side-effect — the exact finish instant of the LAST lap resolving to None — is a
-        harmless between-laps moment that auto-follow simply HOLDS through."""
-        for lap_id in self.valid_lap_ids():
-            t0 = self.laps.start_timestamp(lap_id)
-            if t0 <= t < t0 + self.laps.lap_time(lap_id):
-                return lap_id
+        harmless between-laps moment that auto-follow simply HOLDS through.
+
+        O(log n) binary search on the cached, start-sorted window table (was a linear scan every
+        tick). `searchsorted(starts, t, "right") - 1` is the candidate window whose start is the
+        greatest start <= t; it contains `t` iff `t < end`. Identical result to the linear scan
+        (the windows are the same; half-open `t < end` keeps the on-a-start tie with the lap that
+        STARTS at t)."""
+        starts, ends, ids = self._lap_window_table()
+        if len(starts) == 0:
+            return None
+        k = int(np.searchsorted(starts, t, side="right")) - 1
+        if k < 0:
+            return None
+        if starts[k] <= t < ends[k]:
+            return ids[k]
         return None
 
     def speed_at_time(self, t: float) -> float | None:
@@ -1090,26 +1170,31 @@ class Session:
         lap_id = self.lap_at_time(t)
         if lap_id is None:
             return None
+        return self.delta_at_lap(lap_id, t)
+
+    def delta_at_lap(self, lap_id: int, t: float) -> float | None:
+        """Δ-to-best (seconds) at media-clock time `t`, given the already-resolved `lap_id`
+        containing `t`. Splits the lap resolution out of `delta_at_time` so the tick can resolve
+        `lap_at_time(t)` ONCE per frame and reuse it for both the readout and the delta (the lap
+        lookup is no longer done twice). Same math/result as `delta_at_time`."""
         best = self.best_lap_id()
         if best is None:
             return None
-        td = self._lap_time_dist(lap_id)
-        best_td = self._lap_time_dist(best)
+        td = self._lap_time_dist_elapsed(lap_id)
+        best_td = self._lap_time_dist_elapsed(best)
         if td is None or best_td is None:
             return None
-        times, dists = td
+        times, dists, elapsed = td
         if float(dists[-1]) <= 0:
             return None
         s = float(np.interp(t, times, dists)) / float(dists[-1])  # normalized fraction [0,1]
-        elapsed_lap = float(np.interp(t, times, times - times[0]))  # = t − lap_start, clamped
-        best_times, best_dists = best_td
+        elapsed_lap = float(np.interp(t, times, elapsed))  # = t − lap_start, clamped
+        best_times, best_dists, best_elapsed = best_td
         best_total = float(best_dists[-1])
         if best_total <= 0:
             return None
         # Best lap's elapsed time at the SAME track fraction s (invert s→best distance→time).
-        best_elapsed_at_s = float(
-            np.interp(s * best_total, best_dists, best_times - best_times[0])
-        )
+        best_elapsed_at_s = float(np.interp(s * best_total, best_dists, best_elapsed))
         return elapsed_lap - best_elapsed_at_s
 
     def delta_between(self, lap_a: int, lap_b: int, t_in_a: float) -> float | None:
@@ -1125,25 +1210,23 @@ class Session:
         unit test). At the finish (s=1) it is exactly lap_a's time minus lap_b's time.
 
         O(1) on the cached per-lap (times, dists) arrays — cheap enough for the 30 Hz tick."""
-        td_a = self._lap_time_dist(lap_a)
-        td_b = self._lap_time_dist(lap_b)
+        td_a = self._lap_time_dist_elapsed(lap_a)
+        td_b = self._lap_time_dist_elapsed(lap_b)
         if td_a is None or td_b is None:
             return None
-        times_a, dists_a = td_a
+        times_a, dists_a, elapsed_arr_a = td_a
         total_a = float(dists_a[-1])
         if total_a <= 0:
             return None
         # lap_a's normalized track fraction s and its own elapsed time at t_in_a (clamped to lap).
         s = float(np.interp(t_in_a, times_a, dists_a)) / total_a  # [0,1]
-        elapsed_a = float(np.interp(t_in_a, times_a, times_a - times_a[0]))  # = t_in_a − start
-        times_b, dists_b = td_b
+        elapsed_a = float(np.interp(t_in_a, times_a, elapsed_arr_a))  # = t_in_a − start
+        times_b, dists_b, elapsed_arr_b = td_b
         total_b = float(dists_b[-1])
         if total_b <= 0:
             return None
         # lap_b's elapsed time at the SAME track fraction s (invert s → b's distance → time).
-        elapsed_b_at_s = float(
-            np.interp(s * total_b, dists_b, times_b - times_b[0])
-        )
+        elapsed_b_at_s = float(np.interp(s * total_b, dists_b, elapsed_arr_b))
         return elapsed_a - elapsed_b_at_s
 
     def nearest_index(self, x: float, y: float) -> int | None:
@@ -1157,9 +1240,9 @@ class Session:
     # spatially. So constrain the search to the CURRENT lap's own trace — the same lap-scoped
     # behaviour as the scrub cursor. Pure numpy on the lap's local-metre points; no pacer.
     def _lap_xy_t(self, lap_id: int):
-        """(xs, ys, times) for one lap in local metres + media-clock seconds. Rebuilds the lap's
-        local-metre arrays each call (an O(n_lap) pass); cheap enough for the marker-drag
-        nearest-point lookup. Returns None if the lap is degenerate."""
+        """(xs, ys, times) for one lap in local metres + media-clock seconds. Reads the shared
+        per-lap cache (built once, cleared on re-segment), so a marker drag's nearest-point lookup
+        no longer rebuilds the arrays on every mouse-move. Returns None if the lap is degenerate."""
         td = self._lap_time_dist(lap_id)  # ensures the lap is segmented/usable
         if td is None:
             return None

@@ -125,13 +125,17 @@ class _LapOverlay:
 class MapView(QWidget):
     # (start: Seg, sectors: list[Seg]) whenever a handle moves or sectors change.
     timing_lines_changed = Signal(object, object)
-    seek_requested = Signal(float)  # seconds
 
     def __init__(self, session):
         super().__init__()
         self.session = session
         self._suppress_marker = False
         self._current_lap: int | None = None  # F3: scope the marker drag to this lap
+        # Marker-drag seek coalescing: a drag fires sigPositionChanged on every mouse-move, each of
+        # which used to emit a (costly) video seek. Instead we stash the latest dragged time here and
+        # let the app's 30 Hz tick drain ONE seek per tick via take_marker_seek() — mirroring the
+        # plot-scrub coalescing. None = nothing pending.
+        self._marker_seek_target: float | None = None
 
         self.widget = pg.PlotWidget()
         self.plot = self.widget.getPlotItem()
@@ -241,15 +245,29 @@ class MapView(QWidget):
             i = self.session.nearest_index(p.x(), p.y())
             t = float(self.session.tt[i]) if i is not None else None
         if t is not None:
-            self.seek_requested.emit(t)
+            # Coalesce: stash the latest dragged time; the app's tick drains ONE seek per tick. (A
+            # fast drag fired many seeks/sec before — now at most one per ~33 ms tick.)
+            self._marker_seek_target = t
 
-    def set_marker_time(self, t: float):
-        i = self.session.index_at_time(t)
+    def take_marker_seek(self) -> float | None:
+        """Return + consume the latest pending marker-drag seek time (None if none). The app polls
+        this each tick so a marker drag fires at most ONE video seek per tick, not per mouse-move."""
+        t, self._marker_seek_target = self._marker_seek_target, None
+        return t
+
+    def set_marker_index(self, i: int | None):
+        """Place the marker at trace index `i` (None = no-op). The app resolves index_at_time(t)
+        ONCE per tick and passes the index here, so the marker placement reuses the same search the
+        speed readout uses instead of re-running index_at_time inside set_marker_time."""
         if i is None:
             return
         self._suppress_marker = True
         self.marker.setPos(pg.Point(float(self.session.tx[i]), float(self.session.ty[i])))
         self._suppress_marker = False
+
+    def set_marker_time(self, t: float):
+        # Used by the scrub path (single drag-driven time); resolves the index itself.
+        self.set_marker_index(self.session.index_at_time(t))
 
     # --------------------------------------------------------------- lap overlays
     def _refresh_best(self):

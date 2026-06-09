@@ -550,6 +550,11 @@ class VideoView(QWidget):
         if self.secondary is not None:
             self.secondary.set_gmeter_visible(on)
 
+    def is_gmeter_visible(self) -> bool:
+        """True if the g-meter overlay is currently shown (the toggle is on). Lets the app SKIP the
+        per-tick g_at_time lookup entirely when nothing consumes it (the overlay is off by default)."""
+        return self._gmeter_visible
+
     def set_g(self, g):
         """Feed the current g to the PRIMARY pane's overlay (None blanks the dot). A no-op when the
         overlay is hidden, so the app can call it every tick. The SECONDARY pane's g is fed

@@ -392,7 +392,9 @@ class PlotsView(QWidget):
         self._cursor_t = t
         x = None
         mode = self._axis_mode()  # the one shared axis mode (both plots)
-        best_d = self.session.best_lap_total_distance()
+        # best_lap_total_distance is only used by the distance/delta axis (time mode ignores it),
+        # so skip the lookup entirely in time mode.
+        best_d = None if mode == "time" else self.session.best_lap_total_distance()
         for lid in self._lap_ids:
             window = self.session.lap_window(lid)
             if window and window[0] <= t <= window[1]:

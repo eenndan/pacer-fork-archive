@@ -237,7 +237,8 @@ class StudioWindow(QMainWindow):
             self._tick_timer.setInterval(33)  # ~30 Hz
             self._tick_timer.timeout.connect(self._tick)
             self._tick_timer.start()
-        self.map.seek_requested.connect(self.video.seek)
+        # The map marker drag no longer emits a seek per mouse-move; the app's tick drains a
+        # coalesced ONE-per-tick seek via map.take_marker_seek() (see _tick).
         self.map.timing_lines_changed.connect(self._on_lines)
         self.table.laps_selected.connect(self._on_user_select)
 
@@ -250,6 +251,10 @@ class StudioWindow(QMainWindow):
         self._compare = False
         self._compare_a: int | None = None  # primary (left) lap id
         self._compare_b: int | None = None  # secondary (right) lap id
+        # Last (t_a, t_b) the compare badges/g were computed for — lets _compare_tick early-out
+        # when neither pane moved (mirrors the playback _applied_t gate). A sentinel that no real
+        # (float, float) equals, so the first tick after enter always applies.
+        self._compare_last_t: object = None
         self.video.set_compare_enabled(len(self.session.valid_lap_ids()) >= 2)
         self.video.compareToggled.connect(self._on_compare_toggled)
         self.video.paneRepointRequested.connect(self._on_pane_repoint)
@@ -262,6 +267,8 @@ class StudioWindow(QMainWindow):
         self._scrub_lap: int | None = None      # the lap captured at grab; the drag is scoped to it
         self._scrub_target: float | None = None  # latest requested media time (coalesced)
         self._scrub_pending = False              # a new target awaits the next tick's seek
+        self._scrub_view_t: float | None = None  # latest dragged time for the view refresh (coalesced)
+        self._scrub_view_pending = False         # a view refresh (cursor/marker/readout) awaits the tick
         self._scrub_was_playing = False          # restore playback on release iff it was playing
         # Compare-mode scrub: the drag is distance-locked, so it parks BOTH panes on the SAME
         # track position. The same plot-x converts to each lap's own global media time; each
@@ -388,7 +395,13 @@ class StudioWindow(QMainWindow):
         self._latest_t = t
 
     def _tick(self):
-        # Steady ~30 Hz. While the user is scrubbing a plot cursor, the source of truth is the
+        # Steady ~30 Hz. Drain a coalesced MAP MARKER-DRAG seek first (one per tick, not per
+        # mouse-move): the marker stashes its latest dragged time and the resulting seek drives the
+        # normal playback→tick sync that re-places the marker/cursor/readout.
+        marker_t = self.map.take_marker_seek()
+        if marker_t is not None:
+            self.video.seek(marker_t)
+        # While the user is scrubbing a plot cursor, the source of truth is the
         # drag, not playback: issue at most ONE coalesced seek per tick to the latest dragged
         # target, and DON'T apply the (stale / seek-driven) playback position — that gating is
         # what prevents the drag↔positionChanged feedback loop from oscillating.
@@ -402,6 +415,15 @@ class StudioWindow(QMainWindow):
                 self._scrub_pending_b = False
                 if self._scrub_target_b is not None:
                     self.video.seek_pane(1, self._scrub_target_b)
+            # Apply the cursor/marker/readout ONCE per tick to the latest dragged time (coalesced
+            # in _on_scrub_moved) instead of on every mouse-move — the views are driven by the one
+            # clamped truth `t`, and playback ticks are ignored mid-drag.
+            if self._scrub_view_pending and self._scrub_view_t is not None:
+                self._scrub_view_pending = False
+                t = self._scrub_view_t
+                self.plots.place_cursors_at_time(t)
+                self.map.set_marker_time(t)
+                self._apply_readout(t)
             self._compare_tick()  # keep the secondary g + Δ badges live while scrubbing
             return
         # Normal playback: apply an update only when the position actually advanced.
@@ -423,8 +445,14 @@ class StudioWindow(QMainWindow):
             return
         t_a = self.video.current_pane_time(0)  # primary pane's global time
         t_b = self.video.current_pane_time(1)  # secondary pane's global time (read once)
+        # Early-out when NEITHER pane time changed since the last tick (mirrors the playback
+        # _latest_t != _applied_t gate): paused/idle compare does zero badge/g work per tick.
+        if (t_a, t_b) == self._compare_last_t:
+            return
+        self._compare_last_t = (t_a, t_b)
         # Secondary g (the primary's g comes from _apply_readout). A no-op if the overlay is off.
-        self.video.set_pane_g(1, self.session.g_at_time(t_b))
+        if self.video.is_gmeter_visible():
+            self.video.set_pane_g(1, self.session.g_at_time(t_b))
         # Each pane's Δ vs the OTHER lap, at that pane's own current track position.
         self._set_pane_badge(0, self.session.delta_between(a, b, t_a))
         self._set_pane_badge(1, self.session.delta_between(b, a, t_b))
@@ -438,25 +466,32 @@ class StudioWindow(QMainWindow):
             self.video.set_pane_badge(side, f"Δ {d:+.2f} s", colour)
 
     def _apply_position(self, t: float):
-        self.map.set_marker_time(t)
         self.plots.set_cursor_time(t)
         self._apply_readout(t)
 
     def _apply_readout(self, t: float):
-        lap_id = self.session.lap_at_time(t)  # F3: which lap is on the video
+        # Resolve the two per-tick searches ONCE and reuse them everywhere below (the lap that
+        # contains t, and the nearest trace index at t) — they used to be recomputed two more
+        # times each tick (delta_at_time re-ran lap_at_time; set_marker_time + speed_at_time each
+        # re-ran index_at_time).
+        lap_id = self.session.lap_at_time(t)   # F3: which lap is on the video
+        i = self.session.index_at_time(t)      # nearest trace sample (marker + speed)
+        self.map.set_marker_index(i)           # F3: red marker (same point set_marker_time chose)
         self._follow_current_lap(lap_id, t)  # charts auto-follow the playhead's lap (vs best)
         self.table.set_current_lap(lap_id)
         self.map.set_current_lap(lap_id)  # highlight the current lap's trace on the map
-        sp = self.session.speed_at_time(t)  # F2: time / speed / lap readout
+        sp = float(self.session.tv[i]) if i is not None else None  # F2: speed km/h at that index
         speed = f"{sp:.1f}" if sp is not None else "-"
         lap = lap_id if lap_id is not None else "-"
         self.video.set_readout(f"t = {fmt_time(t)}   speed = {speed} km/h   lap {lap}")
-        self._update_diff_box(t, sp)
+        self._update_diff_box(t, sp, lap_id)
         # g-meter overlay: feed the vehicle-frame g at the current media time (a cheap lookup) and
         # the current lap (so the max-G envelope resets at the lap boundary, showing THIS lap's
-        # grip). A no-op when the overlay is hidden; None outside a usable region blanks the dot.
+        # grip). Gate the g_at_time lookup on the overlay being visible (off by default) so the
+        # searchsorted+hypot is skipped entirely when nothing consumes it.
         self.video.set_gmeter_lap(lap_id)
-        self.video.set_g(self.session.g_at_time(t))
+        if self.video.is_gmeter_visible():
+            self.video.set_g(self.session.g_at_time(t))
 
     def _follow_current_lap(self, lap_id: int | None, t: float):
         """Auto-follow the playhead's lap on the speed + delta charts (current lap vs best).
@@ -493,11 +528,12 @@ class StudioWindow(QMainWindow):
         if self.plots.is_dragging():
             self.plots.place_cursors_at_time(t)
 
-    def _update_diff_box(self, t: float, sp: float | None):
+    def _update_diff_box(self, t: float, sp: float | None, lap_id: int | None):
         """Refresh the always-on Δ/speed box for the current moment (priority: Δ-to-best in
-        seconds). Δ comes from session.delta_at_time (same normalized-distance alignment as the
-        delta plot, so the box and the cursor on the curve agree). Outside a valid lap Δ is —."""
-        d = self.session.delta_at_time(t)
+        seconds). Δ comes from session.delta_at_lap with the already-resolved `lap_id` (same
+        normalized-distance alignment as the delta plot, so the box and the cursor on the curve
+        agree) — reusing lap_id instead of re-resolving lap_at_time. Outside a valid lap Δ is —."""
+        d = self.session.delta_at_lap(lap_id, t) if lap_id is not None else None
         if d is None:
             delta_txt = "Δ —"
         else:
@@ -528,15 +564,17 @@ class StudioWindow(QMainWindow):
             self.video.pause()
         self._scrub_target = None
         self._scrub_pending = False
+        self._scrub_view_t = None
+        self._scrub_view_pending = False
         self._scrub_target_b = None
         self._scrub_pending_b = False
 
     def _on_scrub_moved(self, x: float, mode: str):
         """Drag: convert the raw plot-x (in `mode`'s axis) to a media time within the captured
-        current lap, clamped to that lap. Store it as the latest target (the tick coalesces the
-        actual seek to ≤1/tick) and immediately re-place BOTH cursors + the map marker + the
-        readout from that single clamped time, so the line snaps to the lap boundary and every
-        view stays in sync without waiting on the (throttled, async) seek."""
+        current lap, clamped to that lap. Store it as the latest target + a dirty flag and return
+        immediately — the seek AND the cursor/marker/readout view refresh are both COALESCED to the
+        next tick (≤1 of each per tick), so a fast drag does one conversion+view pass per tick
+        instead of one per mouse-move."""
         lap = self._scrub_lap
         if lap is None:  # not inside a valid lap (lead-in / between laps) — no-op
             return
@@ -546,6 +584,9 @@ class StudioWindow(QMainWindow):
             return
         self._scrub_target = t
         self._scrub_pending = True
+        # The PRIMARY pane's lap position drives the cursor/marker/readout; apply it in the tick.
+        self._scrub_view_t = t
+        self._scrub_view_pending = True
         if self._compare and self._compare_b is not None:
             # Distance-locked: the SAME dragged plot-x is a track position; convert it to the
             # SECONDARY lap's own global media time so both panes park on the same spot. Coalesced
@@ -554,11 +595,6 @@ class StudioWindow(QMainWindow):
             if t_b is not None:
                 self._scrub_target_b = t_b
                 self._scrub_pending_b = True
-        # Drive every view from the one clamped truth (plots ignore the playback tick mid-drag).
-        # The cursor on the charts follows the PRIMARY pane's lap position `t`.
-        self.plots.place_cursors_at_time(t)
-        self.map.set_marker_time(t)
-        self._apply_readout(t)
 
     def _on_scrub_ended(self):
         """Release: issue a final seek to the last target (so the frame matches the cursor even
@@ -566,10 +602,20 @@ class StudioWindow(QMainWindow):
         the scrub state so the normal playback→cursor sync resumes."""
         target = self._scrub_target
         target_b = self._scrub_target_b
+        view_t = self._scrub_view_t if self._scrub_view_pending else None
         self._scrub_target = None
         self._scrub_pending = False
+        self._scrub_view_t = None
+        self._scrub_view_pending = False
         self._scrub_target_b = None
         self._scrub_pending_b = False
+        # Flush a final coalesced view refresh if the last drag move never reached a tick, so the
+        # cursor/marker/readout end exactly on the released position (matches the pre-coalesce
+        # behaviour where every move applied the views synchronously).
+        if view_t is not None:
+            self.plots.place_cursors_at_time(view_t)
+            self.map.set_marker_time(view_t)
+            self._apply_readout(view_t)
         if target is not None:
             self.video.seek(target)  # PRIMARY pane
             self._applied_t = target  # keep current-lap/readout consistent until the seek lands
@@ -669,6 +715,9 @@ class StudioWindow(QMainWindow):
         # Suspend auto-follow: freeze _followed_lap on A so the per-tick edge check never re-points
         # the charts while compare is on (also gated by self._compare in _follow_current_lap).
         self._followed_lap = a
+        # Force the next _compare_tick to recompute the badges/g for the new pair (the pane times
+        # may not have moved, but the COMPARED LAPS changed).
+        self._compare_last_t = None
 
     def _exit_compare(self):
         self._compare = False
@@ -710,6 +759,8 @@ class StudioWindow(QMainWindow):
         if self._compare_a is not None and self._compare_b is not None:
             self.plots.set_laps([self._compare_a, self._compare_b])
             self._followed_lap = self._compare_a
+        # The compared pair changed — force the next _compare_tick to recompute the badges/g.
+        self._compare_last_t = None
 
     def _refresh_sector_lines(self, mode: str | None = None):
         """F2: push the sector boundary positions (start/finish + each sector line) to the charts

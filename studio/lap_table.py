@@ -259,27 +259,37 @@ class LapTable(QWidget):
         self.table.blockSignals(False)
         self._apply_current_lap()
 
-    def _apply_current_lap(self):
-        """Compose the Lap-cell text: a '▶ ' prefix + bold for the current (playing) lap (F3),
-        and a trailing ' ⚠' low-confidence marker for any lap with a GPS dropout. Lap-column
-        only — no row background, so the BLUE Qt selection stays the sole row-background cue.
-        Both cues are keyed by lap id, so they survive sorting and coexist with each other and
-        with the green/purple highlights."""
-        target = self._row_for_lap(self._current_lap)
+    def _lap_cell_text(self, lap_id, on: bool) -> str:
+        """The Lap-cell text for `lap_id`: a '▶ ' prefix when it's the current (playing) lap and a
+        trailing ' ⚠' low-confidence marker when it has a GPS dropout."""
         dropout_ids = getattr(self, "_dropout_ids", set())
+        prefix = CURRENT_PREFIX if on else ""
+        suffix = DROPOUT_SUFFIX if lap_id in dropout_ids else ""
+        return f"{prefix}{lap_id}{suffix}"
+
+    def _set_row_current(self, r: int, on: bool):
+        """Apply/clear the ▶ prefix + bold on ONE row's Lap cell (the only per-lap-change cue)."""
+        if r < 0:
+            return
+        item = self.table.item(r, 0)
+        if item is None:
+            return
+        item.setText(self._lap_cell_text(self._lap_id(r), on))
+        font = item.font()
+        font.setBold(on)
+        item.setFont(font)
+
+    def _apply_current_lap(self):
+        """Compose every Lap-cell's text/bold: a '▶ ' prefix + bold for the current (playing) lap
+        (F3), and a trailing ' ⚠' low-confidence marker for any lap with a GPS dropout. Lap-column
+        only — no row background, so the BLUE Qt selection stays the sole row-background cue. Both
+        cues are keyed by lap id, so they survive sorting and coexist with the green/purple
+        highlights. FULL-REBUILD path: used after refresh()/sort (every row's identity may have
+        changed). The per-tick lap CHANGE uses set_current_lap's fast two-row path instead."""
+        target = self._row_for_lap(self._current_lap)
         self.table.blockSignals(True)
         for r in range(self.table.rowCount()):
-            item = self.table.item(r, 0)
-            if item is None:
-                continue
-            on = r == target
-            lap_id = self._lap_id(r)
-            prefix = CURRENT_PREFIX if on else ""
-            suffix = DROPOUT_SUFFIX if lap_id in dropout_ids else ""
-            item.setText(f"{prefix}{lap_id}{suffix}")
-            font = item.font()
-            font.setBold(on)
-            item.setFont(font)
+            self._set_row_current(r, r == target)
         self.table.blockSignals(False)
 
     def _on_sorted(self, col, order):
@@ -299,11 +309,22 @@ class LapTable(QWidget):
         self._apply_highlights()
 
     def set_current_lap(self, lap_id):
-        """Mark the lap currently playing on the video; no effect on user selection."""
+        """Mark the lap currently playing on the video; no effect on user selection.
+
+        Per-tick fast path: only the OLD current-lap row (clear ▶/unbold) and the NEW one (add
+        ▶/bold) are touched — not every row's text+font rewritten each lap change. The full-row
+        path (_apply_current_lap) is reserved for the refresh()/sort case where row identities
+        shift. Identical on-screen result; far less per-change work."""
         if lap_id == self._current_lap:
             return
+        old_row = self._row_for_lap(self._current_lap)
         self._current_lap = lap_id
-        self._apply_current_lap()
+        new_row = self._row_for_lap(lap_id)
+        self.table.blockSignals(True)
+        if old_row != new_row:
+            self._set_row_current(old_row, False)  # clear the prefix/bold off the previous lap row
+        self._set_row_current(new_row, True)       # mark the new current lap row
+        self.table.blockSignals(False)
 
     def select(self, idxs: list[int]):
         self.table.blockSignals(True)
