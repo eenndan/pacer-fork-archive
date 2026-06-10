@@ -60,7 +60,7 @@ class StudioWindow(QMainWindow):
         print("studio: loading telemetry…", flush=True)
         self.session = Session.load(paths)
         n_ch = len(self.session.chapters) if self.session.chapters else 1
-        print(f"studio: {self.session.laps.point_count()} points, "
+        print(f"studio: {self.session.point_count()} points, "
               f"{self.session.lap_count()} laps, {n_ch} chapter(s).", flush=True)
 
         label = chapters.recording_label(paths)
@@ -381,7 +381,7 @@ class StudioWindow(QMainWindow):
             # a different lap" bug). Nudging by _LAP_SEEK_NUDGE_S (a few ms, imperceptible in a
             # ~70 s lap) guarantees the ms-quantized playback position lands INSIDE the lap, so
             # lap_at_time(position) == the lap the user clicked.
-            target = self.session.laps.start_timestamp(min(ids)) + _LAP_SEEK_NUDGE_S
+            target = self.session.lap_window(min(ids))[0] + _LAP_SEEK_NUDGE_S
             self.video.seek(target)
             # Don't let the auto-follow collapse a just-made (possibly multi-lap) comparison the
             # instant the seek's positionChanged lands: seed _followed_lap to the lap the seek
@@ -489,7 +489,13 @@ class StudioWindow(QMainWindow):
         # the current lap (so the max-G envelope resets at the lap boundary, showing THIS lap's
         # grip). Gate the g_at_time lookup on the overlay being visible (off by default) so the
         # searchsorted+hypot is skipped entirely when nothing consumes it.
-        self.video.set_gmeter_lap(lap_id)
+        #
+        # In COMPARE mode the panes' g-meter lap scope is PINNED to the chosen pair (each pane via
+        # set_pane_gmeter_lap once on enter/repoint), so the normal-mode per-tick primary pin would
+        # double-drive the primary's envelope and fight that fixed scope. Skip it here so the scope
+        # is driven by exactly one path — mirroring the same early-out in _follow_current_lap.
+        if not self._compare:
+            self.video.set_gmeter_lap(lap_id)
         if self.video.is_gmeter_visible():
             self.video.set_g(self.session.g_at_time(t))
 
@@ -631,13 +637,13 @@ class StudioWindow(QMainWindow):
         """Per-pane caption "lap N · m:ss.mmm" for a lap id, marking the best lap with a ★, so the
         user can confirm which lap is loaded in each pane without opening the picker."""
         star = " ★" if lap_id == self.session.best_lap_id() else ""
-        return f"lap {lap_id} · {fmt_time(self.session.laps.lap_time(lap_id))}{star}"
+        return f"lap {lap_id} · {fmt_time(self.session.lap_time(lap_id))}{star}"
 
     def _lap_choice_labels(self, lap_ids: list[int]) -> list[str]:
         """Picker item labels "lap N  (m:ss.mmm)" (★ on the best lap) so picking the right lap
         doesn't require guessing. Parallel to `lap_ids`; computed once per (re)seed, not per tick."""
         best = self.session.best_lap_id()
-        return [f"lap {lid}  ({fmt_time(self.session.laps.lap_time(lid))})"
+        return [f"lap {lid}  ({fmt_time(self.session.lap_time(lid))})"
                 f"{'  ★' if lid == best else ''}" for lid in lap_ids]
 
     def _seek_pane_to_lap_start(self, side: int, lap_id: int):
@@ -689,13 +695,13 @@ class StudioWindow(QMainWindow):
         # A = the lap the playhead is currently in, else the primary table selection, else best.
         a = self.session.lap_at_time(self._applied_t or 0.0)
         if a is None or a not in valid:
-            sel = [lid for lid in self.plots._lap_ids if lid in valid]
+            sel = [lid for lid in self.plots.selected_lap_ids() if lid in valid]
             a = sel[0] if sel else (best if best in valid else valid[0])
         # B = best; if A already is best, pick the next-fastest valid lap as B.
         b = best if best is not None and best in valid else None
         if b is None or b == a:
             others = sorted((lid for lid in valid if lid != a),
-                            key=self.session.laps.lap_time)
+                            key=self.session.lap_time)
             b = others[0] if others else a
         self._compare = True
         self._compare_a, self._compare_b = a, b

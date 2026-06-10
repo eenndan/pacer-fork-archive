@@ -244,7 +244,7 @@ class VideoView(QWidget):
         self.slider.sliderMoved.connect(self._on_slider_moved)
         if self.pane.total_duration > 0:
             self.slider.setRange(0, int(self.pane.total_duration * 1000))
-        self.pane.player.durationChanged.connect(self._on_duration)
+        self.pane.durationChanged.connect(self._on_duration)
 
         row = QHBoxLayout()
         row.addWidget(self.play_btn)
@@ -333,6 +333,16 @@ class VideoView(QWidget):
         if side == PRIMARY:
             return self.pane
         return self.secondary
+
+    def _cell_for(self, side: int) -> "_PaneCell | None":
+        """The compare-mode cell wrapper for a side (mirrors _pane_for). None outside compare."""
+        return self._cell_a if side == PRIMARY else self._cell_b
+
+    def _panes(self) -> list[PlayerPane]:
+        """The live panes — always the primary, plus the secondary while in compare mode. Lets the
+        SIMPLE fan-outs (both panes treated identically) loop instead of repeating the
+        primary-then-if-secondary pattern; per-pane special cases (e.g. mute) stay explicit."""
+        return [p for p in (self.pane, self.secondary) if p is not None]
 
     def stop_all(self):
         """Tear down the pane(s) for a reload ("Load full recording"): the whole VideoView is
@@ -461,7 +471,7 @@ class VideoView(QWidget):
         keep the picker selection in sync. The app re-seeks this pane to its new lap start and
         refreshes the chart overlay + Δ badge. Used so a repoint never disturbs the other pane."""
         pane = self._pane_for(side)
-        cell = self._cell_a if side == PRIMARY else self._cell_b
+        cell = self._cell_for(side)
         if pane is None or cell is None:
             return
         pane.set_lap_window(*window)
@@ -515,9 +525,8 @@ class VideoView(QWidget):
     def _on_splitter_moved(self, _pos: int, _index: int):
         """Re-pin BOTH g-meter overlays after a splitter-handle drag (each pane re-pins its own
         overlay to its video corner; cheap no-op when an overlay is hidden)."""
-        for pane in (self.pane, self.secondary):
-            if pane is not None:
-                pane._sync_gmeter()
+        for pane in self._panes():
+            pane.sync_gmeter()
 
     # ------------------------------------------------------------- audio (mute)
     def toggle_mute(self):
@@ -546,9 +555,8 @@ class VideoView(QWidget):
         The visible state is remembered so a LAZILY-created secondary (entering compare AFTER the
         toggle was switched on) is seeded with it on creation (see set_compare)."""
         self._gmeter_visible = bool(on)
-        self.pane.set_gmeter_visible(on)
-        if self.secondary is not None:
-            self.secondary.set_gmeter_visible(on)
+        for pane in self._panes():
+            pane.set_gmeter_visible(on)
 
     def is_gmeter_visible(self) -> bool:
         """True if the g-meter overlay is currently shown (the toggle is on). Lets the app SKIP the
@@ -571,9 +579,8 @@ class VideoView(QWidget):
         # Remember the source so a LAZILY-created secondary pane can be seeded with it on entry
         # (set_compare), so the overlay reads the right sensor label on BOTH panes.
         self._gmeter_source = source
-        self.pane.set_gmeter_source(source)
-        if self.secondary is not None:
-            self.secondary.set_gmeter_source(source)
+        for pane in self._panes():
+            pane.set_gmeter_source(source)
 
     def set_gmeter_lap(self, lap_id):
         """Tell the PRIMARY overlay which lap is being driven (per-lap max-G envelope scope). In
@@ -588,7 +595,7 @@ class VideoView(QWidget):
 
     def set_pane_badge(self, side: int, text: str, colour: str | None):
         """Set a pane's "Δ vs other" badge (compare mode, app-driven per tick)."""
-        cell = self._cell_a if side == PRIMARY else self._cell_b
+        cell = self._cell_for(side)
         if cell is not None:
             cell.set_badge(text, colour)
 

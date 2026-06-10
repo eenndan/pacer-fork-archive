@@ -82,6 +82,9 @@ class PlayerPane(QWidget):
     positionChanged = Signal(float)  # GLOBAL seconds on the session clock
     chapterChanged = Signal(int)     # current chapter index (for the UI label)
     playbackStateChanged = Signal(object)  # forwards QMediaPlayer.PlaybackState to the shell
+    durationChanged = Signal("qlonglong")  # re-emits the inner QMediaPlayer.durationChanged (ms), so
+    # the transport shell can listen to the pane (not the private QMediaPlayer) for the slider range.
+    # Signature matches QMediaPlayer.durationChanged(qlonglong) so the re-emit connects as a slot.
     # True while a cross-chapter source switch is reopening the next chapter (the shell shows a
     # brief "loading next chapter…" indicator so a seam hitch reads as intentional); False once the
     # next chapter has loaded and the deferred seek+resume has been applied.
@@ -164,6 +167,9 @@ class PlayerPane(QWidget):
         self.player.positionChanged.connect(self._on_position)
         self.player.playbackStateChanged.connect(self._on_state)
         self.player.mediaStatusChanged.connect(self._on_media_status)
+        # Re-emit duration changes from the pane so the transport shell can wire to the pane's
+        # public signal rather than reaching into the private QMediaPlayer.
+        self.player.durationChanged.connect(self.durationChanged)
 
         # Bounded-resume watchdog: a one-shot armed when a cross-chapter switch defers a seek+resume,
         # disarmed the instant the seek is applied on the genuine load. If it ever fires, the reopen
@@ -304,6 +310,12 @@ class PlayerPane(QWidget):
 
     def is_gmeter_visible(self) -> bool:
         return self._gmeter_on
+
+    def sync_gmeter(self):
+        """Public: re-pin the g-meter overlay to the video corner if it's on (a no-op when the
+        overlay is hidden). The transport/compare layer calls this after a geometry change it owns
+        (e.g. a splitter-handle drag) without reaching into the pane's private re-pin."""
+        self._sync_gmeter()
 
     def _sync_gmeter(self):
         """Re-pin the overlay window to the video corner if it's on (cheap; called on any geometry

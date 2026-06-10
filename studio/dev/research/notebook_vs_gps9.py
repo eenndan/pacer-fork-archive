@@ -52,7 +52,8 @@ import numpy as np
 import torch
 
 import pacer
-from studio import chapters, tracks, transponder
+from studio import chapters, tracks
+from studio.dev import transponder
 from studio.dev._validate_wallclock import (
     RACING_MAX_S,
     _parse_when,

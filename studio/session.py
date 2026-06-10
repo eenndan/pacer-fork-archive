@@ -79,12 +79,7 @@ class Seg:
         return cls(s.first.x, s.first.y, s.second.x, s.second.y)
 
     def to_pacer(self):
-        seg = pacer.Segment()
-        p1, p2 = pacer.Point(), pacer.Point()
-        p1.x, p1.y = float(self.x1), float(self.y1)
-        p2.x, p2.y = float(self.x2), float(self.y2)
-        seg.first, seg.second = p1, p2
-        return seg
+        return tracks.make_segment(self.x1, self.y1, self.x2, self.y2)
 
 
 def fmt_time(seconds: float) -> str:
@@ -248,12 +243,10 @@ def _widen(seg, factor):
     """Scale a pacer.Segment about its midpoint (a longer timing line)."""
     mx = (seg.first.x + seg.second.x) / 2
     my = (seg.first.y + seg.second.y) / 2
-    out = pacer.Segment()
-    a, b = pacer.Point(), pacer.Point()
-    a.x, a.y = mx + (seg.first.x - mx) * factor, my + (seg.first.y - my) * factor
-    b.x, b.y = mx + (seg.second.x - mx) * factor, my + (seg.second.y - my) * factor
-    out.first, out.second = a, b
-    return out
+    return tracks.make_segment(
+        mx + (seg.first.x - mx) * factor, my + (seg.first.y - my) * factor,
+        mx + (seg.second.x - mx) * factor, my + (seg.second.y - my) * factor,
+    )
 
 
 def _band_lap_count(laps) -> int:
@@ -577,6 +570,21 @@ class Session:
 
     def lap_count(self) -> int:
         return self.laps.laps_count()
+
+    def lap_time(self, lap_id: int) -> float:
+        """Lap time (seconds) for a lap id — thin pacer-free accessor so view modules
+        (lap_table, app) read lap times through Session, not the pacer binding directly."""
+        return self.laps.lap_time(lap_id)
+
+    def sector_count(self) -> int:
+        """Number of sector lines on the laps (0 by default). Thin pacer-free accessor so
+        view modules read the sector count through Session, not the pacer binding."""
+        return self.laps.sector_count()
+
+    def point_count(self) -> int:
+        """Total GPS point count across the recording. Thin pacer-free accessor used by the
+        app's startup log so it needn't reach into the pacer binding."""
+        return self.laps.point_count()
 
     def valid_lap_ids(self) -> list[int]:
         """Real laps only. A fixed threshold is too crude (short double-crossings of the

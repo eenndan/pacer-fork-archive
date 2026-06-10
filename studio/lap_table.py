@@ -102,6 +102,11 @@ class LapTable(QWidget):
         super().__init__()
         self.session = session
         self._current_lap = None  # F3: the lap on the video (independent of selection)
+        # Highlight caches, populated by refresh(): the per-column session-best split values
+        # (F5 purple target) and the set of lap ids with a GPS dropout (⚠). Initialised here so
+        # _apply_highlights()/_lap_cell_text() can read them directly (no getattr defaults).
+        self._best_split: list = []
+        self._dropout_ids: set = set()
 
         self.table = QTableWidget(0, len(COLUMNS))
         self.table.setHorizontalHeaderLabels(COLUMNS)
@@ -135,13 +140,21 @@ class LapTable(QWidget):
         self.refresh()
 
     # ------------------------------------------------------------------ build
+    def _n_split_cols(self) -> int:
+        """How many S-split columns to show: N sector lines split a lap into N+1 sub-sectors,
+        so N+1 columns when there are any sector lines, else 0 (no default split columns).
+        Single-sourced (used by refresh() for the headers and _apply_highlights() for the
+        purple per-column best span)."""
+        n = self.session.sector_count()
+        return n + 1 if n else 0
+
     def refresh(self):
         rows = self.session.lap_rows()
 
         # N sector lines split each lap into N+1 sub-sectors; show one split column per
         # sub-sector (none by default = today's 4 columns). Column count depends on this,
         # so set the headers here — refresh() runs on selection and after sectors change.
-        n_splits = self.session.laps.sector_count() + 1 if self.session.laps.sector_count() else 0
+        n_splits = self._n_split_cols()
         headers = COLUMNS + [f"S{i + 1}" for i in range(n_splits)]
 
         # Per-lap splits (F5 input) and the per-column session-best split value (purple target).
@@ -218,10 +231,10 @@ class LapTable(QWidget):
             return
         # Overall best lap = the valid lap with the min time (foreground green on all cells).
         best_lap = self.session.best_lap_id()
-        n_splits = self.session.laps.sector_count() + 1 if self.session.laps.sector_count() else 0
-        best_split = getattr(self, "_best_split", [])
+        n_splits = self._n_split_cols()
+        best_split = self._best_split
 
-        dropout_ids = getattr(self, "_dropout_ids", set())
+        dropout_ids = self._dropout_ids
         self.table.blockSignals(True)
         for r in range(rows):
             lap_id = self._lap_id(r)
@@ -262,9 +275,8 @@ class LapTable(QWidget):
     def _lap_cell_text(self, lap_id, on: bool) -> str:
         """The Lap-cell text for `lap_id`: a '▶ ' prefix when it's the current (playing) lap and a
         trailing ' ⚠' low-confidence marker when it has a GPS dropout."""
-        dropout_ids = getattr(self, "_dropout_ids", set())
         prefix = CURRENT_PREFIX if on else ""
-        suffix = DROPOUT_SUFFIX if lap_id in dropout_ids else ""
+        suffix = DROPOUT_SUFFIX if lap_id in self._dropout_ids else ""
         return f"{prefix}{lap_id}{suffix}"
 
     def _set_row_current(self, r: int, on: bool):
