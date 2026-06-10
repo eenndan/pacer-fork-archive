@@ -452,6 +452,7 @@ void py_init_module_pacer(nb::module_ &m) {
       nb::class_<pacer::SequentialGPSSource, pacer::RawGPSSource>
           (m, "SequentialGPSSource", "")
       .def(nb::init<pacer::RawGPSSource *, pacer::RawGPSSource *>(),
+          nb::keep_alive<1, 2>(), nb::keep_alive<1, 3>(),
           nb::arg("left"), nb::arg("right"))
       .def("get_total_duration",
           &pacer::SequentialGPSSource::GetTotalDuration)

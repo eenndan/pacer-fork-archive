@@ -21,16 +21,6 @@ import pacer
 
 from . import chapters, gapfill, gmeter, tracks
 
-# The pacer-touching GoPro/GPMF readers (the SequentialGPSSource chain build + the raw GPS/IMU
-# stream readers) live in studio/ingest.py — the data-layer module that owns the pacer IO.
-# Re-imported under their historical `_`-prefixed names so every call site (incl. the dev scripts
-# that import `_read_gpmf` from studio.session) is unchanged.
-from .ingest import (  # noqa: F401  (re-exported for call sites + dev scripts)
-    chain_sources as _chain_sources,
-    read_gpmf as _read_gpmf,
-    read_imu as _read_imu,
-)
-
 # Pacer-free signal/clean helpers live in studio/_signal.py (numpy-only, shared with gmeter).
 # Re-imported here so every existing `session._smooth` / `session._gate_quality` / etc. call
 # site (incl. the dev scripts that import these names from studio.session) is unchanged.
@@ -50,6 +40,14 @@ from ._signal import (  # noqa: F401  (re-exported for call sites + dev scripts)
     _smooth,
     _smooth_segments,
 )
+
+# The pacer-touching GoPro/GPMF readers (the SequentialGPSSource chain build + the raw GPS/IMU
+# stream readers) live in studio/ingest.py — the data-layer module that owns the pacer IO.
+# Re-imported under their historical `_`-prefixed names so every call site (incl. the dev scripts
+# that import `_read_gpmf` from studio.session) is unchanged.
+from .ingest import chain_sources as _chain_sources  # noqa: F401  (re-exported for call sites)
+from .ingest import read_gpmf as _read_gpmf  # noqa: F401  (re-exported for call sites)
+from .ingest import read_imu as _read_imu  # noqa: F401  (re-exported for call sites)
 
 DEFAULT_SAMPLE = "3rdparty/gpmf-parser/samples/hero6.mp4"  # a clip with real motion
 
@@ -85,7 +83,7 @@ class Seg:
     y2: float
 
     @classmethod
-    def from_pacer(cls, s) -> "Seg":
+    def from_pacer(cls, s) -> Seg:
         return cls(s.first.x, s.first.y, s.second.x, s.second.y)
 
     def to_pacer(self):
@@ -342,7 +340,7 @@ class Session:
 
     # ---------------------------------------------------------------- loading
     @classmethod
-    def load(cls, paths: list[str], smooth_window: int = SMOOTH_WINDOW) -> "Session":
+    def load(cls, paths: list[str], smooth_window: int = SMOOTH_WINDOW) -> Session:
         """True-clock timing — the per-sample time comes from the GPS9 fix
         timestamps' real 10 Hz spacing, re-anchored per run to the media clock (see
         `_gps9_times`); this removes the ~0.1% media-clock fast-rate that was systematically
@@ -375,7 +373,7 @@ class Session:
         # against averaging across chapter/dropout gaps. All downstream geometry follows.
         samples = _smooth_track(samples, times, smooth_window)
 
-        for s, t in zip(samples, times):
+        for s, t in zip(samples, times, strict=True):
             laps.add_point(s, float(t))
 
         # Coordinate system centred on the (now clean) track, then segment into laps.

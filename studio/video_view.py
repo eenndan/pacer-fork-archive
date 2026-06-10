@@ -336,7 +336,7 @@ class VideoView(QWidget):
             return self.pane
         return self.secondary
 
-    def _cell_for(self, side: int) -> "_PaneCell | None":
+    def _cell_for(self, side: int) -> _PaneCell | None:
         """The compare-mode cell wrapper for a side (mirrors _pane_for). None outside compare."""
         return self._cell_a if side == PRIMARY else self._cell_b
 

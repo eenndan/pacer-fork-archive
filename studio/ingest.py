@@ -58,7 +58,7 @@ def read_gpmf(paths):
     while not head.is_end():
         a, b = head.current_time_span()
         chunk = []
-        head.read_samples(lambda s, i, n: chunk.append((s, i, n)))
+        head.read_samples(lambda s, i, n, _c=chunk: _c.append((s, i, n)))
         for s, i, n in chunk:
             samples.append(s)
             spans.append((a, b))
