@@ -181,7 +181,10 @@ class PlayerPane(QWidget):
         self._seam_watchdog.timeout.connect(self._on_seam_watchdog)
 
         if self._chapters is not None:
-            self._set_source(0)
+            # Initial load is NOT a source replacement: don't arm the switch gate (there are no
+            # leftover statuses to suppress, and no deferred seek to arm the watchdog — a gate left
+            # armed because the first load skipped LoadingMedia would hang the pane forever).
+            self._set_source(0, switching=False)
 
     # ------------------------------------------------------------- source mgmt
     @property
@@ -206,20 +209,24 @@ class PlayerPane(QWidget):
             return 0.0
         return self._chapters.chapters[self._current_chapter].offset
 
-    def _set_source(self, index: int):
+    def _set_source(self, index: int, switching: bool = True):
         """Load chapter `index` as the player's source (no seek/play here — callers arrange the
         post-load seek via self._pending, applied once the NEW media has genuinely loaded).
 
-        Arms the switch gate (_switching): the backend re-emits the old source's leftover
-        LoadedMedia/EndOfMedia synchronously inside setSource(), before it parses the new file, so
-        _on_media_status must ignore those until the real load begins (see _switching / the gate)."""
+        `switching` arms the switch gate (_switching): a source REPLACEMENT must ignore the OLD
+        source's leftover LoadedMedia/EndOfMedia that the backend re-emits synchronously inside
+        setSource(), before it parses the new file (see _switching / the gate). The INITIAL load has
+        no prior source, so it passes switching=False — arming the gate there would HANG the pane
+        permanently if the first load skips the LoadingMedia transition that disarms it (there is no
+        deferred seek on the initial load, so the watchdog isn't armed to rescue it either)."""
         if self._chapters is None:
             return
         index = min(max(index, 0), len(self._chapters) - 1)
         self._current_chapter = index
         # Arm the switch gate BEFORE setSource so the synchronous spurious statuses it emits are
-        # ignored (only relevant when a post-load action is pending; harmless otherwise).
-        self._switching = True
+        # ignored — but ONLY for an actual source replacement; the initial load must not gate (it
+        # has no leftover statuses to suppress and no watchdog to un-stick it).
+        self._switching = switching
         path = self._chapters.chapters[index].path
         self.player.setSource(QUrl.fromLocalFile(os.path.abspath(path)))
         self.chapterChanged.emit(index)
@@ -233,6 +240,12 @@ class PlayerPane(QWidget):
         return self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
 
     def play(self):
+        # An explicit play() is the latest user intent and overrides a pause made earlier DURING a
+        # seam reopen: clear the "user paused mid-reopen" flag so the deferred seek+resume (and the
+        # watchdog) honour PLAY when the genuine load lands. Without this, a pause-then-play during a
+        # reopen stayed paused — the flag set by the pause survived and _apply_pending skipped the
+        # resume, so play-after-pause-during-reopen never resumed.
+        self._user_paused_during_reopen = False
         # If a lap window is set and the pane is parked at/after the window end (it auto-paused
         # there on the last play), a bare play() would be a dead no-op — the playhead is already at
         # the stop point, so it pauses again on the very next position tick. Seek back to the window

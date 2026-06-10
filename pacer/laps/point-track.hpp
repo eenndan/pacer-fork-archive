@@ -19,21 +19,30 @@ struct PointTrack {
   // -------------------------------- mutation ----------------------------------//
 
   // Append a sample. Only grows points_ and pushes a placeholder so cum_point_dist_ stays the
-  // same length as points_ (the seed {0} covers the first point). The real cumulative distances
-  // are computed entirely in SetCoordinateSystem, which is the sole authority: filling them here
-  // would use the still-default cs_ (garbage that SetCoordinateSystem later overwrites) and waste
-  // a trig-heavy Distance call. cum_point_dist_ is only meaningful AFTER SetCoordinateSystem ran.
+  // same length as points_ (the seed {0} covers the first point), then marks the odometer dirty so
+  // the distance accessors rebuild it on demand against the current cs_. The placeholder value is
+  // irrelevant — a dirty read recomputes the whole prefix sum — so AddPoint stays trig-free.
+  //
+  // The CANONICAL path (add all points, then SetCoordinateSystem once) is byte-identical to before:
+  // SetCoordinateSystem clears dirty_ after filling cum_point_dist_, so accessors then read the
+  // cached value directly. The flag exists only to repair the OUT-OF-ORDER path (an AddPoint AFTER
+  // SetCoordinateSystem, with no re-set), which used to leave stale-zero distances no accessor
+  // healed; now the next CumulativeDistance/DistanceBetween rebuilds rather than reading zeros.
   void AddPoint(GPSSample s, double t) {
     if (!points_.empty())
       cum_point_dist_.push_back(0.0);
     points_.emplace_back(s, t);
+    dirty_ = true;
   }
 
-  // SetCoordinateSystem is the sole authority for cum_point_dist_ (AddPoint only reserves
-  // placeholders). The accumulation loop is single-sourced in CumulativeDistances; the result has
-  // size points_.size(), restoring the cum_point_dist_.size() == points_.size() invariant.
+  // SetCoordinateSystem is the canonical authority for cum_point_dist_: it rebuilds the odometer
+  // against the new cs_ and clears dirty_ (so the canonical add-all-then-set-once path reads the
+  // cached prefix sum with no on-demand rebuild — byte-identical to before this self-healing). The
+  // accumulation loop is single-sourced in CumulativeDistances; the result has size points_.size(),
+  // restoring the cum_point_dist_.size() == points_.size() invariant.
   void SetCoordinateSystem(CoordinateSystem coordinate_system) {
     cs_ = coordinate_system;
+    dirty_ = false;
     // Guard: with no points keep the {0} seed (CumulativeDistances would also return {0}, but
     // bailing avoids rebuilding it and documents the invariant that index [0] / .back() stay
     // valid for a later AddPoint/SetCoordinateSystem).
@@ -47,6 +56,7 @@ struct PointTrack {
     // Reseed the {0} sentinel: index [0] / .back() must stay valid so a later
     // AddPoint/SetCoordinateSystem is not UB. A bare .clear() (size 0) broke that invariant.
     cum_point_dist_.assign(1, 0.0);
+    dirty_ = false;  // {0} matches an empty track; nothing stale to rebuild until points are added.
   }
 
   // -------------------------------- access ------------------------------------//
@@ -60,12 +70,19 @@ struct PointTrack {
   // Read-only view over the whole point track (for MinMax-style scans).
   std::span<const PointInTime<GPSSample>> Points() const { return points_; }
 
-  // Cumulative distance from points_[0] to points_[i] (the gap-aware odometer).
-  double CumulativeDistance(size_t i) const { return cum_point_dist_[i]; }
+  // Cumulative distance from points_[0] to points_[i] (the gap-aware odometer). Rebuilds the
+  // odometer first if a point was added after the last SetCoordinateSystem (dirty_), so this can
+  // never return a stale-zero placeholder.
+  double CumulativeDistance(size_t i) const {
+    EnsureCumulative();
+    return cum_point_dist_[i];
+  }
 
   // Distance along the interior odometer between two point indices [from, to]
   // (cum_point_dist_[to] - cum_point_dist_[from]); same gap-aware aggregation as the prefix sum.
+  // Rebuilds first if dirty (see CumulativeDistance) so an out-of-order AddPoint can't read zeros.
   double DistanceBetween(size_t from, size_t to) const {
+    EnsureCumulative();
     return cum_point_dist_[to] - cum_point_dist_[from];
   }
 
@@ -125,10 +142,25 @@ struct PointTrack {
   }
 
 private:
+  // Rebuild the cumulative odometer against cs_ if a point was added after the last
+  // SetCoordinateSystem (dirty_). const + mutable so the read accessors stay const while still
+  // self-healing; a no-op (clears the flag, returns) when not dirty, so the canonical
+  // add-all-then-set-once path never recomputes here.
+  void EnsureCumulative() const {
+    if (!dirty_)
+      return;
+    cum_point_dist_ = CumulativeDistances(cs_, points_);
+    dirty_ = false;
+  }
+
   CoordinateSystem cs_;
 
   std::vector<PointInTime<GPSSample>> points_;
-  std::vector<double> cum_point_dist_{0};
+  // mutable: EnsureCumulative() repairs these from a const accessor when an out-of-order AddPoint
+  // left the odometer dirty (the cached prefix sum is a memoization of points_+cs_, not observable
+  // state), keeping CumulativeDistance/DistanceBetween const.
+  mutable std::vector<double> cum_point_dist_{0};
+  mutable bool dirty_ = false;
 };
 
 } // namespace pacer

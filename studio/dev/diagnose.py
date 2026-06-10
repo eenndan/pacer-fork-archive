@@ -104,7 +104,7 @@ def main():
     print("file:", paths)
 
     t0 = time.time()
-    samples, spans, naive = _read_gpmf(paths)
+    samples, spans, naive, _durations = _read_gpmf(paths)
     print(f"GPMF parse: {time.time() - t0:.1f}s, {len(samples)} raw samples")
     if not samples:
         return 1

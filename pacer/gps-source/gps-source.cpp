@@ -227,7 +227,9 @@ uint32_t GPMFSource::Samples(void *data,
   uint32_t *payload = GetPayload(mp4handle_, payload_res_, index_);
 
   if (payload == nullptr) {
-    printf("No payload\n");
+    // No payload for this index (empty/EOF chunk). Return the error code silently — the iteration
+    // protocol (is_end()/next()) already handles the empty case, and this is on the chapter-seam
+    // hot path where a per-seam "No payload" printf is pure console noise.
     return 1;
   }
 

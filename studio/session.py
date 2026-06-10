@@ -19,7 +19,7 @@ import numpy as np
 
 import pacer
 
-from . import chapters, gapfill, gmeter, ingest, tracks
+from . import chapters, gapfill, gmeter, tracks
 
 # The pacer-touching GoPro/GPMF readers (the SequentialGPSSource chain build + the raw GPS/IMU
 # stream readers) live in studio/ingest.py — the data-layer module that owns the pacer IO.

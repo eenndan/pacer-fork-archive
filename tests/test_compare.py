@@ -356,6 +356,87 @@ def test_seam_normal_reopen_still_resumes():
     print("test_seam_normal_reopen_still_resumes OK")
 
 
+def test_seam_pause_then_play_during_reopen_ends_up_playing():
+    """PASS-2 FIX #3: the user PAUSES during a seam reopen, then explicitly PLAYS — the latest user
+    action wins, so the pane must RESUME on the genuine load. The fix clears
+    _user_paused_during_reopen at the top of play(); without it the stale pause flag survived an
+    explicit play and _apply_pending skipped the resume, leaving the pane stuck paused."""
+    pane = _two_chapter_pane()
+    pane.seek(150.0)  # arm switch to chapter 1, resume=True (was playing)
+    assert pane._pending == (1, 50.0, True)
+    # User pauses mid-reopen, THEN changes their mind and presses play.
+    pane.pause()
+    assert pane._user_paused_during_reopen is True and pane.player.playing is False
+    pane.play()
+    assert pane._user_paused_during_reopen is False, "explicit play must clear the pause-mid-reopen flag"
+    assert pane.player.playing is True
+    play_calls_after_play = pane.player.play_calls
+    # Genuine load completes: the deferred seek applies AND the resume is honoured (play wins).
+    pane._on_media_status(_LOADING)
+    pane._on_media_status(_LOADED)
+    assert pane._pending is None
+    assert pane.player.positions[-1] == 50_000, "deferred seek must still apply"
+    assert pane.player.play_calls > play_calls_after_play, "resume must fire on the genuine load"
+    assert pane.player.playing is True, "play-after-pause-during-reopen must end up PLAYING"
+    print("test_seam_pause_then_play_during_reopen_ends_up_playing OK")
+
+
+def test_seam_pause_then_play_survives_watchdog():
+    """PASS-2 FIX #3 (watchdog path): pause then play during a reopen also resumes via the
+    bounded-resume watchdog (a slow/hiccuping reopen) — the explicit play wins there too."""
+    pane = _two_chapter_pane()
+    pane.seek(150.0)
+    pane.pause()
+    pane.play()
+    assert pane._user_paused_during_reopen is False
+    # The watchdog fires before the genuine load; it must honour the live PLAY intent.
+    pane._on_seam_watchdog()
+    assert pane._pending is None
+    assert pane.player.positions[-1] == 50_000
+    assert pane.player.playing is True, "the watchdog must resume after an explicit play"
+    print("test_seam_pause_then_play_survives_watchdog OK")
+
+
+def test_set_source_initial_load_does_not_arm_gate_but_replacement_does():
+    """PASS-2 FIX #4: _set_source(index, switching=False) is the INITIAL load and must NOT arm the
+    _switching gate; the default (switching=True) — a source REPLACEMENT — must. The initial load
+    has no leftover statuses to suppress and (with no deferred seek) no watchdog to un-stick it, so
+    arming the gate there would HANG the pane forever if the first load skipped the LoadingMedia
+    transition that disarms it. Driven on the fake so the flag plumbing is deterministic."""
+    pane = _two_chapter_pane()
+    pane.player = _FakePlayer()
+    # Initial-load semantics: gate stays OPEN.
+    pane._switching = True  # pre-dirty to prove _set_source(switching=False) clears it
+    pane._set_source(0, switching=False)
+    assert pane._switching is False, "initial load (switching=False) must not arm the gate"
+    # Replacement semantics: gate arms (the seam-switch behaviour is preserved).
+    pane._set_source(1)  # default switching=True
+    assert pane._switching is True, "a source replacement must still arm the gate"
+    print("test_set_source_initial_load_does_not_arm_gate_but_replacement_does OK")
+
+
+def test_initial_load_skipping_loadingmedia_is_not_gated():
+    """PASS-2 FIX #4 (the exact hang): after the INITIAL load the gate is open, so a first
+    LoadedMedia that arrives WITHOUT a preceding LoadingMedia is a clean no-op and the pane stays
+    usable. With the old code the gate armed on the initial _set_source stayed armed (LoadedMedia is
+    ignored while switching, and only LoadingMedia disarms it) and the pane hung. We reproduce the
+    initial-load state deterministically (switching=False, nothing pending) on the fake, feed the
+    sole LoadedMedia, then prove a same-chapter seek applies DIRECTLY rather than folding into a
+    _pending that never resolves."""
+    pane = _two_chapter_pane()
+    pane.player = _FakePlayer()
+    pane._current_chapter = 0
+    pane._switching = False   # the post-initial-load state with FIX #4 (gate never armed)
+    pane._pending = None
+    pane._on_media_status(_LOADED)  # first (and only) status — no LoadingMedia ever emitted
+    assert pane._pending is None and pane.player.positions == []
+    # A same-chapter seek must seek DIRECTLY (gate open, nothing pending) — proof the pane isn't hung.
+    pane.seek(30.0)  # chapter 0, local 30
+    assert pane._pending is None, "same-chapter seek on a non-switching pane must not defer"
+    assert pane.player.positions[-1] == 30_000, "seek must apply directly -> pane is live, not gated"
+    print("test_initial_load_skipping_loadingmedia_is_not_gated OK")
+
+
 def test_play_at_window_end_seeks_to_start_first():
     """FIX #4: a compare pane parked AT its lap-window end resumes from the window START on Play
     (a bare play() there is a dead no-op — it re-pauses on the next tick)."""

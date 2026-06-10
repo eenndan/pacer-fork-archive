@@ -90,8 +90,14 @@ private:
   std::vector<LapChunk> lap_chunks_;
   std::vector<LapChunk> sector_chunks_;
 
+  // Update() re-segments only when an input changed. The two sentinels below detect a timing-line
+  // edit (start_line / sector_lines); segmentation_dirty_ detects the OTHER input — the point track
+  // / coordinate system. It starts true (an empty/fresh Laps has never been segmented) and is set
+  // by AddPoint/ClearPoints/SetCoordinateSystem so a re-segment after the points changed but the
+  // timing lines did NOT still recomputes (otherwise Update() early-outs with stale lap_chunks_).
   Segment dirty_start_line_ = {};
   std::vector<Segment> dirty_sector_lines_ = {};
+  bool segmentation_dirty_ = true;
 };
 
 } // namespace pacer

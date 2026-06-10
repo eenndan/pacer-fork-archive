@@ -13,18 +13,31 @@
 // start/finish partial segments, keeping lap/sector segmentation on top.
 
 void pacer::Laps::Update() {
-  if (sectors.start_line == dirty_start_line_ &&
+  // Re-segment only when something that feeds the segmentation changed. The timing-line sentinels
+  // catch a start_line/sector_lines edit; segmentation_dirty_ catches the OTHER input — the point
+  // track / coordinate system (set by AddPoint/ClearPoints/SetCoordinateSystem). Without the latter
+  // a re-segment after the points changed but the timing lines did NOT would early-out and keep
+  // STALE lap_chunks_ pointing at the old track (the cache-staleness bug). All three must be
+  // unchanged to skip.
+  if (!segmentation_dirty_ && sectors.start_line == dirty_start_line_ &&
       sectors.sector_lines == dirty_sector_lines_)
     return;
 
   dirty_start_line_ = sectors.start_line;
   dirty_sector_lines_ = sectors.sector_lines;
+  segmentation_dirty_ = false;
 
   lap_chunks_.clear();
   sector_chunks_.clear();
 
   if (track_.PointCount() == 0)
     return;
+
+  // With no intermediate sector lines there are no sectors to record: the rotating "sector line"
+  // would otherwise fall back to the start line (sector_index == -1) and record every start-line
+  // crossing as a phantom sector. SectorCount() is already 0 in that case; this keeps the recorded
+  // sector_chunks_ consistent with it (RecordedSectors() == 0) instead of carrying start crossings.
+  const bool has_sectors = !sectors.sector_lines.empty();
 
   const CoordinateSystem &cs_ = track_.Cs();
 
@@ -62,7 +75,11 @@ void pacer::Laps::Update() {
     }
 
     auto lap_split = Split(global_start, previous, current);
-    auto sector_split = Split(global_sector, previous, current);
+    // Only test the rotating sector line when there ARE intermediate sector lines; otherwise the
+    // line is the start line and every crossing would be recorded as a phantom sector (see the
+    // has_sectors note above). With no sector lines this stays empty -> nothing recorded.
+    auto sector_split =
+        has_sectors ? Split(global_sector, previous, current) : std::nullopt;
 
     previous = current;
 
@@ -265,8 +282,13 @@ size_t pacer::Laps::LapsCount() const { return lap_chunks_.size(); }
 void pacer::Laps::ClearSectors() { sectors.sector_lines.clear(); }
 
 // Point/distance operations delegate to the owned PointTrack (which carries the same
-// AddPoint/SetCoordinateSystem/ClearPoints semantics and invariants documented there).
-void pacer::Laps::AddPoint(GPSSample s, double t) { track_.AddPoint(s, t); }
+// AddPoint/SetCoordinateSystem/ClearPoints semantics and invariants documented there). Each also
+// marks the segmentation dirty so the next Update() re-segments against the changed track even when
+// the timing lines were not touched (the timing-line sentinels alone would otherwise early-out).
+void pacer::Laps::AddPoint(GPSSample s, double t) {
+  track_.AddPoint(s, t);
+  segmentation_dirty_ = true;
+}
 
 size_t pacer::Laps::PointCount() const { return track_.PointCount(); }
 
@@ -276,6 +298,7 @@ pacer::PointInTime<pacer::GPSSample> pacer::Laps::GetPoint(size_t row) const {
 
 void pacer::Laps::SetCoordinateSystem(CoordinateSystem coordinate_system) {
   track_.SetCoordinateSystem(coordinate_system);
+  segmentation_dirty_ = true;
 }
 size_t pacer::Laps::RecordedSectors() const { return sector_chunks_.size(); }
 
@@ -291,4 +314,7 @@ void pacer::Lap::FillDistances(const CoordinateSystem &cs) {
 double pacer::Lap::LapTime() const {
   return points.back().time - points.front().time;
 }
-void pacer::Laps::ClearPoints() { track_.ClearPoints(); }
+void pacer::Laps::ClearPoints() {
+  track_.ClearPoints();
+  segmentation_dirty_ = true;
+}
