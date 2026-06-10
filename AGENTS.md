@@ -151,13 +151,13 @@ Pixi tasks (`[tool.pixi.tasks]` in [pyproject.toml](pyproject.toml)):
 The C++ build also runs the binding codegen target and deploys the compiled `.so`.
 `CMAKE_EXPORT_COMPILE_COMMANDS` is on; [.clangd](.clangd) expects `build/Release/compile_commands.json`.
 
-**Tests** (wired in [tests/CMakeLists.txt](tests/CMakeLists.txt)) — 16 CTest entries:
+**Tests** (wired in [tests/CMakeLists.txt](tests/CMakeLists.txt)) — 17 CTest entries:
 - C++ Catch2 (5): `test_ops`, `test_geometry`, `test_coordinate_system`, `test_laps`,
   `test_gps_source`.
-- Python studio (11; pure-Python, fast, registered with CTest): `test_scrub_conversion`,
+- Python studio (12; pure-Python, fast, registered with CTest): `test_scrub_conversion`,
   `test_lap_timing`, `test_chapters`, `test_gapfill`, `test_gps_source_bindings`,
-  `test_studio_features`, `test_compare`, `test_controllers`, `test_validate_wallclock`,
-  `test_gmeter`, `test_gmeter_overlay`.
+  `test_ingest_equivalence`, `test_studio_features`, `test_compare`, `test_controllers`,
+  `test_validate_wallclock`, `test_gmeter`, `test_gmeter_overlay`.
 
 **Inputs:** the studio app takes file paths on the CLI (`pixi run studio -- a.MP4`).
 

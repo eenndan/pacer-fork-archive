@@ -299,12 +299,12 @@ accelerometer** (`ACCL`), synced to playback. Toggle with the **`G`** button und
 ## Tests
 
 Pure-Python studio tests live under [`tests/`](../tests/) and are registered with CTest (so
-`pixi run test` runs them with the C++ suite — 16 CTest entries total: 5 C++ + 11 Python):
+`pixi run test` runs them with the C++ suite — 17 CTest entries total: 5 C++ + 12 Python):
 `test_gapfill`, `test_scrub_conversion`, `test_studio_features` (the auto-follow edge + numeric
 sort / lap-scoped nearest / per-column min), `test_chapters`, `test_lap_timing`,
-`test_gps_source_bindings`, `test_compare`, `test_controllers` (the extracted scrub/compare
-controllers on a bare Session + fake views), `test_validate_wallclock`, `test_gmeter`,
-`test_gmeter_overlay`.
+`test_gps_source_bindings`, `test_ingest_equivalence` (single-pass ingest == two-pass reads),
+`test_compare`, `test_controllers` (the extracted scrub/compare controllers on a bare Session +
+fake views), `test_validate_wallclock`, `test_gmeter`, `test_gmeter_overlay`.
 
 ## State & next ideas
 
