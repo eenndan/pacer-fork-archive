@@ -54,7 +54,7 @@ def _equirect_metres(lat1: float, lon1: float, lat2: float, lon2: float) -> floa
     return math.hypot(dx, dy)
 
 
-def make_segment(x1: float, y1: float, x2: float, y2: float) -> "pacer.Segment":
+def make_segment(x1: float, y1: float, x2: float, y2: float) -> pacer.Segment:
     """A `pacer.Segment` from two LOCAL-metre endpoints (x1,y1)-(x2,y2).
 
     Single-sources the pacer.Segment write-pattern (set Point.x/.y by field assignment, then
@@ -81,7 +81,7 @@ def detect_track(lat: float, lon: float) -> Track | None:
     return best
 
 
-def start_line_segment(track: Track, cs) -> "pacer.Segment":
+def start_line_segment(track: Track, cs) -> pacer.Segment:
     """The track's start/finish line as a `pacer.Segment` in LOCAL meters (via cs.local).
 
     Construction goes through `make_segment` so the Segment write-pattern lives in one place.

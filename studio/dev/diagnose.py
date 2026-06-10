@@ -75,7 +75,7 @@ def widen(seg, factor):
 
 def build_laps(samples, times, label, widen_start=1.0):
     laps = pacer.Laps()
-    for s, t in zip(samples, times):
+    for s, t in zip(samples, times, strict=True):
         laps.add_point(s, float(t))
     mn, mx = laps.min_max()
     cs = pacer.CoordinateSystem(

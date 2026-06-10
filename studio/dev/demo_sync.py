@@ -43,7 +43,7 @@ def telemetry(path):
     while not src.is_end():
         start, end = src.current_time_span()
         chunk = []
-        src.read_samples(lambda s, i, n: chunk.append((s, i, n)))
+        src.read_samples(lambda s, i, n, _c=chunk: _c.append((s, i, n)))
         for s, i, n in chunk:
             times.append(start + (end - start) * (i / n if n else 0.0))
             speeds.append(s.full_speed * 3.6)

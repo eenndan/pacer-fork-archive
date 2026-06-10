@@ -125,7 +125,7 @@ std::optional<PointInTime<P>> Split(Segment start_line, PointInTime<P> first,
     return std::nullopt;
   }
 
-  return PointInTime{
+  return PointInTime<P>{
       .point = Interpolate(first.point, second.point, ratio),
       .time = first.time * (1 - ratio) + ratio * second.time,
   };

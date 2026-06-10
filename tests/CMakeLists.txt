@@ -42,6 +42,13 @@ if(Python_Interpreter_FOUND)
              COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_compare.py)
     set_tests_properties(test_compare PROPERTIES
                          ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    # The extracted StudioWindow collaborators (studio.scrub_controller / studio.compare_controller):
+    # drive the scrub-coalescing + compare per-tick logic DIRECTLY on a bare Session + fake views
+    # (no full window / event loop). Imports Session -> Qt, so run offscreen.
+    add_test(NAME test_controllers
+             COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_controllers.py)
+    set_tests_properties(test_controllers PROPERTIES
+                         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_test(NAME test_validate_wallclock
              COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_validate_wallclock.py)
     set_tests_properties(test_validate_wallclock PROPERTIES
@@ -54,4 +61,19 @@ if(Python_Interpreter_FOUND)
              COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_gmeter_overlay.py)
     set_tests_properties(test_gmeter_overlay PROPERTIES
                          ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    # The Python tests must import the cmake-deployed bindings package (bindings/pacer/pacer,
+    # where the build drops the compiled module) WITHOUT relying on a pip/editable install of
+    # `pacer` in the interpreter's site-packages — on a fresh CI env there is none, and
+    # `import pacer` silently falls back to the C++ source dir pacer/ as an EMPTY namespace
+    # package (the tests sys.path.insert the repo root to reach `studio`), failing with
+    # AttributeError. PYTHONPATH makes the deployed package win deterministically in every
+    # install state; APPEND keeps the per-test QT_QPA_PLATFORM settings above intact.
+    foreach(pytest IN ITEMS test_scrub_conversion test_lap_timing test_chapters test_gapfill
+                            test_gps_source_bindings test_studio_features test_compare
+                            test_controllers test_validate_wallclock test_gmeter
+                            test_gmeter_overlay)
+        set_property(TEST ${pytest} APPEND PROPERTY ENVIRONMENT
+                     "PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/pacer")
+    endforeach()
 endif()

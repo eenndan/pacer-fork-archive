@@ -31,7 +31,7 @@ struct PointTrack {
   void AddPoint(GPSSample s, double t) {
     if (!points_.empty())
       cum_point_dist_.push_back(0.0);
-    points_.emplace_back(s, t);
+    points_.push_back({.point = s, .time = t});
     dirty_ = true;
   }
 

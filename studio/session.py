@@ -21,16 +21,6 @@ import pacer
 
 from . import chapters, gapfill, gmeter, tracks
 
-# The pacer-touching GoPro/GPMF readers (the SequentialGPSSource chain build + the raw GPS/IMU
-# stream readers) live in studio/ingest.py — the data-layer module that owns the pacer IO.
-# Re-imported under their historical `_`-prefixed names so every call site (incl. the dev scripts
-# that import `_read_gpmf` from studio.session) is unchanged.
-from .ingest import (  # noqa: F401  (re-exported for call sites + dev scripts)
-    chain_sources as _chain_sources,
-    read_gpmf as _read_gpmf,
-    read_imu as _read_imu,
-)
-
 # Pacer-free signal/clean helpers live in studio/_signal.py (numpy-only, shared with gmeter).
 # Re-imported here so every existing `session._smooth` / `session._gate_quality` / etc. call
 # site (incl. the dev scripts that import these names from studio.session) is unchanged.
@@ -50,6 +40,15 @@ from ._signal import (  # noqa: F401  (re-exported for call sites + dev scripts)
     _smooth,
     _smooth_segments,
 )
+
+# The pacer-touching GoPro/GPMF readers (the SequentialGPSSource chain build + the raw GPS/IMU
+# stream readers) live in studio/ingest.py — the data-layer module that owns the pacer IO.
+# Re-imported under their historical `_`-prefixed names so every call site (incl. the dev scripts
+# that import `_read_gpmf` from studio.session) is unchanged.
+from .ingest import chain_sources as _chain_sources  # noqa: F401  (re-export for call sites)
+from .ingest import read_gpmf as _read_gpmf  # noqa: F401  (re-export for call sites + dev scripts)
+from .ingest import read_imu as _read_imu  # noqa: F401  (re-export for call sites + dev scripts)
+from .ingest import read_recording as _read_recording  # the single-pass GPS+IMU load reader
 
 DEFAULT_SAMPLE = "3rdparty/gpmf-parser/samples/hero6.mp4"  # a clip with real motion
 
@@ -85,7 +84,7 @@ class Seg:
     y2: float
 
     @classmethod
-    def from_pacer(cls, s) -> "Seg":
+    def from_pacer(cls, s) -> Seg:
         return cls(s.first.x, s.first.y, s.second.x, s.second.y)
 
     def to_pacer(self):
@@ -301,6 +300,11 @@ class Session:
         # is what the VIDEO layer uses to switch sources / span the slider across chapters.
         self.chapters = chapter_map
         self._lap_cache: dict[int, object] = {}
+        # Per-lap bulk columns (times, xs, ys, full_speed m/s, cum_distances) fetched in ONE
+        # pacer.Laps.lap_columns crossing instead of a per-point cs.local/full_speed/time loop.
+        # The single source _lap_trace_xyt / _lap_time_dist_elapsed / _lap_arrays /
+        # sector_boundary_distances all slice from; cleared on re-segment. Built once per lap.
+        self._cols_cache: dict[int, tuple] = {}
         # Per-lap (times, dists, elapsed) arrays for _lap_time_dist (the cursor/video x<->time
         # conversions) — rebuilding these from the bound lap object every ~30 Hz cursor tick is
         # wasteful; cache and clear on re-segment. `elapsed` (= times - times[0]) is precomputed
@@ -342,7 +346,7 @@ class Session:
 
     # ---------------------------------------------------------------- loading
     @classmethod
-    def load(cls, paths: list[str], smooth_window: int = SMOOTH_WINDOW) -> "Session":
+    def load(cls, paths: list[str], smooth_window: int = SMOOTH_WINDOW) -> Session:
         """True-clock timing — the per-sample time comes from the GPS9 fix
         timestamps' real 10 Hz spacing, re-anchored per run to the media clock (see
         `_gps9_times`); this removes the ~0.1% media-clock fast-rate that was systematically
@@ -360,7 +364,12 @@ class Session:
         if not paths:
             return cls(laps, empty, None)
 
-        samples, spans, naive, durations = _read_gpmf(paths)
+        # Single-pass ingest: build the SequentialGPSSource chain ONCE and read BOTH the GPS
+        # trace and the IMU (accl/grav/cori) streams off the same opened containers, so each
+        # chapter MP4 is opened / GMPF-parsed once on load instead of twice. The IMU arrays are
+        # handed straight to _build_gmeter below (no second open). Byte-identical to the former
+        # _read_gpmf(paths) + _read_imu(paths) two-chain path (see ingest.read_recording).
+        samples, spans, naive, durations, accl, grav, cori = _read_recording(paths)
         # The offset table for the video layer: each chapter's media duration on one global axis.
         chapter_map = chapters.ChapterMap(list(paths), durations)
         samples, spans, naive = _gate_quality(samples, spans, naive)
@@ -375,7 +384,7 @@ class Session:
         # against averaging across chapter/dropout gaps. All downstream geometry follows.
         samples = _smooth_track(samples, times, smooth_window)
 
-        for s, t in zip(samples, times):
+        for s, t in zip(samples, times, strict=True):
             laps.add_point(s, float(t))
 
         # Coordinate system centred on the (now clean) track, then segment into laps.
@@ -398,36 +407,37 @@ class Session:
             )
             laps.update()
         session = cls(laps, cs, video_path, chapter_map)
-        # Vehicle-frame g from the real GoPro accelerometer, cross-checked vs GPS-derived g.
-        # Built here (the trace arrays now exist) and cached; never recomputed per frame.
-        session._build_gmeter(paths)
+        # Vehicle-frame g from the real GoPro accelerometer, cross-checked vs GPS-derived g. The
+        # ACCL/GRAV/CORI were already read off the single-pass chain above, so pass them straight
+        # in (no second MP4 open). Built here (the trace arrays now exist) and cached.
+        session._build_gmeter(accl, grav, cori)
         return session
 
-    def _build_gmeter(self, paths: list[str]) -> None:
-        """Read the GoPro IMU streams and precompute the vehicle-frame g(t) series, aligned to
-        the SAME smoothed GPS trace + media clock the rest of the session uses (so it syncs to
-        the video and respects chapter offsets). Reports the ACCL-vs-GPS cross-check once at
-        load. Degrades silently to an empty meter if the IMU is absent or reading fails — the
-        overlay just shows no data, and nothing else in the session is affected."""
+    def _build_gmeter(self, accl, grav, cori) -> None:
+        """Precompute the vehicle-frame g(t) series from the ALREADY-READ GoPro IMU streams
+        (accl/grav/cori, read once off the single-pass ingest chain in `load`), aligned to the
+        SAME smoothed GPS trace + media clock the rest of the session uses (so it syncs to the
+        video and respects chapter offsets). Reports the ACCL-vs-GPS cross-check once at load.
+        Degrades silently to an empty meter if the transform fails — the overlay just shows no
+        data, and nothing else in the session is affected (the IMU is additive)."""
         try:
-            accl, grav, cori = _read_imu(paths)
+            # Per-chapter alignment spans: CORI is referenced to each chapter's own capture start,
+            # so the camera->ENU yaw must be fit independently per chapter. Build (start, end)
+            # global spans from the chapter offset table (single chapter => one full span).
+            seg_bounds = None
+            if self.chapters is not None and len(self.chapters.chapters) > 1:
+                chs = self.chapters.chapters
+                seg_bounds = [(c.offset, chs[i + 1].offset if i + 1 < len(chs) else c.offset + 1e9)
+                              for i, c in enumerate(chs)]
+            # The GPS trajectory for the cross-check + heading is the session's own smoothed
+            # trace: local-metre east/north (tx,ty), media time (tt), speed in m/s (tv is km/h).
+            self._gmeter = gmeter.compute(
+                accl, grav, cori,
+                gps_t=self.tt, gps_x=self.tx, gps_y=self.ty, gps_speed=self.tv / 3.6,
+                segment_bounds=seg_bounds)
         except Exception as e:  # noqa: BLE001 — IMU is additive; never break a load over it
-            print(f"studio: IMU read failed ({e!r}); g-meter disabled.", flush=True)
+            print(f"studio: g-meter build failed ({e!r}); g-meter disabled.", flush=True)
             return
-        # Per-chapter alignment spans: CORI is referenced to each chapter's own capture start,
-        # so the camera->ENU yaw must be fit independently per chapter. Build (start, end) global
-        # spans from the chapter offset table (single chapter => one full span).
-        seg_bounds = None
-        if self.chapters is not None and len(self.chapters.chapters) > 1:
-            chs = self.chapters.chapters
-            seg_bounds = [(c.offset, chs[i + 1].offset if i + 1 < len(chs) else c.offset + 1e9)
-                          for i, c in enumerate(chs)]
-        # The GPS trajectory for the cross-check + heading is the session's own smoothed trace:
-        # local-metre east/north (tx,ty), media time (tt), speed in m/s (tv is km/h).
-        self._gmeter = gmeter.compute(
-            accl, grav, cori,
-            gps_t=self.tt, gps_x=self.tx, gps_y=self.ty, gps_speed=self.tv / 3.6,
-            segment_bounds=seg_bounds)
         gm = self._gmeter
         if gm.cross is not None:
             print(f"studio: {gm.cross.summary()}", flush=True)
@@ -454,6 +464,7 @@ class Session:
         )
         self.laps.update()
         self._lap_cache.clear()
+        self._cols_cache.clear()
         self._dist_cache.clear()
         self._xyt_cache.clear()
         self._seg_cache.clear()
@@ -503,6 +514,24 @@ class Session:
             lap = self.laps.get_lap(lap_id)
             self._lap_cache[lap_id] = lap
         return lap
+
+    def _lap_columns(self, lap_id: int):
+        """Cached per-lap (times, xs, ys, full_speed_mps, cum_distances) numpy arrays, fetched in
+        a SINGLE pacer.Laps.lap_columns crossing (was a per-point cs.local/full_speed/time loop).
+        local metres + media-clock seconds + raw 3D speed (m/s) + the lap's gap-aware odometer,
+        all index-aligned and the SAME length (the materialized lap: interpolated start crossing +
+        interior track points + interpolated finish crossing). Cleared on re-segment.
+
+        Byte-identical to the former per-element builders: cs (the laps' coordinate system) is
+        `self.cs` on the load path, so cs.Local in C++ matches the Python cs.local(p.point), and
+        cum_distances is moved straight off GetLap()'s — see Laps::LapColumns."""
+        cols = self._cols_cache.get(lap_id)
+        if cols is None:
+            c = self.laps.lap_columns(lap_id)
+            cols = (np.asarray(c.times), np.asarray(c.xs), np.asarray(c.ys),
+                    np.asarray(c.full_speed), np.asarray(c.cum_distances))
+            self._cols_cache[lap_id] = cols
+        return cols
 
     def lap_count(self) -> int:
         return self.laps.laps_count()
@@ -602,14 +631,11 @@ class Session:
         lookup all slice from, so a marker drag no longer rebuilds these on every mouse-move."""
         got = self._xyt_cache.get(lap_id)
         if got is None:
-            lap = self._get_lap(lap_id)
-            xs, ys, ts = [], [], []
-            for p in lap.points:
-                v = self.cs.local(p.point)
-                xs.append(v[0])
-                ys.append(v[1])
-                ts.append(p.time)
-            got = (np.asarray(xs), np.asarray(ys), np.asarray(ts))
+            # One bulk crossing instead of a per-point cs.local loop: the local-metre xs/ys and the
+            # media-clock times come straight off pacer.Laps.lap_columns (cs.Local in C++ == the
+            # former self.cs.local(p.point); see _lap_columns).
+            times, xs, ys, _full_speed, _cum = self._lap_columns(lap_id)
+            got = (xs, ys, times)
             self._xyt_cache[lap_id] = got
         return got
 
@@ -686,15 +712,14 @@ class Session:
         lap time for every lap (no blanks, none exceeding the lap time)."""
         lines = self.laps.sectors.sector_lines
         n_splits = len(lines) + 1
-        lap = self._get_lap(lap_id)
-        pts = lap.points
-        cds = lap.cum_distances
-        m = min(len(pts), len(cds))
+        # times + cum_distances from the one bulk lap_columns crossing (both length lap.count(),
+        # so the former m = min(len(points), len(cum_distances)) is just that length).
+        times, _xs, _ys, _full_speed, cum = self._lap_columns(lap_id)
+        m = min(len(times), len(cum))
         if m < 2:
             return []
-        cum_distance = np.asarray(cds[:m], dtype=float)
-        t0 = pts[0].time
-        elapsed = np.array([pts[i].time - t0 for i in range(m)])
+        cum_distance = cum[:m]
+        elapsed = times[:m] - times[0]
 
         # Each sector line's lap distance = cum_distance of the lap point nearest its midpoint —
         # single-sourced (and already sorted ascending) via sector_boundary_distances, so the
@@ -716,20 +741,18 @@ class Session:
         lines = self.laps.sectors.sector_lines
         if not lines:
             return []
-        lap = self._get_lap(lap_id)
-        pts = lap.points
-        cds = lap.cum_distances
-        m = min(len(pts), len(cds))
+        # Local-metre xs/ys + cum_distances from the one bulk lap_columns crossing (replacing the
+        # per-point self.cs.local loop); all length lap.count(), so m is just that length.
+        _times, xs, ys, _full_speed, cum = self._lap_columns(lap_id)
+        m = min(len(xs), len(cum))
         if m < 2:
             return []
-        locs = [self.cs.local(pts[i].point) for i in range(m)]
-        xy = np.array([(v[0], v[1]) for v in locs])
-        cum = np.asarray(cds[:m], dtype=float)
+        xs, ys, cum = xs[:m], ys[:m], cum[:m]
         bounds = []
         for seg in lines:
             mx = (seg.first.x + seg.second.x) / 2.0
             my = (seg.first.y + seg.second.y) / 2.0
-            j = int(np.argmin((xy[:, 0] - mx) ** 2 + (xy[:, 1] - my) ** 2))
+            j = int(np.argmin((xs - mx) ** 2 + (ys - my) ** 2))
             bounds.append(float(cum[j]))
         return sorted(bounds)
 
@@ -788,14 +811,15 @@ class Session:
         instead of re-subtracting times[0] every call. Cleared on re-segment. None if degenerate."""
         td = self._dist_cache.get(lap_id)
         if td is None:
-            lap = self._get_lap(lap_id)
-            n = lap.count()
-            cds = lap.cum_distances
-            m = min(n, len(cds))
+            # times + cum_distances come from the one bulk lap_columns crossing (both have length
+            # lap.count(), so the former m = min(count, len(cum_distances)) is just that length).
+            # Slice defensively to the shorter of the two to keep the exact <2-degenerate guard.
+            all_times, _xs, _ys, _full_speed, cum = self._lap_columns(lap_id)
+            m = min(len(all_times), len(cum))
             if m < 2:
                 return None
-            times = np.array([lap.points[i].time for i in range(m)])
-            dists = np.array([cds[i] for i in range(m)])
+            times = all_times[:m].copy()
+            dists = cum[:m].copy()
             elapsed = times - times[0]
             td = (times, dists, elapsed)
             self._dist_cache[lap_id] = td
@@ -878,22 +902,23 @@ class Session:
 
         `dist`/`elapsed` are reused from the cached `_lap_time_dist_elapsed` (the same per-lap
         odometer + seconds-from-start the cursor↔video conversions interpolate on), so they're
-        built once per lap. Only `speed_kmh` is computed here. A degenerate lap (<2 points, where
-        the shared cache returns None) falls back to the same short arrays as before — `delta()`,
-        the sole caller, filters those out with its `len(dist) >= 2` check."""
-        lap = self._get_lap(lap_id)
-        pts = lap.points
+        built once per lap. `speed_kmh` is the bulk `full_speed` column (m/s) scaled to km/h — the
+        whole row set comes from the one `lap_columns` crossing (`_lap_columns`), replacing the
+        former per-point `pts[i].point.full_speed` loop. A degenerate lap (<2 points, where the
+        shared cache returns None) falls back to the same short arrays as before — `delta()`, the
+        sole caller, filters those out with its `len(dist) >= 2` check."""
+        all_times, _xs, _ys, full_speed, cum = self._lap_columns(lap_id)
         td = self._lap_time_dist_elapsed(lap_id)
         if td is None:  # <2 points: reproduce the original short-array output exactly
-            m = min(len(lap.cum_distances), len(pts))
-            dist = np.array(lap.cum_distances)[:m]
-            speed_kmh = np.array([pts[i].point.full_speed * 3.6 for i in range(m)])
-            t0 = pts[0].time if m else 0.0
-            elapsed = np.array([pts[i].time - t0 for i in range(m)])
+            m = min(len(cum), len(all_times))
+            dist = cum[:m].copy()
+            speed_kmh = full_speed[:m] * 3.6
+            t0 = all_times[0] if m else 0.0
+            elapsed = all_times[:m] - t0
             return dist, speed_kmh, elapsed
         _times, dist, elapsed = td
         m = len(dist)
-        speed_kmh = np.array([pts[i].point.full_speed * 3.6 for i in range(m)])
+        speed_kmh = full_speed[:m] * 3.6
         return dist, speed_kmh, elapsed
 
     _DELTA_GRID_N = 400  # samples on the normalized-distance grid (smooth + cheap to render)
