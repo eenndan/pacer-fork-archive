@@ -96,6 +96,14 @@ class StudioWindow(QMainWindow):
             else:
                 notice = ("saved timing lines don't match this recording — "
                           "reverted to the auto-fitted start line")
+        elif session.track_name is None and session.lap_count() > 0:
+            # Unknown track (no registry match): the start line was auto-fitted (the
+            # pick_random_start fallback in Session.load), not the real start/finish, so
+            # lap times are arbitrary until the user drags it into place. One line, non-
+            # fatal; suppressed when a sidecar restored the user's own lines above. To add
+            # the track to the registry: studio/dev/print_track_entry.py.
+            notice = ("unknown track — start/finish line was auto-fitted; "
+                      "drag it into place to fix lap timing")
 
         label = chapters.recording_label(paths)
         self.setWindowTitle(f"pacer studio — {label}" if label else "pacer studio")
