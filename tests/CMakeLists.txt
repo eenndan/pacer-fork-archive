@@ -42,6 +42,13 @@ if(Python_Interpreter_FOUND)
              COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_compare.py)
     set_tests_properties(test_compare PROPERTIES
                          ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    # The extracted StudioWindow collaborators (studio.scrub_controller / studio.compare_controller):
+    # drive the scrub-coalescing + compare per-tick logic DIRECTLY on a bare Session + fake views
+    # (no full window / event loop). Imports Session -> Qt, so run offscreen.
+    add_test(NAME test_controllers
+             COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_controllers.py)
+    set_tests_properties(test_controllers PROPERTIES
+                         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_test(NAME test_validate_wallclock
              COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_validate_wallclock.py)
     set_tests_properties(test_validate_wallclock PROPERTIES
