@@ -158,6 +158,21 @@ public:
   std::pair<double, double> CurrentTimeSpan() const override;
 
 private:
+  // Reads one IMU stream across both children, shifting the right (later) chapter's samples by
+  // the left subtree's cumulative duration so everything lands on one continuous global media
+  // clock. `read` is the per-source reader verb (ReadAccl/ReadGrav/ReadCori); `S` is the sample
+  // type, which must carry a `.time` field. left_ may itself be a SequentialGPSSource, so
+  // delegating through `read` recurses correctly.
+  template <class S, class Read>
+  void ReadShifted(Read read, const std::function<void(S)> &on_sample) {
+    (left_->*read)(on_sample);
+    double off = left_->GetTotalDuration();
+    (right_->*read)([&](S s) {
+      s.time += off;
+      on_sample(s);
+    });
+  }
+
   RawGPSSource *left_, *right_, *current_;
 };
 

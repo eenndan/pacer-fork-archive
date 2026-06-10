@@ -231,10 +231,12 @@ void py_init_module_pacer(nb::module_ &m) {
       nb::overload_cast<pacer::Point>(pacer::ToPoint), nb::arg("x"));
 
   m.def("to_point",
-      nb::overload_cast<GPSSample>(pacer::ToPoint), nb::arg("s"));
-
-  m.def("to_point",
       nb::overload_cast<Vec3f>(pacer::ToPoint), nb::arg("v"));
+
+  m.def("to_lon_lat",
+      pacer::ToLonLat,
+      nb::arg("s"),
+      " GPS degrees -> Point{lon, lat}. Named distinctly from ToPoint so a degrees sample can never\n be silently mixed with a local-metres Point behind one overloaded name at a call site.");
 
 
   auto pyClassSegment =
@@ -361,7 +363,7 @@ void py_init_module_pacer(nb::module_ &m) {
       .def("start_timestamp",
           &pacer::Laps::StartTimestamp, nb::arg("lap"))
       .def("get_lap_distance",
-          &pacer::Laps::GetLapDistance, nb::arg("index"), nb::arg("cs"))
+          &pacer::Laps::GetLapDistance, nb::arg("index"))
       .def("get_lap",
           &pacer::Laps::GetLap, nb::arg("lap"))
       .def("sector_count",

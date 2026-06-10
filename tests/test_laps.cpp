@@ -239,7 +239,7 @@ TEST_CASE("GetLapDistance agrees with the GetLap/cum_distances model",
     Lap l = laps.GetLap(lap);
     REQUIRE(l.cum_distances.size() == l.points.size());
     // The scalar lap distance equals the per-point odometer's last entry.
-    CHECK(laps.GetLapDistance(lap, cs) ==
+    CHECK(laps.GetLapDistance(lap) ==
           Catch::Approx(l.cum_distances.back()).margin(1e-6));
   }
 
@@ -252,7 +252,7 @@ TEST_CASE("GetLapDistance agrees with the GetLap/cum_distances model",
     for (size_t i = 1; i < l.points.size(); ++i) {
       hand += cs.Distance(l.points[i - 1].point, l.points[i].point);
     }
-    CHECK(laps.GetLapDistance(0, cs) == Catch::Approx(hand).margin(1e-3));
+    CHECK(laps.GetLapDistance(0) == Catch::Approx(hand).margin(1e-3));
   }
 }
 
@@ -291,7 +291,7 @@ TEST_CASE("ClearPoints then re-adding points is safe (was UB)", "[laps]") {
     Lap l = laps.GetLap(lap);
     CHECK(std::isfinite(l.cum_distances.back()));
     CHECK(l.cum_distances.back() >= 0.0);
-    CHECK(laps.GetLapDistance(lap, cs) ==
+    CHECK(laps.GetLapDistance(lap) ==
           Catch::Approx(l.cum_distances.back()).margin(1e-6));
   }
 }

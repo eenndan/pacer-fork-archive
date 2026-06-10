@@ -626,7 +626,7 @@ class Session:
             {
                 "idx": i,
                 "time": self.laps.lap_time(i),
-                "dist": self.laps.get_lap_distance(i, self.cs),
+                "dist": self.laps.get_lap_distance(i),
                 "entry": self.laps.lap_entry_speed(i) * 3.6,
             }
             for i in self.valid_lap_ids()

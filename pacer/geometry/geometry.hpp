@@ -26,9 +26,14 @@ struct Point : VectorOperators<Point, double, 2> {
   }
 };
 
+// Local-metres -> Point (drops z for the Vec3f overload). Both inputs are already in the LOCAL
+// metric coordinate system, so the result is in metres.
 Point ToPoint(Point x);
-Point ToPoint(GPSSample s);
 Point ToPoint(Vec3f v);
+
+// GPS degrees -> Point{lon, lat}. Named distinctly from ToPoint so a degrees sample can never
+// be silently mixed with a local-metres Point behind one overloaded name at a call site.
+Point ToLonLat(GPSSample s);
 
 struct Segment {
   Point first, second;
@@ -91,7 +96,7 @@ std::optional<PointInTime<P>> Split(Segment start_line, PointInTime<P> first,
                                     PointInTime<P> second) {
 
   double ratio = 0.;
-  if (!start_line.Intersects(ToPoint(first.point), ToPoint(second.point),
+  if (!start_line.Intersects(ToLonLat(first.point), ToLonLat(second.point),
                              &ratio)) {
     return std::nullopt;
   }

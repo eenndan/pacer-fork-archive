@@ -31,7 +31,7 @@ pacer::Point pacer::ToPoint(Vec3f v) { return {v.x, v.y}; }
 
 pacer::Point pacer::ToPoint(Point x) { return x; }
 
-pacer::Point pacer::ToPoint(GPSSample s) { return {s.lon, s.lat}; }
+pacer::Point pacer::ToLonLat(GPSSample s) { return {s.lon, s.lat}; }
 
 pacer::Point pacer::Interpolate(Point from, Point to, double ratio) {
   return from * (1 - ratio) + to * ratio;

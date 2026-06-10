@@ -50,7 +50,7 @@ struct Laps {
   double LapTime(size_t lap) const;
   size_t SampleCount(size_t lap) const;
   double StartTimestamp(size_t lap) const;
-  double GetLapDistance(size_t index, const CoordinateSystem &cs) const;
+  double GetLapDistance(size_t index) const;
 
   Lap GetLap(size_t lap) const;
 
@@ -59,7 +59,7 @@ struct Laps {
   size_t SectorCount() const;
   size_t RecordedSectors() const;
   void ClearSectors();
-  double SectorTime(size_t sector);
+  double SectorTime(size_t sector) const;
   double SectorStartTimestamp(size_t sector) const;
   double SectorEntrySpeed(size_t sector) const;
 

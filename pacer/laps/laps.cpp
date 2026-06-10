@@ -1,6 +1,8 @@
 #include "laps.hpp"
 
 #include <algorithm>
+#include <span>
+#include <vector>
 
 #include <pacer/datatypes/datatypes.hpp>
 #include <pacer/geometry/geometry.hpp>
@@ -33,6 +35,23 @@ double SegmentDistance(const pacer::CoordinateSystem &cs,
     return std::max(chord, speed_integral);
   }
   return chord;
+}
+
+// Prefix sum of the gap-aware SegmentDistance over consecutive points: the single owner of the
+// cumulative-distance accumulation loop shared by Laps::SetCoordinateSystem (member odometer)
+// and Lap::FillDistances (per-lap odometer). Returns a vector of size points.size(): index 0 is
+// 0, index i is the distance from points[0] to points[i]. Empty input -> {0}, matching the
+// {0}-seed both call sites relied on.
+std::vector<double>
+CumulativeDistances(const pacer::CoordinateSystem &cs,
+                    std::span<const pacer::PointInTime<pacer::GPSSample>> points) {
+  std::vector<double> cum;
+  cum.reserve(points.empty() ? 1 : points.size());
+  cum.push_back(0.0);
+  for (size_t i = 1; i < points.size(); ++i) {
+    cum.push_back(cum.back() + SegmentDistance(cs, points[i - 1], points[i]));
+  }
+  return cum;
 }
 
 } // namespace
@@ -163,11 +182,10 @@ auto pacer::Laps::MinMax() const -> std::pair<Point, Point> {
 
 double pacer::Laps::LapChunk::Time() const { return finish.time - start.time; }
 
-double pacer::Laps::GetLapDistance(size_t lap,
-                                   const CoordinateSystem & /*cs*/) const {
-  // NOTE: the `cs` param is VESTIGIAL and slated for removal (bindings batch).
-  // We deliberately use the member `cs_` for ALL terms so the result is coherent
-  // with cum_point_dist_ (which was built from cs_) regardless of what is passed.
+double pacer::Laps::GetLapDistance(size_t lap) const {
+  // Uses the member `cs_` for ALL terms so the result is coherent with
+  // cum_point_dist_ (which was built from cs_). (The old vestigial `cs` param was
+  // removed; it was always ignored in favour of cs_.)
   //
   // This must equal the lap's true traversed distance as modelled by
   // GetLap()/FillDistances, whose materialized points are:
@@ -271,7 +289,7 @@ double pacer::Laps::SectorEntrySpeed(size_t sector) const {
   return sectors_[sector].start.point.full_speed;
 }
 
-double pacer::Laps::SectorTime(size_t sector) {
+double pacer::Laps::SectorTime(size_t sector) const {
   return sectors_[sector].finish.time - sectors_[sector].start.time;
 }
 
@@ -305,33 +323,26 @@ pacer::PointInTime<pacer::GPSSample> pacer::Laps::GetPoint(size_t row) const {
 
 void pacer::Laps::SetCoordinateSystem(CoordinateSystem coordinate_system) {
   cs_ = coordinate_system;
-  // Guard: with no points the {0} seed is the only element; writing
-  // cum_point_dist_[0] is fine, but ClearPoints could leave us empty if the
-  // invariant is ever broken, so bail before touching index [0].
+  // Guard: with no points keep the {0} seed (CumulativeDistances would also return {0}, but
+  // bailing avoids rebuilding it and documents the invariant that index [0] / .back() stay
+  // valid for a later AddPoint/SetCoordinateSystem).
   if (points_.empty())
     return;
-  // SetCoordinateSystem is the sole authority for cum_point_dist_ (AddPoint only
-  // reserves placeholders). cum_point_dist_.size() == points_.size() here.
-  cum_point_dist_[0] = 0;
-  for (size_t i = 0; i + 1 < points_.size(); ++i) {
-    cum_point_dist_[i + 1] =
-        cum_point_dist_[i] +
-        SegmentDistance(cs_, points_[i], points_[i + 1]);
-  }
+  // SetCoordinateSystem is the sole authority for cum_point_dist_ (AddPoint only reserves
+  // placeholders). The accumulation loop is single-sourced in CumulativeDistances; the result
+  // has size points_.size(), restoring the cum_point_dist_.size() == points_.size() invariant.
+  cum_point_dist_ = CumulativeDistances(cs_, points_);
 }
 size_t pacer::Laps::RecordedSectors() const { return sectors_.size(); }
 
 size_t pacer::Lap::Count() const { return points.size(); }
 
 void pacer::Lap::FillDistances(const CoordinateSystem &cs) {
-  cum_distances = std::vector<double>{0};
-  for (size_t i = 1; i < points.size(); ++i) {
-    // Gap-aware (see SegmentDistance): a GPS chord across a dropout cuts the
-    // corner and under-counts, so a long time-step uses the speed integral instead. Keeps the
-    // per-lap odometer the Python delta/sector math reads consistent with GetLapDistance.
-    cum_distances.push_back(cum_distances.back() +
-                            SegmentDistance(cs, points[i - 1], points[i]));
-  }
+  // Gap-aware (see SegmentDistance): a GPS chord across a dropout cuts the corner and
+  // under-counts, so a long time-step uses the speed integral instead. Keeps the per-lap
+  // odometer the Python delta/sector math reads consistent with GetLapDistance. The
+  // accumulation loop is single-sourced in CumulativeDistances.
+  cum_distances = CumulativeDistances(cs, points);
 }
 double pacer::Lap::LapTime() const {
   return points.back().time - points.front().time;

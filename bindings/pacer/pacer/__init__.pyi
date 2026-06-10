@@ -117,16 +117,20 @@ class Point:
     def rot(self) -> Point:
         pass
 
+# Local-metres -> Point (drops z for the Vec3 overload). Both inputs are already in the LOCAL
+# metric coordinate system, so the result is in metres.
 @overload
 def to_point(x: Point) -> Point:
     pass
 
 @overload
-def to_point(s: GPSSample) -> Point:
+def to_point(v: Vec3f) -> Point:
     pass
 
-@overload
-def to_point(v: Vec3f) -> Point:
+def to_lon_lat(s: GPSSample) -> Point:
+    """GPS degrees -> Point{lon, lat}. Named distinctly from ToPoint so a degrees sample can never
+    be silently mixed with a local-metres Point behind one overloaded name at a call site.
+    """
     pass
 
 class Segment:
@@ -276,7 +280,7 @@ class Laps:
     def start_timestamp(self, lap: int) -> float:
         pass
 
-    def get_lap_distance(self, index: int, cs: CoordinateSystem) -> float:
+    def get_lap_distance(self, index: int) -> float:
         pass
 
     def get_lap(self, lap: int) -> Lap:
