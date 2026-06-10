@@ -42,17 +42,11 @@ def chain_sources(paths):
     return head, owners, durations
 
 
-def read_gpmf(paths):
-    """Iterate one or more GoPro files, returning (samples, spans, naive_times, durations).
-
-    The per-file GPMF sources are folded into the shared `chain_sources` chain, so the samples
-    come out on ONE continuous, monotonic global clock with no per-chapter reset, and lap
-    segmentation / distances / delta all span chapter boundaries automatically.
-
-    `durations` is each chapter's own 0-based media duration (from the GPMF/media), in the same
-    order as `paths` — the offset table the video layer uses for global<->chapter mapping."""
-    head, _owners, durations = chain_sources(paths)
-
+def _read_gps_over(head):
+    """Walk an ALREADY-BUILT source `head`, returning (samples, spans, naive). Seeks to 0 first,
+    then iterates the payload cursor to the end — the exact GPS pass `read_gpmf` ran inline. Split
+    out so `read_recording` can run it over the same opened chain the IMU readers use, without
+    rebuilding (re-opening / re-GPMF_Init-ing) every chapter container a second time."""
     samples, spans, naive = [], [], []
     head.seek(0)
     while not head.is_end():
@@ -64,6 +58,63 @@ def read_gpmf(paths):
             spans.append((a, b))
             naive.append(a + (b - a) * (i / n if n else 0.0))
         head.next()
+    return samples, spans, naive
+
+
+def _read_imu_over(head):
+    """Read the ACCL/GRAV/CORI streams off an ALREADY-BUILT source `head`, returning the three
+    numpy arrays. This is the exact body `read_imu` ran inline; the C++ `read_accl/grav/cori`
+    walk EVERY payload of each child independently of the GPS payload cursor (they recurse through
+    the chain's children, not its `current_`/`index_` position), so running this on the same chain
+    the GPS pass advanced yields byte-identical series. Split out so `read_recording` reuses one
+    opened chain for both passes."""
+    accl, grav, cori = [], [], []
+    head.read_accl(lambda s: accl.append((s.time, s.x, s.y, s.z)))
+    head.read_grav(lambda s: grav.append((s.time, s.x, s.y, s.z)))
+    head.read_cori(lambda s: cori.append((s.time, s.w, s.x, s.y, s.z)))
+    a = np.asarray(accl, float).reshape(-1, 4)
+    g = np.asarray(grav, float).reshape(-1, 4)
+    c = np.asarray(cori, float).reshape(-1, 5)
+    return a, g, c
+
+
+def read_recording(paths):
+    """Single-pass ingest: build the `SequentialGPSSource` chain ONCE and run BOTH the GPS reader
+    and the IMU (accl/grav/cori) readers over the SAME opened sources, returning everything
+    `Session.load` needs:
+
+        (samples, spans, naive, durations, accl, grav, cori)
+
+    WHY: `read_gpmf` and `read_imu` each built their own `chain_sources` chain, so every chapter
+    MP4 was opened and GPMF-parsed TWICE per load (one `GPMFSource(path)` — i.e. `OpenMP4Source` +
+    the GPMF payload walks — per reader). This entry point opens each container once.
+
+    Behaviour is byte-identical to calling `read_gpmf(paths)` then `read_imu(paths)`: the GPS pass
+    is run first (it `seek(0)`s and walks the payload cursor to the end), then the IMU pass — and
+    the IMU readers walk every payload of each child independently of that cursor (see
+    `_read_imu_over`), so the order does not perturb either result. `samples`/`spans`/`naive`/
+    `durations` equal `read_gpmf`'s; `accl`/`grav`/`cori` equal `read_imu`'s."""
+    head, _owners, durations = chain_sources(paths)
+    samples, spans, naive = _read_gps_over(head)
+    accl, grav, cori = _read_imu_over(head)
+    return samples, spans, naive, durations, accl, grav, cori
+
+
+def read_gpmf(paths):
+    """Iterate one or more GoPro files, returning (samples, spans, naive_times, durations).
+
+    The per-file GPMF sources are folded into the shared `chain_sources` chain, so the samples
+    come out on ONE continuous, monotonic global clock with no per-chapter reset, and lap
+    segmentation / distances / delta all span chapter boundaries automatically.
+
+    `durations` is each chapter's own 0-based media duration (from the GPMF/media), in the same
+    order as `paths` — the offset table the video layer uses for global<->chapter mapping.
+
+    NOTE: the studio load path uses `read_recording` (one shared chain for GPS + IMU). This
+    standalone reader is kept for dev scripts that want only the GPS pass; it builds its own
+    chain (the GPS pass body is single-sourced in `_read_gps_over`)."""
+    head, _owners, durations = chain_sources(paths)
+    samples, spans, naive = _read_gps_over(head)
     return samples, spans, naive, durations
 
 
@@ -79,14 +130,9 @@ def read_imu(paths):
     Returns (accl, grav, cori) as numpy arrays — accl/grav: (N,4) [t,x,y,z]; cori: (N,5)
     [t,w,x,y,z] — or empty (0,4)/(0,5) arrays for an older camera that lacks a stream. The
     studio gmeter module resolves the camera->kart frame transform on top of these raw axes.
-    """
-    head, _owners, _durations = chain_sources(paths)
 
-    accl, grav, cori = [], [], []
-    head.read_accl(lambda s: accl.append((s.time, s.x, s.y, s.z)))
-    head.read_grav(lambda s: grav.append((s.time, s.x, s.y, s.z)))
-    head.read_cori(lambda s: cori.append((s.time, s.w, s.x, s.y, s.z)))
-    a = np.asarray(accl, float).reshape(-1, 4)
-    g = np.asarray(grav, float).reshape(-1, 4)
-    c = np.asarray(cori, float).reshape(-1, 5)
-    return a, g, c
+    NOTE: the studio load path uses `read_recording` (one shared chain for GPS + IMU). This
+    standalone reader is kept for dev scripts; the IMU pass body is single-sourced in
+    `_read_imu_over`."""
+    head, _owners, _durations = chain_sources(paths)
+    return _read_imu_over(head)

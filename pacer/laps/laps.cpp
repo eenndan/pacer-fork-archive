@@ -259,6 +259,35 @@ pacer::Lap pacer::Laps::GetLap(size_t lap) const {
              .cum_distances = std::move(cum_distances)};
 }
 
+pacer::LapArrays pacer::Laps::LapColumns(size_t lap) const {
+  // Materialize the lap exactly as GetLap does (interpolated start crossing + interior track
+  // points + interpolated finish crossing, with the gap-aware cum_distances), then project each
+  // point into the laps' OWN coordinate system. Reusing GetLap guarantees the points and
+  // cum_distances are byte-identical to the per-element studio path (which read GetLap()'s
+  // .points / .cum_distances); the only added work is the Local() projection, which the studio
+  // layer did per point anyway — now batched into this single crossing.
+  Lap materialized = GetLap(lap); // out-of-range -> empty Lap -> empty columns below
+  const CoordinateSystem &cs = track_.Cs();
+
+  LapArrays cols;
+  const size_t n = materialized.points.size();
+  cols.times.reserve(n);
+  cols.xs.reserve(n);
+  cols.ys.reserve(n);
+  cols.full_speed.reserve(n);
+  for (const auto &p : materialized.points) {
+    Vec3f loc = cs.Local(p.point);
+    cols.times.push_back(p.time);
+    cols.xs.push_back(loc.x);
+    cols.ys.push_back(loc.y);
+    cols.full_speed.push_back(p.point.full_speed);
+  }
+  // The lap's per-point odometer is already built by GetLap (size == points.size()); move it
+  // across verbatim so cum_distances matches Lap::cum_distances exactly.
+  cols.cum_distances = std::move(materialized.cum_distances);
+  return cols;
+}
+
 double pacer::Laps::SectorStartTimestamp(size_t sector) const {
   return sector_chunks_[sector].start.time;
 }

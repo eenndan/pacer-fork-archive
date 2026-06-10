@@ -247,6 +247,36 @@ class Sectors:
         """Auto-generated default constructor with named params"""
         pass
 
+class LapArrays:
+    """A lap's per-point columns as parallel arrays, for a SINGLE Python<->C++ crossing per lap. The
+    studio layer used to cross the binding once PER POINT (cs.local(p.point), p.point.full_speed,
+    p.time, cum_distances[i] in loops over hundreds of points) to build the map/plot/g-meter
+    arrays; LapColumns returns them all at once. Every member has the SAME length as the
+    materialized lap (Lap::Count(): the interpolated start crossing + the interior track points +
+    the interpolated finish crossing), so the columns are mutually index-aligned.
+      times          media-clock seconds of each point (== Lap::points[i].time)
+      xs, ys         LOCAL metres (CoordinateSystem::Local of each point, x/y) in the laps' OWN
+                     coordinate system (the one set via SetCoordinateSystem)
+      full_speed     raw 3D GPS speed (m/s) of each point (the studio layer scales to km/h)
+      cum_distances  the lap's per-point odometer (== Lap::cum_distances), gap-aware
+    """
+
+    times: List[float]
+    xs: List[float]
+    ys: List[float]
+    full_speed: List[float]
+    cum_distances: List[float]
+    def __init__(
+        self,
+        times: List[float] = List[float](),
+        xs: List[float] = List[float](),
+        ys: List[float] = List[float](),
+        full_speed: List[float] = List[float](),
+        cum_distances: List[float] = List[float](),
+    ) -> None:
+        """Auto-generated default constructor with named params"""
+        pass
+
 class Laps:
     def update(self) -> None:
         """/ Updates all laps given updated start_line and sector_lines"""
@@ -290,6 +320,15 @@ class Laps:
         pass
 
     def get_lap(self, lap: int) -> Lap:
+        pass
+
+    def lap_columns(self, lap: int) -> LapArrays:
+        """/ A lap's per-point columns (times, local-metre xs/ys, full_speed, cum_distances) as parallel
+        / arrays, so the studio layer builds its map/plot/g-meter arrays in ONE binding crossing
+        / instead of one per point. Identical (to float round-off) to materializing GetLap(lap) and
+        / then taking p.time / cs.Local(p.point).x|y / p.point.full_speed / cum_distances[i] per point,
+        / where cs is the laps' own coordinate system. Out-of-range lap -> all-empty arrays.
+        """
         pass
     # ------------------------------- SECTORS ---------------------------------//
 

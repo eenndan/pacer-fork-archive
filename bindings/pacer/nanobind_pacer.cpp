@@ -332,6 +332,29 @@ void py_init_module_pacer(nb::module_ &m) {
       ;
 
 
+  auto pyClassLapArrays =
+      nb::class_<pacer::LapArrays>
+          (m, "LapArrays", " A lap's per-point columns as parallel arrays, for a SINGLE Python<->C++ crossing per lap. The\n studio layer used to cross the binding once PER POINT (cs.local(p.point), p.point.full_speed,\n p.time, cum_distances[i] in loops over hundreds of points) to build the map/plot/g-meter\n arrays; LapColumns returns them all at once. Every member has the SAME length as the\n materialized lap (Lap::Count(): the interpolated start crossing + the interior track points +\n the interpolated finish crossing), so the columns are mutually index-aligned.\n   times          media-clock seconds of each point (== Lap::points[i].time)\n   xs, ys         LOCAL metres (CoordinateSystem::Local of each point, x/y) in the laps' OWN\n                  coordinate system (the one set via SetCoordinateSystem)\n   full_speed     raw 3D GPS speed (m/s) of each point (the studio layer scales to km/h)\n   cum_distances  the lap's per-point odometer (== Lap::cum_distances), gap-aware")
+      .def("__init__", [](pacer::LapArrays * self, std::vector<double> times = std::vector<double>(), std::vector<double> xs = std::vector<double>(), std::vector<double> ys = std::vector<double>(), std::vector<double> full_speed = std::vector<double>(), std::vector<double> cum_distances = std::vector<double>())
+      {
+          new (self) pacer::LapArrays();  // placement new
+          auto r_ctor_ = self;
+          r_ctor_->times = times;
+          r_ctor_->xs = xs;
+          r_ctor_->ys = ys;
+          r_ctor_->full_speed = full_speed;
+          r_ctor_->cum_distances = cum_distances;
+      },
+      nb::arg("times") = std::vector<double>(), nb::arg("xs") = std::vector<double>(), nb::arg("ys") = std::vector<double>(), nb::arg("full_speed") = std::vector<double>(), nb::arg("cum_distances") = std::vector<double>()
+      )
+      .def_rw("times", &pacer::LapArrays::times, "")
+      .def_rw("xs", &pacer::LapArrays::xs, "")
+      .def_rw("ys", &pacer::LapArrays::ys, "")
+      .def_rw("full_speed", &pacer::LapArrays::full_speed, "")
+      .def_rw("cum_distances", &pacer::LapArrays::cum_distances, "")
+      ;
+
+
   auto pyClassLaps =
       nb::class_<pacer::Laps>
           (m, "Laps", "")
@@ -366,6 +389,10 @@ void py_init_module_pacer(nb::module_ &m) {
           &pacer::Laps::GetLapDistance, nb::arg("index"))
       .def("get_lap",
           &pacer::Laps::GetLap, nb::arg("lap"))
+      .def("lap_columns",
+          &pacer::Laps::LapColumns,
+          nb::arg("lap"),
+          "/ A lap's per-point columns (times, local-metre xs/ys, full_speed, cum_distances) as parallel\n/ arrays, so the studio layer builds its map/plot/g-meter arrays in ONE binding crossing\n/ instead of one per point. Identical (to float round-off) to materializing GetLap(lap) and\n/ then taking p.time / cs.Local(p.point).x|y / p.point.full_speed / cum_distances[i] per point,\n/ where cs is the laps' own coordinate system. Out-of-range lap -> all-empty arrays.")
       .def("sector_count",
           &pacer::Laps::SectorCount)
       .def("recorded_sectors",
