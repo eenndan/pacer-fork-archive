@@ -4,6 +4,7 @@
 
 #include <pacer/datatypes/datatypes.hpp>
 #include <pacer/geometry/geometry.hpp>
+#include <pacer/laps/point-track.hpp>
 
 namespace pacer {
 
@@ -78,13 +79,16 @@ private:
     double Time() const;
   };
 
-  CoordinateSystem cs_;
+  // The raw point track + coordinate system + cumulative-distance machinery, extracted into a
+  // cohesive internal value type. Laps DELEGATES all point/distance operations to it and keeps
+  // lap/sector segmentation on top.
+  PointTrack track_;
 
-  std::vector<PointInTime<GPSSample>> points_;
-  std::vector<double> cum_point_dist_{0};
-
-  std::vector<LapChunk> laps_;
-  std::vector<LapChunk> sectors_;
+  // Computed LapChunks (start/finish crossings) for the laps and the sectors. Named *_chunks_ to
+  // distinguish them from the INPUT geometry in the public `sectors` member (start_line +
+  // sector_lines), which is what gets segmented into these.
+  std::vector<LapChunk> lap_chunks_;
+  std::vector<LapChunk> sector_chunks_;
 
   Segment dirty_start_line_ = {};
   std::vector<Segment> dirty_sector_lines_ = {};

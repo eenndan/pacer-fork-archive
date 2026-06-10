@@ -19,7 +19,17 @@ import numpy as np
 
 import pacer
 
-from . import chapters, gapfill, gmeter, tracks
+from . import chapters, gapfill, gmeter, ingest, tracks
+
+# The pacer-touching GoPro/GPMF readers (the SequentialGPSSource chain build + the raw GPS/IMU
+# stream readers) live in studio/ingest.py — the data-layer module that owns the pacer IO.
+# Re-imported under their historical `_`-prefixed names so every call site (incl. the dev scripts
+# that import `_read_gpmf` from studio.session) is unchanged.
+from .ingest import (  # noqa: F401  (re-exported for call sites + dev scripts)
+    chain_sources as _chain_sources,
+    read_gpmf as _read_gpmf,
+    read_imu as _read_imu,
+)
 
 # Pacer-free signal/clean helpers live in studio/_signal.py (numpy-only, shared with gmeter).
 # Re-imported here so every existing `session._smooth` / `session._gate_quality` / etc. call
@@ -87,80 +97,6 @@ def fmt_time(seconds: float) -> str:
         return "—"
     m, s = divmod(seconds, 60)
     return f"{int(m)}:{s:06.3f}"
-
-
-def _chain_sources(paths):
-    """Build the left-leaning `SequentialGPSSource` chain over one or more GoPro chapters and
-    return (head, owners, durations).
-
-    For multiple chapters the per-file GPMF sources are folded into a chain whose C++
-    `current_time_span()` / `read_accl/grav/cori` already return GLOBAL (cumulative) times —
-    chapter k+1 is shifted by the sum of the earlier chapters' durations (see pacer/gps-source
-    SequentialGPSSource) — so everything comes out on ONE continuous, monotonic global clock with
-    no per-chapter reset. `owners` keeps every intermediate source alive while the caller iterates
-    `head`. `durations` is each chapter's own 0-based media duration, in `paths` order — the
-    offset table the video layer uses for global<->chapter mapping. The single shared chain build
-    behind both `_read_gpmf` and `_read_imu` (pacer access stays here)."""
-    owners = [pacer.GPMFSource(paths[0])]
-    durations = [owners[0].get_total_duration()]
-    head = owners[0]
-    for p in paths[1:]:
-        nxt = pacer.GPMFSource(p)
-        owners.append(nxt)
-        durations.append(nxt.get_total_duration())
-        head = pacer.SequentialGPSSource(head, nxt)
-        owners.append(head)  # keep the chain alive while we iterate
-    return head, owners, durations
-
-
-def _read_gpmf(paths):
-    """Iterate one or more GoPro files, returning (samples, spans, naive_times, durations).
-
-    The per-file GPMF sources are folded into the shared `_chain_sources` chain, so the samples
-    come out on ONE continuous, monotonic global clock with no per-chapter reset, and lap
-    segmentation / distances / delta all span chapter boundaries automatically.
-
-    `durations` is each chapter's own 0-based media duration (from the GPMF/media), in the same
-    order as `paths` — the offset table the video layer uses for global<->chapter mapping."""
-    head, _owners, durations = _chain_sources(paths)
-
-    samples, spans, naive = [], [], []
-    head.seek(0)
-    while not head.is_end():
-        a, b = head.current_time_span()
-        chunk = []
-        head.read_samples(lambda s, i, n: chunk.append((s, i, n)))
-        for s, i, n in chunk:
-            samples.append(s)
-            spans.append((a, b))
-            naive.append(a + (b - a) * (i / n if n else 0.0))
-        head.next()
-    return samples, spans, naive, durations
-
-
-def _read_imu(paths):
-    """Read the GoPro IMU streams (ACCL accelerometer, GRAV gravity vector, CORI camera
-    orientation) for the whole recording, on the global MEDIA clock — the same basis as the GPS
-    trace and the video. Uses the identical left-leaning `SequentialGPSSource` chain as
-    `_read_gpmf` (the shared `_chain_sources`), whose C++ `read_accl/grav/cori` shift each later
-    chapter by the cumulative duration, so a multi-chapter recording comes out on one continuous
-    clock with no per-chapter reset (lining up with the telemetry trace's global axis used for
-    video sync).
-
-    Returns (accl, grav, cori) as numpy arrays — accl/grav: (N,4) [t,x,y,z]; cori: (N,5)
-    [t,w,x,y,z] — or empty (0,4)/(0,5) arrays for an older camera that lacks a stream. The
-    studio gmeter module resolves the camera->kart frame transform on top of these raw axes.
-    """
-    head, _owners, _durations = _chain_sources(paths)
-
-    accl, grav, cori = [], [], []
-    head.read_accl(lambda s: accl.append((s.time, s.x, s.y, s.z)))
-    head.read_grav(lambda s: grav.append((s.time, s.x, s.y, s.z)))
-    head.read_cori(lambda s: cori.append((s.time, s.w, s.x, s.y, s.z)))
-    a = np.asarray(accl, float).reshape(-1, 4)
-    g = np.asarray(grav, float).reshape(-1, 4)
-    c = np.asarray(cori, float).reshape(-1, 5)
-    return a, g, c
 
 
 # --- True-clock timing from the GPS9 per-sample timestamps -------------------------------
