@@ -140,9 +140,11 @@ Captured here so the negative results aren't re-litigated. Evidence in [`docs/`]
 - Trace + timing lines live in **local metres** (`cs.local`); `set_coordinate_system` precedes
   `pick_random_start`/`update`. Sectors write-back is wholesale: `laps.sectors = pacer.Sectors(...)`,
   then `laps.update()`.
-- **`session.py` is the only module that drives the pacer pipeline; `tracks.py` is the only other
-  file that names `pacer` (pure geometry).** Keep `map_view`/`plots_view`/`lap_table`/`video_view`/
-  `app`/`gapfill`/`reference`/`gmeter`/`gmeter_overlay`/`chapters`/`transponder` free of `pacer`.
+- **`session.py`, `tracks.py`, and `ingest.py` are the only modules that may touch the `pacer`
+  bindings.** `session.py` drives the load/segmentation pipeline; `tracks.py` is pure geometry;
+  `ingest.py` is the GoPro/GPMF data-loading layer (the `SequentialGPSSource` chain build + the raw
+  GPS/IMU stream readers). Keep `map_view`/`plots_view`/`lap_table`/`video_view`/`app`/`gapfill`/
+  `reference`/`gmeter`/`gmeter_overlay`/`chapters`/`transponder` free of `pacer`.
 - `pacer` is GPMF/GoPro **`.MP4` only**. It supplies the
   telemetry time axis; the app brings its own video player (pacer doesn't decode pixels).
 - **Perf invariants — do not regress:** the 30 Hz tick decouple (`_on_position` only stores the time;

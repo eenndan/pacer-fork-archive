@@ -59,8 +59,9 @@ gap-fill unit tests live in [`tests/test_gapfill.py`](../tests/test_gapfill.py) 
 
 | File | Role |
 |------|------|
-| [session.py](session.py) | Loads GPMF → `pacer.Laps`; exposes trace/lap/delta arrays + timing-line write-back. Owns the load/segmentation pipeline (primary `pacer` user). |
-| [tracks.py](tracks.py) | Registry of known tracks (Daytona MK); detects the track by centroid and gives its fixed start/finish line. The only other module that names `pacer` (geometry only). |
+| [session.py](session.py) | Orchestrates the load (via `ingest.py`) into `pacer.Laps`; exposes trace/lap/delta arrays + timing-line write-back. Owns the segmentation/analysis pipeline (primary `pacer` user). |
+| [ingest.py](ingest.py) | The GoPro/GPMF **data-loading layer** (one of the three modules that may name `pacer`): builds the `SequentialGPSSource` chain over one or more chapters and reads the raw GPS/IMU streams (`read_gpmf`/`read_imu` + the shared `chain_sources`) on the continuous global clock. Returns raw samples + per-chapter durations; `session.py` cleans/smooths/segments on top. A data/control-layer module, not a view. |
+| [tracks.py](tracks.py) | Registry of known tracks (Daytona MK); detects the track by centroid and gives its fixed start/finish line. One of the three modules that name `pacer` (geometry only). |
 | [dev/transponder.py](dev/transponder.py) | Pure-Python (no `pacer`), **dev/validation-only**: defensive parser for a lap-timing **transponder CSV** (the ground truth the GPS9 timing is **validated** against, out of sample, by [`dev/_validate_wallclock.py`](dev/_validate_wallclock.py)). Reads only the `Lap` + `Lap Time` columns (the later columns embed commas/quotes). A reference **input** only — the CSV is never committed. |
 | [video_view.py](video_view.py) | `QMediaPlayer` + `QVideoWidget` + `QAudioOutput`; emits `positionChanged(s)` in **global session time**, exposes `seek(s)` (global) + `is_playing()`/`pause()`/`play()` + a **mute/unmute toggle** (🔇/🔊, default muted) + a **g-meter toggle** (`G`). Hosts the **g-meter overlay** as a frameless translucent **top-level window** pinned over the `QVideoWidget`'s **top-right** corner and **scaled to a fraction of the video** (a plain child is painted behind the video's native surface on macOS and never shows; its own native window composites above it) and exposes `set_g(...)` / `set_gmeter_lap(...)` (app-fed at the tick, which also re-pins/re-scales the overlay). For a **chaptered** recording it holds the `ChapterMap`, switches source on a cross-chapter seek, and **auto-advances** to the next chapter at end-of-media — one source at a time, one continuous global slider. |
 | [gmeter.py](gmeter.py) | **Vehicle-frame g** from the GoPro **accelerometer** — pure numpy, pacer-free. Transforms `ACCL`/`GRAV`/`CORI` (camera frame) into kart-frame lateral/longitudinal g (gravity removed via GRAV; rotate by `conj(CORI)`; project horizontal; **per-chapter** align to GPS ENU). Cross-checks against **GPS-derived g** and falls back to it if the IMU is absent/unreliable. Precomputed at load; `at_time(t)` is a cheap lookup. See [docs/gmeter-validation.md](docs/gmeter-validation.md). |
@@ -223,7 +224,7 @@ not at a lap), so a lap can span a chapter boundary.
   discovers the sibling chapters (`chapters.discover_siblings`: same recording `NNNN` + same
   prefix, same folder, ordered ascending by chapter `CC` — never mixes recordings; a
   single-chapter recording loads gracefully) and reloads them as one session.
-- **Telemetry chaining (`session.py`).** The per-file `GPMFSource`s are folded into a chain of
+- **Telemetry chaining (`ingest.py`).** The per-file `GPMFSource`s are folded into a chain of
   the C++ `SequentialGPSSource`, whose time spans are already **cumulative** — so the trace lands
   on **one continuous, monotonic global clock** with no per-chapter reset, and lap segmentation,
   cum-distances, delta, sectors, smoothing and gap-fill all span boundaries automatically. (A
