@@ -36,8 +36,9 @@ def test_gps9_uses_true_spacing_reanchored_to_media():
     naive = list(1000.0 + np.cumsum(0.1001 + rng.normal(0, 0.003, n)))
     samples = [_sample(500_000 + i * 100) for i in range(n)]  # exact 10.000 Hz wall clock
 
-    # rate_factor=1.0 isolates the SPACING behaviour from the transponder clock-rate calibration
-    # (the default factor, tested in tests/test_calibration.py, scales the spacing by ~0.9994).
+    # rate_factor defaults to 1.0 — no clock-rate correction is applied (the calibration
+    # experiment was rejected as overfit; see studio/PLAN.md §3 and
+    # studio/docs/gps-accuracy-research.md). The explicit 1.0 here pins that behaviour.
     out = np.asarray(_gps9_times(samples, naive, rate_factor=1.0))
     assert len(out) == n
     # Anchored at the first naive time (so the axis stays on the media clock for video sync).
@@ -72,7 +73,8 @@ def test_gps9_reanchors_after_a_run_break():
     tsA = [800_000 + i * 100 for i in range(20)]
     tsB = [10_000 + i * 100 for i in range(20)]  # epoch jumped BACK by ~790 s
     samples = [_sample(t) for t in tsA + tsB]
-    # rate_factor=1.0 to assert the raw 100 ms spacing (the calibration is tested separately).
+    # Explicit rate_factor=1.0 pins the default no-correction behaviour (the rejected
+    # calibration experiment is documented in studio/PLAN.md §3): raw 100 ms spacing.
     out = np.asarray(_gps9_times(samples, naive, rate_factor=1.0))
     # Monotonic non-decreasing across the seam (no backwards jump from the epoch reset).
     assert np.all(np.diff(out) >= -1e-9), np.diff(out).min()
