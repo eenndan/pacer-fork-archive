@@ -350,3 +350,136 @@ TEST_CASE("Laps is safe on empty and tiny traces", "[laps]") {
     CHECK_NOTHROW(laps.MinMax());
   }
 }
+
+TEST_CASE("Interleaved AddPoint after SetCoordinateSystem yields correct distances (pass-2 #7)",
+          "[laps]") {
+  // PointTrack used to defer ALL cumulative-distance computation to SetCoordinateSystem and only
+  // push a 0.0 placeholder in AddPoint. An AddPoint AFTER SetCoordinateSystem (with no re-set) thus
+  // left stale-ZERO cumulative distances for the appended points that no accessor repaired, so the
+  // lap distance came out short. PointTrack is now self-healing (a dirty flag rebuilds the odometer
+  // on demand in the distance accessors), so the OUT-OF-ORDER build must agree with the canonical
+  // add-all-then-set-once build. Same geometry, two construction orders.
+  GPSSample origin{.lat = 40.0, .lon = -74.0, .altitude = 0};
+  CoordinateSystem cs(origin);
+  const Segment start_line{Point{0, -10}, Point{0, 10}};
+
+  // The 12 MakeThreeLapTrack vertices, replayed verbatim so the two orders are identical geometry.
+  struct XY { double x, y; };
+  const XY verts[] = {{-20, 0}, {-5, 0}, {5, 0},  {20, 0}, {20, 4},  {5, 4},
+                      {-5, 4},  {-20, 4}, {-20, 8}, {-5, 8}, {5, 8}, {20, 8}};
+
+  // Canonical reference: add ALL points, THEN set the coordinate system once (the byte-identical
+  // path) — this is exactly MakeThreeLapTrack.
+  Laps canonical = MakeThreeLapTrack(cs);
+  canonical.sectors.start_line = start_line;
+  canonical.Update();
+  REQUIRE(canonical.LapsCount() == 3);
+
+  // Interleaved: add the first half, SetCoordinateSystem, add the SECOND half (no re-set), Update.
+  Laps interleaved;
+  double t = 0;
+  for (int i = 0; i < 6; ++i)
+    interleaved.AddPoint(cs.Global(Vec3f{verts[i].x, verts[i].y, 0}), t++);
+  interleaved.SetCoordinateSystem(cs);  // set cs with only HALF the points present
+  for (int i = 6; i < 12; ++i)
+    interleaved.AddPoint(cs.Global(Vec3f{verts[i].x, verts[i].y, 0}), t++);
+  // NOTE: deliberately NO second SetCoordinateSystem — this is the footgun path. The distance
+  // accessors must self-heal the odometer for the points added after the set.
+  interleaved.sectors.start_line = start_line;
+  interleaved.Update();
+
+  REQUIRE(interleaved.LapsCount() == canonical.LapsCount());
+  double interleaved_total = 0.0, canonical_total = 0.0;
+  for (size_t lap = 0; lap < canonical.LapsCount(); ++lap) {
+    // The core guard: the OUT-OF-ORDER build's distance must EQUAL the canonical order's (the bug
+    // left stale zeros for the points added after SetCoordinateSystem, so the interior laps came
+    // out short). The trailing lap is degenerate (its closing crossing never happens, so
+    // finish_index == start_index and its distance is legitimately 0 in BOTH builds) — hence equate
+    // rather than blanket > 0; the totals below confirm real distance was actually accumulated.
+    CHECK(interleaved.GetLapDistance(lap) ==
+          Catch::Approx(canonical.GetLapDistance(lap)).margin(1e-6));
+    // The per-point odometer must agree too (GetLap reads DistanceBetween, the self-healed array).
+    Lap il = interleaved.GetLap(lap);
+    Lap cl = canonical.GetLap(lap);
+    REQUIRE(il.cum_distances.size() == cl.cum_distances.size());
+    CHECK(il.cum_distances.back() ==
+          Catch::Approx(cl.cum_distances.back()).margin(1e-6));
+    interleaved_total += interleaved.GetLapDistance(lap);
+    canonical_total += canonical.GetLapDistance(lap);
+  }
+  // Sanity: real distance was accumulated (not silently all-zero), and the two orders sum equal.
+  CHECK(canonical_total > 0.0);
+  CHECK(interleaved_total == Catch::Approx(canonical_total).margin(1e-6));
+}
+
+TEST_CASE("No phantom sectors when sector_lines is empty (pass-2 #5)", "[laps]") {
+  // With NO intermediate sector lines the rotating "sector line" falls back to the start line
+  // (sector_index == -1), so every start-line crossing was recorded as a phantom sector chunk.
+  // SectorCount() is the number of sector LINES (0 here); RecordedSectors() must now also be 0 so
+  // the recorded run is consistent with it (it used to equal the lap count).
+  GPSSample origin{.lat = 40.0, .lon = -74.0, .altitude = 0};
+  CoordinateSystem cs(origin);
+
+  Laps laps = MakeThreeLapTrack(cs);
+  laps.sectors.start_line = Segment{Point{0, -10}, Point{0, 10}};
+  // sector_lines left EMPTY (the studio default for every normal session).
+  laps.Update();
+
+  REQUIRE(laps.LapsCount() == 3);    // laps still segment exactly as before (unchanged behaviour)
+  CHECK(laps.SectorCount() == 0);    // no sector lines
+  CHECK(laps.RecordedSectors() == 0); // and so NO phantom sector chunks recorded
+
+  SECTION("behaviour with sector lines present is unchanged") {
+    // Re-add the two short sector lines: sectors must come back (proves the guard only suppresses
+    // the empty case, not the real one).
+    laps.sectors.sector_lines = {Segment{Point{10, -5}, Point{10, 5}}};
+    laps.Update();
+    CHECK(laps.SectorCount() == 1);
+    CHECK(laps.RecordedSectors() > 0);
+  }
+}
+
+TEST_CASE("Re-segmenting after a point/cs change recomputes (pass-2 #6)", "[laps]") {
+  // Update()'s dirty sentinels used to track ONLY the timing lines. Re-segmenting after the POINTS
+  // (or coordinate system) changed but the timing lines did NOT would early-out and keep the STALE
+  // lap_chunks_ from the previous track. The sentinels now also reset on AddPoint/ClearPoints/
+  // SetCoordinateSystem, so the next Update() recomputes against the new track.
+  GPSSample origin{.lat = 40.0, .lon = -74.0, .altitude = 0};
+  CoordinateSystem cs(origin);
+  const Segment start_line{Point{0, -10}, Point{0, 10}};
+
+  Laps laps = MakeThreeLapTrack(cs);
+  laps.sectors.start_line = start_line;
+  laps.Update();
+  REQUIRE(laps.LapsCount() == 3);
+
+  // Swap in a DIFFERENT track that crosses the start line a DIFFERENT number of times (exactly ONE
+  // crossing -> ONE lap chunk vs the three above) WITHOUT touching sectors.start_line: clear +
+  // re-add + set cs. The timing line is byte-identical to before, so the old (line-only) dirty
+  // guard would early-out and report the STALE 3 laps from the previous track. The lap COUNT is the
+  // clean discriminator: 1 (recomputed against the new track) vs a stale 3.
+  laps.ClearPoints();
+  double t = 0;
+  auto add = [&](double x, double y) {
+    laps.AddPoint(cs.Global(Vec3f{x, y, 0}), t++);
+  };
+  add(-20, 0);  // a single left->right sweep across x == 0 -> exactly ONE crossing
+  add(-5, 0);
+  add(5, 0);
+  add(20, 0);
+  laps.SetCoordinateSystem(cs);
+  // sectors.start_line is UNCHANGED here on purpose — ONLY the points/cs changed.
+  laps.Update();
+
+  // Recomputed against the NEW 4-point track (1 crossing -> 1 chunk), NOT the stale 3-lap result of
+  // the previous MakeThreeLapTrack. With the old line-only dirty guard this would early-out and
+  // still report 3 laps from chunks that point into a track that no longer exists.
+  CHECK(laps.LapsCount() == 1);
+  for (size_t lap = 0; lap < laps.LapsCount(); ++lap) {
+    Lap l = laps.GetLap(lap);
+    REQUIRE(l.cum_distances.size() == l.points.size());
+    CHECK(std::isfinite(l.cum_distances.back()));
+    CHECK(laps.GetLapDistance(lap) ==
+          Catch::Approx(l.cum_distances.back()).margin(1e-6));
+  }
+}

@@ -36,7 +36,6 @@ slider/readout; in compare mode the slider spans each lap's window via the prima
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,

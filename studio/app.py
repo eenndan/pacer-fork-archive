@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QSizePolicy,
     QSplitter,
     QVBoxLayout,
@@ -56,9 +57,17 @@ class StudioWindow(QMainWindow):
         startup and by the "Load full recording" action (which reloads with the discovered
         sibling chapters). Tearing the central widget down and rebuilding keeps the panels — each
         of which captures `session` at construction — simple and free of stale references."""
-        self._paths = list(paths)
         print("studio: loading telemetry…", flush=True)
-        self.session = Session.load(paths)
+        # Guard the load: a missing / corrupt / no-GPS file must NOT crash the app on launch. On
+        # failure show a clear error (the offending path + reason) and leave the window open so the
+        # user can act, rather than letting the exception propagate out of __init__ and kill the app.
+        try:
+            session = Session.load(paths)
+        except Exception as exc:  # noqa: BLE001 - surface ANY load failure as a user-facing error
+            self._on_load_failed(paths, exc)
+            return
+        self._paths = list(paths)
+        self.session = session
         n_ch = len(self.session.chapters) if self.session.chapters else 1
         print(f"studio: {self.session.point_count()} points, "
               f"{self.session.lap_count()} laps, {n_ch} chapter(s).", flush=True)
@@ -66,6 +75,30 @@ class StudioWindow(QMainWindow):
         label = chapters.recording_label(paths)
         self.setWindowTitle(f"pacer studio — {label}" if label else "pacer studio")
         self._build_ui()
+
+    def _on_load_failed(self, paths: list[str], exc: Exception):
+        """A session load failed (missing / corrupt / no-GPS file). Show a clear, non-fatal error
+        (offending path + reason) and keep the app open. If a session was already loaded (this was a
+        reload, e.g. "Load full recording"), the working UI is LEFT INTACT — only the dialog shows.
+        On the very first load there is no UI yet, so install a minimal empty-state placeholder so
+        the window still opens (rather than crashing out of __init__)."""
+        offending = paths[0] if paths else "(no file)"
+        reason = f"{type(exc).__name__}: {exc}"
+        print(f"studio: failed to load {offending}: {reason}", flush=True)
+        QMessageBox.critical(
+            self, "pacer studio — could not load recording",
+            f"Could not load the recording:\n\n{offending}\n\n{reason}\n\n"
+            "The file may be missing, corrupt, or contain no GPS data. "
+            "The previously loaded session (if any) is unchanged.")
+        # First-load failure: no central widget yet — show an empty state so the window stays open.
+        if not hasattr(self, "session"):
+            self.setWindowTitle("pacer studio — no recording loaded")
+            placeholder = QLabel(
+                "No recording loaded.\n\n"
+                f"Could not load:\n{offending}\n\n{reason}")
+            placeholder.setAlignment(Qt.AlignCenter)
+            placeholder.setWordWrap(True)
+            self.setCentralWidget(placeholder)
 
     @staticmethod
     def _panel(title: str, *contents) -> QWidget:
@@ -443,12 +476,25 @@ class StudioWindow(QMainWindow):
         a, b = self._compare_a, self._compare_b
         if a is None or b is None:
             return
-        t_a = self.video.current_pane_time(0)  # primary pane's global time
-        t_b = self.video.current_pane_time(1)  # secondary pane's global time (read once)
-        # Early-out when NEITHER pane time changed since the last tick (mirrors the playback
-        # _latest_t != _applied_t gate): paused/idle compare does zero badge/g work per tick.
-        if (t_a, t_b) == self._compare_last_t:
-            return
+        scrubbing = self._scrub_target is not None
+        if scrubbing:
+            # During a distance-locked scrub the pane times lag (the coalesced seeks are still in
+            # flight), so the (t_a, t_b) early-out below would key off stale times and freeze the
+            # badges/g at the pre-scrub position. Drive them instead from the scrub's OWN clamped
+            # target times (already computed per-tick in _on_scrub_moved): t_a = primary target,
+            # t_b = secondary target. Fall back to the live pane time if a target isn't set yet
+            # (e.g. the grab before the first move), and bypass the early-out so they stay live.
+            t_a = self._scrub_target
+            t_b = (self._scrub_target_b if self._scrub_target_b is not None
+                   else self.video.current_pane_time(1))
+        else:
+            t_a = self.video.current_pane_time(0)  # primary pane's global time
+            t_b = self.video.current_pane_time(1)  # secondary pane's global time (read once)
+            # Early-out when NEITHER pane time changed since the last tick (mirrors the playback
+            # _latest_t != _applied_t gate): paused/idle compare does zero badge/g work per tick.
+            # Skipped while scrubbing so the badges/g track the drag, not the lagging pane times.
+            if (t_a, t_b) == self._compare_last_t:
+                return
         self._compare_last_t = (t_a, t_b)
         # Secondary g (the primary's g comes from _apply_readout). A no-op if the overlay is off.
         if self.video.is_gmeter_visible():
