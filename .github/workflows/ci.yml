@@ -16,13 +16,13 @@ jobs:
     runs-on: macos-14
     steps:
       - name: Checkout (with submodules)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           # gpmf-parser and nanobind are git submodules the C++ build needs.
           submodules: recursive
 
       - name: Set up pixi
-        uses: prefix-dev/setup-pixi@v0.8.14
+        uses: prefix-dev/setup-pixi@v0.9.6
         with:
           # Pin pixi itself for reproducible CI (matches the committed pixi.lock).
           pixi-version: v0.70.1
