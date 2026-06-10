@@ -222,6 +222,13 @@ class _FakeLaps:
         self._starts = starts
         self._end = end  # finish timestamp of the last lap
 
+    def laps_count(self):
+        # lap_at_time now builds its window table through Session.lap_window, which bounds-checks
+        # the id against laps_count() (the [start, start+lap_time) window definition is single-
+        # sourced there). The fake exposes it so the half-open boundary test still drives the
+        # real code path; the assertions below are unchanged.
+        return len(self._starts)
+
     def start_timestamp(self, lid):
         return self._starts[lid]
 
