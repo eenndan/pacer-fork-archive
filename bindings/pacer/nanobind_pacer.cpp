@@ -158,7 +158,7 @@ void py_init_module_pacer(nb::module_ &m) {
 
   auto pyClassIMUSample =
       nb::class_<pacer::IMUSample>
-          (m, "IMUSample", " A timestamped 3-axis IMU sample (used for ACCL accelerometer m/s^2 and GRAV gravity\n vector). `time` is on the MEDIA clock (seconds, same basis as the GPS payload spans, so\n it syncs to the video; chapter offsets are applied by the SequentialGPSSource chain just\n like GPS). The three axes are carried in the GoPro stream's native element order\n (ACCL: Z,X,Y in m/s^2; GRAV: a unit gravity-direction vector). The studio layer resolves\n the camera->kart frame transform on top of these raw axes.")
+          (m, "IMUSample", " A timestamped 3-axis IMU sample (used for ACCL accelerometer m/s^2 and GRAV\n gravity vector). `time` is on the MEDIA clock (seconds, same basis as the GPS\n payload spans, so it syncs to the video; chapter offsets are applied by the\n SequentialGPSSource chain just like GPS). The three axes are carried in the\n GoPro stream's native element order (ACCL: Z,X,Y in m/s^2; GRAV: a unit\n gravity-direction vector). The studio layer resolves the camera->kart frame\n transform on top of these raw axes.")
       .def("__init__", [](pacer::IMUSample * self, double x = 0, double y = 0, double z = 0, double time = 0)
       {
           new (self) pacer::IMUSample();  // placement new
@@ -179,7 +179,7 @@ void py_init_module_pacer(nb::module_ &m) {
 
   auto pyClassQuatSample =
       nb::class_<pacer::QuatSample>
-          (m, "QuatSample", " A timestamped orientation quaternion (used for CORI camera-orientation, w,x,y,z).\n `time` is on the MEDIA clock (seconds), same basis as IMUSample / GPS.")
+          (m, "QuatSample", " A timestamped orientation quaternion (used for CORI camera-orientation,\n w,x,y,z). `time` is on the MEDIA clock (seconds), same basis as IMUSample /\n GPS.")
       .def("__init__", [](pacer::QuatSample * self, double w = 1, double x = 0, double y = 0, double z = 0, double time = 0)
       {
           new (self) pacer::QuatSample();  // placement new
@@ -204,7 +204,7 @@ void py_init_module_pacer(nb::module_ &m) {
   ////////////////////    <generated_from:geometry.hpp>    ////////////////////
   auto pyClassVec3f =
       nb::class_<pacer::Vec3f>
-          (m, "Vec3f", " A 3-axis geometry/coordinate vector (LOCAL metric space, used by CoordinateSystem and the\n local<->global conversions below). Lives here next to Point because it is a geometry vector,\n not a telemetry sample type. Keeps the full pointwise/linear vector algebra (Global() divides\n it element-wise by an axis-radius vector).")
+          (m, "Vec3f", " A 3-axis geometry/coordinate vector (LOCAL metric space, used by\n CoordinateSystem and the local<->global conversions below). Lives here next\n to Point because it is a geometry vector, not a telemetry sample type. Keeps\n the full pointwise/linear vector algebra (Global() divides it element-wise by\n an axis-radius vector).")
       .def_rw("x", &pacer::Vec3f::x, "")
       .def_rw("y", &pacer::Vec3f::y, "")
       .def_rw("z", &pacer::Vec3f::z, "")
@@ -238,7 +238,7 @@ void py_init_module_pacer(nb::module_ &m) {
   m.def("to_lon_lat",
       pacer::ToLonLat,
       nb::arg("s"),
-      " GPS degrees -> Point{lon, lat}. Named distinctly from ToPoint so a degrees sample can never\n be silently mixed with a local-metres Point behind one overloaded name at a call site.");
+      " GPS degrees -> Point{lon, lat}. Named distinctly from ToPoint so a degrees\n sample can never be silently mixed with a local-metres Point behind one\n overloaded name at a call site.");
 
 
   auto pyClassSegment =
@@ -258,7 +258,7 @@ void py_init_module_pacer(nb::module_ &m) {
       .def("intersects",
           &pacer::Segment::Intersects,
           nb::arg("fst"), nb::arg("snd"), nb::arg("ratio"),
-          " True iff this segment and the segment fst->snd PROPERLY cross: both straddle tests use\n strict inequalities, so a touch — any endpoint of either segment lying exactly ON the\n other segment's supporting line — is NOT a crossing (tests/test_geometry.cpp pins this,\n including the consequence that a trace vertex exactly on a timing line yields no crossing\n from either adjacent trace segment).\n On a True return, if `ratio` is non-null it receives the crossing's fraction along\n fst->snd, i.e. fst * (1 - ratio) + snd * ratio is the intersection point (Split uses it\n to interpolate the crossing sample/time). `ratio` is left untouched on a False return.")
+          " True iff this segment and the segment fst->snd PROPERLY cross: both\n straddle tests use strict inequalities, so a touch — any endpoint of either\n segment lying exactly ON the other segment's supporting line — is NOT a\n crossing (tests/test_geometry.cpp pins this, including the consequence that\n a trace vertex exactly on a timing line yields no crossing from either\n adjacent trace segment). On a True return, if `ratio` is non-null it\n receives the crossing's fraction along fst->snd, i.e. fst * (1 - ratio) +\n snd * ratio is the intersection point (Split uses it to interpolate the\n crossing sample/time). `ratio` is left untouched on a False return.")
       .def("__eq__",
           &pacer::Segment::operator==, nb::arg("other"))
       ;
@@ -310,7 +310,7 @@ void py_init_module_pacer(nb::module_ &m) {
 
   auto pyClassSectors =
       nb::class_<pacer::Sectors>
-          (m, "Sectors", " The INPUT timing-line geometry: the start line + the intermediate sector lines, in local\n metres. NOTE (confusion trap): the studio does NOT compute per-lap sector SPLITS from the C++\n crossing list these lines produce — it projects each sector line onto the lap's odometer by\n DISTANCE in Python (studio/session.py, lap_sector_splits), because a short line can miss a\n geometric crossing on some laps.")
+          (m, "Sectors", " The INPUT timing-line geometry: the start line + the intermediate sector\n lines, in local metres. NOTE (confusion trap): the studio does NOT compute\n per-lap sector SPLITS from the C++ crossing list these lines produce — it\n projects each sector line onto the lap's odometer by DISTANCE in Python\n (studio/session.py, lap_sector_splits), because a short line can miss a\n geometric crossing on some laps.")
       .def("__init__", [](pacer::Sectors * self, Segment start_line = Segment(), std::vector<Segment> sector_lines = std::vector<Segment>())
       {
           new (self) pacer::Sectors();  // placement new
@@ -327,7 +327,7 @@ void py_init_module_pacer(nb::module_ &m) {
 
   auto pyClassLapArrays =
       nb::class_<pacer::LapArrays>
-          (m, "LapArrays", " A lap's per-point columns as parallel arrays, for a SINGLE Python<->C++ crossing per lap. The\n studio layer used to cross the binding once PER POINT (cs.local(p.point), p.point.full_speed,\n p.time, cum_distances[i] in loops over hundreds of points) to build the map/plot/g-meter\n arrays; LapColumns returns them all at once. Every member has the SAME length as the\n materialized lap (Lap::Count(): the interpolated start crossing + the interior track points +\n the interpolated finish crossing), so the columns are mutually index-aligned.\n   times          media-clock seconds of each point (== Lap::points[i].time)\n   xs, ys         LOCAL metres (CoordinateSystem::Local of each point, x/y) in the laps' OWN\n                  coordinate system (the one set via SetCoordinateSystem)\n   full_speed     raw 3D GPS speed (m/s) of each point (the studio layer scales to km/h)\n   cum_distances  the lap's per-point odometer (== Lap::cum_distances), gap-aware")
+          (m, "LapArrays", " A lap's per-point columns as parallel arrays, for a SINGLE Python<->C++\n crossing per lap. The studio layer used to cross the binding once PER POINT\n (cs.local(p.point), p.point.full_speed, p.time, cum_distances[i] in loops\n over hundreds of points) to build the map/plot/g-meter arrays; LapColumns\n returns them all at once. Every member has the SAME length as the\n materialized lap (Lap::Count(): the interpolated start crossing + the\n interior track points + the interpolated finish crossing), so the columns are\n mutually index-aligned.\n   times          media-clock seconds of each point (== Lap::points[i].time)\n   xs, ys         LOCAL metres (CoordinateSystem::Local of each point, x/y)\n                  in the laps' OWN coordinate system (the one set via\n                  SetCoordinateSystem)\n   full_speed     raw 3D GPS speed (m/s) of each point (the studio layer\n                  scales to km/h)\n   cum_distances  the lap's per-point odometer (== Lap::cum_distances),\n                  gap-aware")
       .def("__init__", [](pacer::LapArrays * self, std::vector<double> times = std::vector<double>(), std::vector<double> xs = std::vector<double>(), std::vector<double> ys = std::vector<double>(), std::vector<double> full_speed = std::vector<double>(), std::vector<double> cum_distances = std::vector<double>())
       {
           new (self) pacer::LapArrays();  // placement new
@@ -395,7 +395,7 @@ void py_init_module_pacer(nb::module_ &m) {
       .def("lap_columns",
           &pacer::Laps::LapColumns,
           nb::arg("lap"),
-          "/ A lap's per-point columns (times, local-metre xs/ys, full_speed, cum_distances) as parallel\n/ arrays, so the studio layer builds its map/plot/g-meter arrays in ONE binding crossing\n/ instead of one per point. Identical (to float round-off) to materializing GetLap(lap) and\n/ then taking p.time / cs.Local(p.point).x|y / p.point.full_speed / cum_distances[i] per point,\n/ where cs is the laps' own coordinate system. Out-of-range lap -> all-empty arrays.")
+          "/ A lap's per-point columns (times, local-metre xs/ys, full_speed,\n/ cum_distances) as parallel arrays, so the studio layer builds its\n/ map/plot/g-meter arrays in ONE binding crossing instead of one per point.\n/ Identical (to float round-off) to materializing GetLap(lap) and then\n/ taking p.time / cs.Local(p.point).x|y / p.point.full_speed /\n/ cum_distances[i] per point, where cs is the laps' own coordinate system.\n/ Out-of-range lap -> all-empty arrays.")
       .def("sector_count",
           &pacer::Laps::SectorCount)
       .def("recorded_sectors",
@@ -405,15 +405,15 @@ void py_init_module_pacer(nb::module_ &m) {
       .def("sector_time",
           &pacer::Laps::SectorTime,
           nb::arg("sector"),
-          "/ Throws std::out_of_range (Python: IndexError) if sector >= RecordedSectors().")
+          "/ Throws std::out_of_range (Python: IndexError) if sector >=\n/ RecordedSectors().")
       .def("sector_start_timestamp",
           &pacer::Laps::SectorStartTimestamp,
           nb::arg("sector"),
-          "/ Throws std::out_of_range (Python: IndexError) if sector >= RecordedSectors().")
+          "/ Throws std::out_of_range (Python: IndexError) if sector >=\n/ RecordedSectors().")
       .def("sector_entry_speed",
           &pacer::Laps::SectorEntrySpeed,
           nb::arg("sector"),
-          "/ Throws std::out_of_range (Python: IndexError) if sector >= RecordedSectors().")
+          "/ Throws std::out_of_range (Python: IndexError) if sector >=\n/ RecordedSectors().")
       .def("add_point",
           &pacer::Laps::AddPoint, nb::arg("s"), nb::arg("t"))
       .def("point_count",
@@ -423,7 +423,7 @@ void py_init_module_pacer(nb::module_ &m) {
       .def("clear_points",
           &pacer::Laps::ClearPoints)
       .def("track_columns",
-          &pacer::Laps::TrackColumns, "/ The WHOLE raw point track's per-point columns (times, local-metre xs/ys, full_speed,\n/ cum_distances) as parallel arrays — LapColumns' bulk idiom over the full trace instead of\n/ one lap, so the studio layer builds its full-trace arrays in ONE binding crossing instead\n/ of one GetPoint + cs.local crossing per point. Exactly as GetPoint: times[i] / xs[i] /\n/ ys[i] / full_speed[i] equal GetPoint(i).time, cs.Local(GetPoint(i).point).x|y and\n/ GetPoint(i).point.full_speed for every i in [0, PointCount()), where cs is the laps' own\n/ coordinate system (the one set via SetCoordinateSystem). cum_distances[i] is the track's\n/ gap-aware cumulative odometer from point 0 to point i (the same cached prefix sum GetLap's\n/ interior distances are sliced from; see PointTrack). All five columns have length\n/ PointCount(); an empty track yields all-empty arrays (the odometer's internal {0} seed is\n/ an implementation detail and never becomes a row).")
+          &pacer::Laps::TrackColumns, "/ The WHOLE raw point track's per-point columns (times, local-metre xs/ys,\n/ full_speed, cum_distances) as parallel arrays — LapColumns' bulk idiom\n/ over the full trace instead of one lap, so the studio layer builds its\n/ full-trace arrays in ONE binding crossing instead of one GetPoint +\n/ cs.local crossing per point. Exactly as GetPoint: times[i] / xs[i] / ys[i]\n/ / full_speed[i] equal GetPoint(i).time, cs.Local(GetPoint(i).point).x|y\n/ and GetPoint(i).point.full_speed for every i in [0, PointCount()), where\n/ cs is the laps' own coordinate system (the one set via\n/ SetCoordinateSystem). cum_distances[i] is the track's gap-aware cumulative\n/ odometer from point 0 to point i (the same cached prefix sum GetLap's\n/ interior distances are sliced from; see PointTrack). All five columns have\n/ length PointCount(); an empty track yields all-empty arrays (the\n/ odometer's internal {0} seed is an implementation detail and never becomes\n/ a row).")
       ;
   ////////////////////    </generated_from:laps.hpp>    ////////////////////
 
@@ -431,12 +431,12 @@ void py_init_module_pacer(nb::module_ &m) {
   ////////////////////    <generated_from:gps-source.hpp>    ////////////////////
   auto pyClassRawGPSSource =
       nb::class_<pacer::RawGPSSource, pacer::RawGPSSource_trampoline>
-          (m, "RawGPSSource", " Base class for raw GPS source.\n\n Being raw in this context means that it does not provide any meaningful\n timestamps to work with.\n\n RETURN-CODE CONVENTION: every uint32_t-returning method (ReadSamples, Seek) uses GoPro\n GPMF-parser error codes — 0 (GPMF_OK) is success, any nonzero value is a GPMF_ERROR_*\n diagnostic (e.g. GPMFSource::ReadSamples returns GPMF_ERROR_MEMORY == 1 when the current\n index has no payload). Callers only distinguish zero from nonzero — no caller branches on a\n specific error code — so sources implemented outside the parser (tests, Python subclasses)\n can simply return 0 for success and any nonzero value for \"nothing here\".")
+          (m, "RawGPSSource", " Base class for raw GPS source.\n\n Being raw in this context means that it does not provide any meaningful\n timestamps to work with.\n\n RETURN-CODE CONVENTION: every uint32_t-returning method (ReadSamples, Seek)\n uses GoPro GPMF-parser error codes — 0 (GPMF_OK) is success, any nonzero\n value is a GPMF_ERROR_* diagnostic (e.g. GPMFSource::ReadSamples returns\n GPMF_ERROR_MEMORY == 1 when the current index has no payload). Callers only\n distinguish zero from nonzero — no caller branches on a specific error code —\n so sources implemented outside the parser (tests, Python subclasses) can\n simply return 0 for success and any nonzero value for \"nothing here\".")
       .def(nb::init<>())
       .def("read_samples",
           &pacer::RawGPSSource::ReadSamples,
           nb::arg("on_sample"),
-          " Main interface to take samples from current GPS source.\n\n Invokes `on_sample(sample, current_index, total_records)` once per GPS fix decoded from\n the payload the cursor is currently on (Seek/Next position it). Returns 0 on success, a\n nonzero error code otherwise (e.g. no payload at the current index).\n\n Virtual via std::function — the same idiom as ReadAccl/ReadGrav/ReadCori — so a\n Python-implemented RawGPSSource can override it through the binding trampoline and feed\n GPS samples into the engine (e.g. as a child of a C++ SequentialGPSSource chain). The\n former raw data-pointer + function-pointer `Samples` virtual could not be trampolined, so\n Python overrides silently emitted nothing. Default (RawGPSSource) emits nothing and\n returns 0; GPMFSource / SequentialGPSSource override.")
+          " Main interface to take samples from current GPS source.\n\n Invokes `on_sample(sample, current_index, total_records)` once per GPS fix\n decoded from the payload the cursor is currently on (Seek/Next position\n it). Returns 0 on success, a nonzero error code otherwise (e.g. no payload\n at the current index).\n\n Virtual via std::function — the same idiom as ReadAccl/ReadGrav/ReadCori —\n so a Python-implemented RawGPSSource can override it through the binding\n trampoline and feed GPS samples into the engine (e.g. as a child of a C++\n SequentialGPSSource chain). The former raw data-pointer + function-pointer\n `Samples` virtual could not be trampolined, so Python overrides silently\n emitted nothing. Default (RawGPSSource) emits nothing and returns 0;\n GPMFSource / SequentialGPSSource override.")
       .def("read_accl",
           &pacer::RawGPSSource::ReadAccl, nb::arg("param_0"))
       .def("read_grav",

@@ -9,10 +9,11 @@
 
 namespace pacer {
 
-// A 3-axis geometry/coordinate vector (LOCAL metric space, used by CoordinateSystem and the
-// local<->global conversions below). Lives here next to Point because it is a geometry vector,
-// not a telemetry sample type. Keeps the full pointwise/linear vector algebra (Global() divides
-// it element-wise by an axis-radius vector).
+// A 3-axis geometry/coordinate vector (LOCAL metric space, used by
+// CoordinateSystem and the local<->global conversions below). Lives here next
+// to Point because it is a geometry vector, not a telemetry sample type. Keeps
+// the full pointwise/linear vector algebra (Global() divides it element-wise by
+// an axis-radius vector).
 struct Vec3f : public VectorOperators<Vec3f, double, 3> {
   double x = 0, y = 0, z = 0;
 
@@ -43,32 +44,35 @@ struct Point : LinearOperators<Point, double, 2> {
   }
 };
 
-// Local-metres -> Point (drops z for the Vec3f overload). Both inputs are already in the LOCAL
-// metric coordinate system, so the result is in metres.
+// Local-metres -> Point (drops z for the Vec3f overload). Both inputs are
+// already in the LOCAL metric coordinate system, so the result is in metres.
 Point ToPoint(Point x);
 Point ToPoint(Vec3f v);
 
-// GPS degrees -> Point{lon, lat}. Named distinctly from ToPoint so a degrees sample can never
-// be silently mixed with a local-metres Point behind one overloaded name at a call site.
+// GPS degrees -> Point{lon, lat}. Named distinctly from ToPoint so a degrees
+// sample can never be silently mixed with a local-metres Point behind one
+// overloaded name at a call site.
 Point ToLonLat(GPSSample s);
 
-// Epsilon comparison of two points (both coordinates within `eps`). The single source of the
-// "approximately equal" notion for geometry: Segment::operator== is implemented in terms of it.
-// (Point::operator== itself stays exact — it comes from the LinearOperators mixin and is not the
-// Python-bound equality; only Segment exposes __eq__.)
+// Epsilon comparison of two points (both coordinates within `eps`). The single
+// source of the "approximately equal" notion for geometry: Segment::operator==
+// is implemented in terms of it. (Point::operator== itself stays exact — it
+// comes from the LinearOperators mixin and is not the Python-bound equality;
+// only Segment exposes __eq__.)
 bool ApproxEqual(const Point &a, const Point &b, double eps = 1e-6);
 
 struct Segment {
   Point first, second;
 
-  // True iff this segment and the segment fst->snd PROPERLY cross: both straddle tests use
-  // strict inequalities, so a touch — any endpoint of either segment lying exactly ON the
-  // other segment's supporting line — is NOT a crossing (tests/test_geometry.cpp pins this,
-  // including the consequence that a trace vertex exactly on a timing line yields no crossing
-  // from either adjacent trace segment).
-  // On a true return, if `ratio` is non-null it receives the crossing's fraction along
-  // fst->snd, i.e. fst * (1 - ratio) + snd * ratio is the intersection point (Split uses it
-  // to interpolate the crossing sample/time). `ratio` is left untouched on a false return.
+  // True iff this segment and the segment fst->snd PROPERLY cross: both
+  // straddle tests use strict inequalities, so a touch — any endpoint of either
+  // segment lying exactly ON the other segment's supporting line — is NOT a
+  // crossing (tests/test_geometry.cpp pins this, including the consequence that
+  // a trace vertex exactly on a timing line yields no crossing from either
+  // adjacent trace segment). On a true return, if `ratio` is non-null it
+  // receives the crossing's fraction along fst->snd, i.e. fst * (1 - ratio) +
+  // snd * ratio is the intersection point (Split uses it to interpolate the
+  // crossing sample/time). `ratio` is left untouched on a false return.
   bool Intersects(Point fst, Point snd, double *ratio) const;
 
   bool operator==(const Segment &other) const;
@@ -97,14 +101,16 @@ struct CoordinateSystem {
   //
   // This is most likely not the best way to do this, but it works for now.
 
-  // Default frame: IDENTITY basis (dx/dy/dz = the ECEF unit axes, origin at the geocentre),
-  // i.e. Local() returns the point's raw ECEF position in metres and Distance() the true 3D
-  // chord. WHY: the members used to default to all-zero, so a default-constructed
-  // CoordinateSystem made every Local()/Distance() silently return 0 — a trap for new code
-  // that forgot SetCoordinateSystem/CoordinateSystem(origin). Every real pipeline still
-  // installs a track-centred CoordinateSystem(origin) before any distance is read (verified:
-  // byte-identical lap times + trace on the real session), so this only changes what FORGOTTEN
-  // initialization yields: real metres instead of silent zeros.
+  // Default frame: IDENTITY basis (dx/dy/dz = the ECEF unit axes, origin at the
+  // geocentre), i.e. Local() returns the point's raw ECEF position in metres
+  // and Distance() the true 3D chord. WHY: the members used to default to
+  // all-zero, so a default-constructed CoordinateSystem made every
+  // Local()/Distance() silently return 0 — a trap for new code that forgot
+  // SetCoordinateSystem/CoordinateSystem(origin). Every real pipeline still
+  // installs a track-centred CoordinateSystem(origin) before any distance is
+  // read (verified: byte-identical lap times + trace on the real session), so
+  // this only changes what FORGOTTEN initialization yields: real metres instead
+  // of silent zeros.
   CoordinateSystem() = default;
   explicit CoordinateSystem(GPSSample origin);
 
