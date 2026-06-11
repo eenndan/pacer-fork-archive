@@ -30,7 +30,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from _synthetic import bare_session, odometer  # noqa: E402
+from _synthetic import bare_session, odometer, seed_cols  # noqa: E402
 
 import pacer  # noqa: E402
 from studio._signal import (  # noqa: E402
@@ -40,7 +40,7 @@ from studio._signal import (  # noqa: E402
     MIN_LAP_TIME,
     _band_lap_ids,
 )
-from studio.load import MIN_START_SPEED, _clean  # noqa: E402
+from studio.load import MIN_START_SPEED, _clean, _sustained_moving  # noqa: E402
 from studio.session import Session  # noqa: E402
 
 # ------------------------------------------------------------------ shared fakes / seeding
@@ -62,19 +62,6 @@ class _FakeBandLaps:
 
     def sample_count(self, i):
         return self._samples[i]
-
-
-def _seed_cols(session, lap_id, times, dists):
-    """Seed one `_cols_cache` 5-tuple (times, xs, ys, full_speed m/s, cum_distances) for a
-    STRAIGHT-LINE lap along the x-axis (xs = odometer, ys = 0), so the sector-midpoint→trace
-    projection geometry is consistent with the odometer the splits interpolate on."""
-    times = np.asarray(times, float)
-    dists = np.asarray(dists, float)
-    if not hasattr(session, "_cols_cache"):  # bare Session.__new__ — the slot needs creating
-        session._cols_cache = {}
-    session._cols_cache[lap_id] = (
-        times, dists.copy(), np.zeros_like(dists), np.gradient(dists, times), dists.copy(),
-    )
 
 
 def _seg(x1, y1, x2, y2):
@@ -187,6 +174,36 @@ def test_clean_degenerate_window_keeps_everything():
     print("test_clean_degenerate_window_keeps_everything OK")
 
 
+def test_sustained_moving_finds_trailing_window():
+    """Regression for the historical `hi - run` off-by-one: the run's window is
+    samples[i .. i+run-1], so the LAST in-range candidate is i = hi - run — a run of exactly
+    `run` moving samples ending flush at hi must be found, not fall through to `return lo`.
+    Pinned directly on `_sustained_moving`: through `_clean` (the only caller) this trailing
+    case is masked — lo = n - run leaves hi - lo = run < 10, so the degenerate fallback keeps
+    everything either way (see test_clean_trailing_moving_run_keeps_everything)."""
+    stationary = [_gps(0.0, 0.0, 0.0) for _ in range(7)]
+    moving = [_gps(5.0 * k, 0.0, MIN_START_SPEED + 7.0) for k in range(5)]
+    samples = stationary + moving  # the ONLY 5-run starts at index 7 == len - 5 == hi - run
+    assert _sustained_moving(samples, 0, len(samples), run=5) == 7
+    # An interior run is unaffected: the first qualifying start wins as before.
+    samples2 = stationary + moving + stationary
+    assert _sustained_moving(samples2, 0, len(samples2), run=5) == 7
+    # No qualifying run anywhere still falls back to lo.
+    assert _sustained_moving(stationary, 0, len(stationary), run=5) == 0
+    print("test_sustained_moving_finds_trailing_window OK")
+
+
+def test_clean_trailing_moving_run_keeps_everything():
+    """The trailing-run trace through the full `_clean`: lo = n - 5 makes the kept window
+    hi - lo = 5 < 10, so the degenerate fallback keeps the whole trace — the same kept range
+    the pre-fix code produced (its fall-through lo = 0 kept [0, n) directly). Pins that the
+    off-by-one fix cannot change `_clean`'s output."""
+    stationary = [_gps(0.0, 0.0, 0.0) for _ in range(7)]
+    moving = [_gps(5.0 * k, 0.0, MIN_START_SPEED + 7.0) for k in range(5)]
+    assert _run_clean(stationary + moving) == list(range(12))
+    print("test_clean_trailing_moving_run_keeps_everything OK")
+
+
 # ------------------------------------------------- 3+4) sector splits / plot positions
 
 def make_sector_session():
@@ -197,7 +214,7 @@ def make_sector_session():
     lap = 4
     times, dists = odometer(200, 0.1, 50.0, 1000.0)
     s = bare_session({lap: (times, dists)}, best=lap, valid=[lap])
-    _seed_cols(s, lap, times, dists)
+    seed_cols(s, lap, times, dists)
     j1, j2 = 60, 140
     s.laps = SimpleNamespace(
         laps_count=lambda: 5,
@@ -281,8 +298,8 @@ def make_delta_session():
     ta, da = odometer(120, 0.1, 100.0, 520.0)
     tb, db = odometer(110, 0.1, 300.0, 508.0, lambda u: 1.3 + 0.7 * np.sin(u) ** 2)
     s = bare_session({lap_a: (ta, da), lap_b: (tb, db)}, best=lap_b)
-    _seed_cols(s, lap_a, ta, da)
-    _seed_cols(s, lap_b, tb, db)
+    seed_cols(s, lap_a, ta, da)
+    seed_cols(s, lap_b, tb, db)
     s.laps = SimpleNamespace(laps_count=lambda: 8)
     laptime_a = float(ta[-1] - ta[0])
     laptime_b = float(tb[-1] - tb[0])

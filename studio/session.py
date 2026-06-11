@@ -665,6 +665,8 @@ class Session:
         # 'distance' / 'delta' — the shared normalized-distance × best_distance axis.
         if not best_distance:
             return None
+        if dists[-1] <= 0:  # zero-length odometer (≥2 stationary points): degenerate → no x
+            return None     # (same `<= 0` convention as delta() / sector_plot_positions)
         d = float(np.interp(t, times, dists))  # distance-into-lap at t
         s = d / float(dists[-1])               # normalized fraction [0,1]
         return s * float(best_distance)
@@ -817,13 +819,6 @@ class Session:
         if starts[k] <= t < ends[k]:
             return ids[k]
         return None
-
-    def speed_at_time(self, t: float) -> float | None:
-        """Speed (km/h) at media-clock time `t`, from the nearest trace sample, else None."""
-        i = self.index_at_time(t)
-        if i is None:
-            return None
-        return float(self.tv[i])
 
     def g_at_time(self, t: float) -> tuple[float, float, float] | None:
         """Vehicle-frame g at media-clock time `t`: (lateral_g, longitudinal_g, total_g), or

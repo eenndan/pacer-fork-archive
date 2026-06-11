@@ -576,7 +576,7 @@ class StudioWindow(QMainWindow):
     def _apply_readout(self, t: float):
         # Resolve the two per-tick searches ONCE and reuse them everywhere below (the lap that
         # contains t, and the nearest trace index at t) — they used to be recomputed two more
-        # times each tick (delta_at_time re-ran lap_at_time; set_playhead_time + speed_at_time each
+        # times each tick (delta_at_time re-ran lap_at_time; the playhead + speed lookups each
         # re-ran index_at_time).
         lap_id = self.session.lap_at_time(t)   # F3: which lap is on the video
         i = self.session.index_at_time(t)      # nearest trace sample (marker + speed)
@@ -672,13 +672,6 @@ class StudioWindow(QMainWindow):
         without building the UI) — mirrors the old `getattr(self, "_compare", False)` guard."""
         compare = getattr(self, "compare", None)
         return compare is not None and compare.active
-
-    @property
-    def _compare(self) -> bool:
-        """The semantic compare-on flag (the documented StudioWindow compare-ownership name; the
-        view's own two-pane LAYOUT flag is VideoView._two_panes). Read-only delegate to the compare
-        controller, kept for the documented contract + any external reader."""
-        return self._comparing()
 
     def _refresh_sector_lines(self, mode: str | None = None):
         """F2: push the sector boundary positions (start/finish + each sector line) to the charts
