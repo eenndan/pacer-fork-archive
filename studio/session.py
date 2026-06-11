@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import TypedDict
 
 import numpy as np
 
@@ -39,6 +40,21 @@ from .load import load_recording
 DEFAULT_SAMPLE = "3rdparty/gpmf-parser/samples/hero6.mp4"  # a clip with real motion
 
 _UNSET = object()  # sentinel for "cache not yet computed" where None is a valid cached value
+
+# The five index-aligned per-lap columns `_lap_columns` caches: (times, xs, ys,
+# full_speed m/s, cum_distances), one bulk pacer.Laps.lap_columns crossing per lap.
+LapColumns = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+# One (x, y) plot series per lap id — the speed/delta payloads `delta()` returns.
+LapSeries = dict[int, tuple[np.ndarray, np.ndarray]]
+
+
+class LapRow(TypedDict):
+    """One `lap_rows()` row — the lap id + the lap-level metrics the lap table shows."""
+
+    idx: int      # lap id
+    time: float   # lap time (s)
+    dist: float   # lap distance (m)
+    entry: float  # entry speed (km/h)
 
 
 @dataclass
@@ -69,24 +85,24 @@ class Session:
         # session. The telemetry trace already lives on the map's continuous global clock; this
         # is what the VIDEO layer uses to switch sources / span the slider across chapters.
         self.chapters = chapter_map
-        self._lap_cache: dict[int, object] = {}
         # Per-lap bulk columns (times, xs, ys, full_speed m/s, cum_distances) fetched in ONE
         # pacer.Laps.lap_columns crossing instead of a per-point cs.local/full_speed/time loop.
         # The single source _lap_trace_xyt / _lap_time_dist_elapsed / _lap_arrays /
         # sector_boundary_distances all slice from; cleared on re-segment. Built once per lap.
-        self._cols_cache: dict[int, tuple] = {}
+        self._cols_cache: dict[int, LapColumns] = {}
         # Per-lap (times, dists, elapsed) arrays for _lap_time_dist (the cursor/video x<->time
         # conversions) — rebuilding these from the bound lap object every ~30 Hz cursor tick is
         # wasteful; cache and clear on re-segment. `elapsed` (= times - times[0]) is precomputed
-        # once so the per-tick delta math doesn't re-subtract every call.
-        self._dist_cache: dict[int, tuple] = {}
+        # once so the per-tick delta math doesn't re-subtract every call. (Unit tests may seed
+        # a legacy (times, dists) 2-tuple; _lap_time_dist_elapsed upgrades it in place.)
+        self._dist_cache: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
         # Per-lap (xs, ys, times) local-metre arrays (map highlight + marker-drag nearest). Built
         # once per lap (an O(n_lap) cs.local pass); cleared on re-segment. Killing the double
         # rebuild the marker drag used to do per mouse-move.
-        self._xyt_cache: dict[int, tuple] = {}
+        self._xyt_cache: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
         # Per-lap gap-filled draw segments (measured + inferred runs). MAP RENDERING ONLY —
         # computed once per lap on first draw, never per frame; cleared on re-segment.
-        self._seg_cache: dict[int, list] = {}
+        self._seg_cache: dict[int, list[gapfill.Segment]] = {}
         # Memoized "real lap" sets — the 30 Hz tick resolves valid_lap_ids()/best_lap_id() many
         # times each frame (lap_at_time, delta_at_time, the readout, the map/table highlights).
         # Computed once and reused; cleared on re-segment (the only point they can change).
@@ -94,7 +110,7 @@ class Session:
         self._best_cache: object = _UNSET   # sentinel: None is a legal "no best lap" result
         # Cached lap [start, end) windows on the GLOBAL clock for the O(log n) lap_at_time binary
         # search (parallel arrays over valid laps, in start order). Cleared on re-segment.
-        self._lap_windows: tuple | None = None
+        self._lap_windows: tuple[np.ndarray, np.ndarray, list[int]] | None = None
         self._reference_xy = None  # lazily-built georeferenced track centerline (fallback donor)
         # The detected registry track's name (tracks.detect_track), or None for an unknown
         # track (where the start line was auto-fitted via pick_random_start). Set by load();
@@ -194,7 +210,6 @@ class Session:
             sector_lines=[s.to_pacer() for s in sectors],
         )
         self.laps.update()
-        self._lap_cache.clear()
         self._cols_cache.clear()
         self._dist_cache.clear()
         self._xyt_cache.clear()
@@ -281,14 +296,7 @@ class Session:
         return Seg(cx - nx * 15, cy - ny * 15, cx + nx * 15, cy + ny * 15)
 
     # ------------------------------------------------------------- lap access
-    def _get_lap(self, lap_id: int):
-        lap = self._lap_cache.get(lap_id)
-        if lap is None:
-            lap = self.laps.get_lap(lap_id)
-            self._lap_cache[lap_id] = lap
-        return lap
-
-    def _lap_columns(self, lap_id: int):
+    def _lap_columns(self, lap_id: int) -> LapColumns:
         """Cached per-lap (times, xs, ys, full_speed_mps, cum_distances) numpy arrays, fetched in
         a SINGLE pacer.Laps.lap_columns crossing (was a per-point cs.local/full_speed/time loop).
         local metres + media-clock seconds + raw 3D speed (m/s) + the lap's gap-aware odometer,
@@ -359,7 +367,7 @@ class Session:
             return None
         return float(td[1][-1])
 
-    def lap_rows(self) -> list[dict]:
+    def lap_rows(self) -> list[LapRow]:
         return [
             {
                 "idx": i,
@@ -370,12 +378,15 @@ class Session:
             for i in self.valid_lap_ids()
         ]
 
-    def _lap_point_times(self, lap_id: int) -> list[float]:
+    def _lap_point_times(self, lap_id: int) -> np.ndarray:
         """The media-clock times of a lap's KEPT GPS points, in order. Quality-gated /
         cleaned samples have already been removed at load, so a large delta between two
-        consecutive entries here is a real interior GPS dropout (not jitter)."""
-        lap = self._get_lap(lap_id)
-        return [p.time for p in lap.points]
+        consecutive entries here is a real interior GPS dropout (not jitter).
+
+        The times column of the cached bulk `_lap_columns` fetch — index-identical to the
+        former per-point `lap.points` materialization (Laps::LapColumns reuses GetLap, see
+        laps.cpp), so no separate get_lap crossing/cache is needed."""
+        return self._lap_columns(lap_id)[0]
 
     def lap_has_dropout(self, lap_id: int) -> bool:
         """True if a lap's kept-point times contain an INTERIOR gap — a delta between two
@@ -696,7 +707,7 @@ class Session:
 
     _DELTA_GRID_N = 400  # samples on the normalized-distance grid (smooth + cheap to render)
 
-    def delta(self, lap_ids, x_mode: str = "distance"):
+    def delta(self, lap_ids, x_mode: str = "distance") -> tuple[int, LapSeries, LapSeries] | None:
         """Returns (best_lap_id, speed_series, delta_series) for the speed + delta plots, which
         SHARE one x-axis (the dist/time toggle drives both, and they're x-linked).
 
