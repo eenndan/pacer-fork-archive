@@ -178,6 +178,14 @@ class CoordinateSystem:
     #
     # This is most likely not the best way to do this, but it works for now.
 
+    # Default frame: IDENTITY basis (dx/dy/dz = the ECEF unit axes, origin at the geocentre),
+    # i.e. Local() returns the point's raw ECEF position in metres and Distance() the True 3D
+    # chord. WHY: the members used to default to all-zero, so a default-constructed
+    # CoordinateSystem made every Local()/Distance() silently return 0 — a trap for new code
+    # that forgot SetCoordinateSystem/CoordinateSystem(origin). Every real pipeline still
+    # installs a track-centred CoordinateSystem(origin) before any distance is read (verified:
+    # byte-identical lap times + trace on the real session), so this only changes what FORGOTTEN
+    # initialization yields: real metres instead of silent zeros.
     @overload
     def __init__(self) -> None:
         pass
