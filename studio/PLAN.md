@@ -97,10 +97,14 @@ Captured here so the negative results aren't re-litigated. Evidence in [`docs/`]
 
 ## 4. Tech debt / known limitations
 
-- **`mk_centerline.json` reference ICP is broken** — its similarity-ICP fit (in `reference.py`)
-  collapses onto an inner sub-loop and covers only ~30% of the real track footprint. It only feeds
-  the **rarely-used** gap-fill reference *fallback* (never timing/segmentation), so it's low-impact,
-  but it should be re-fit. ([docs/start-line-verification.md](docs/start-line-verification.md) §2 caveat)
+- **`mk_centerline.json` reference fit — FIXED** (was: free-scale ICP against the unordered point
+  cloud collapsing onto an inner sub-loop, ~30% footprint coverage / RMS ≈ 47 m on session 0060).
+  `reference.py` now fits by cyclic arc-length correspondence against the session's best clean
+  lap, and the stored polyline — a hand trace that turned out to be a poor rendition of the
+  layout — was rebuilt from a measured best-lap loop (`dev/build_reference.py`). Cross-session
+  (built from 0062, fit on 0060): **RMS 2.8 m, 100% of best-lap points within 10 m**. Still feeds
+  only the **rarely-used** gap-fill reference *fallback* (never timing/segmentation).
+  ([docs/start-line-verification.md](docs/start-line-verification.md) §2 note)
 - **nanobind shutdown "leaked function" warnings** on the GPS/IMU read callbacks at exit — harmless,
   a codebase convention.
 - **G-meter longitudinal per-lap correlation is modest** (lateral r ≈ 0.90 / 96.5% sign agreement is

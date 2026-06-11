@@ -452,13 +452,28 @@ class Session:
 
         Built once and cached. Only the known-track fallback uses it; with ~18 laps the
         cross-lap borrow covers virtually every gap, so this is rarely needed. See
-        studio/reference.py for the trace+georeference of the Daytona MK centerline."""
+        studio/reference.py for the trace+georeference of the Daytona MK centerline:
+        the stored loop is fit against ONE clean lap's closed loop (cyclic arc-length
+        correspondence), not the unordered all-laps point cloud."""
         if self._reference_xy is not None:
             return self._reference_xy if len(self._reference_xy) else None
         from . import reference  # local import: optional, only on the fallback path
-        agg = np.column_stack([self.tx, self.ty]) if len(self.tx) else None
-        self._reference_xy = reference.centerline_local(agg)
+        self._reference_xy = reference.centerline_local(self._reference_fit_loop())
         return self._reference_xy if len(self._reference_xy) else None
+
+    def _reference_fit_loop(self):
+        """The lap loop the reference centerline is fit against: the fastest valid lap
+        WITHOUT a GPS dropout (an ordered, closed, complete track footprint), else the
+        fastest valid lap. None if there are no valid laps."""
+        valid = self.valid_lap_ids()
+        if not valid:
+            return None
+        by_time = sorted(valid, key=self.laps.lap_time)
+        pick = next((lap for lap in by_time if not self.lap_has_dropout(lap)), by_time[0])
+        xs, ys, _ = self._lap_trace_xyt(pick)
+        if len(xs) < 10:
+            return None
+        return np.column_stack([xs, ys])
 
     def lap_trace_segments(self, lap_id: int):
         """Ordered list of `gapfill.Segment` for drawing this lap: measured GPS runs and

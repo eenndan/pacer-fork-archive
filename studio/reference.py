@@ -1,13 +1,24 @@
-"""Georeferenced track centerline — the FALLBACK gap-fill source.
+"""Reference track centerline — the FALLBACK gap-fill source.
 
 Used only where NO measured lap covers a gap section (rare with ~18 laps). The Daytona
-Milton Keynes reference centerline is traced once from a track image (no embedded geo) and
-best-fit aligned to the aggregate GPS point cloud via a similarity transform. See
-`build_reference.py` for how the stored polyline was produced.
+Milton Keynes reference centerline is a measured best-lap loop (stored normalized, no
+absolute geo-coordinates) aligned to the session's local frame by a similarity transform
+fit against the session's own best-lap loop. See `dev/build_reference.py` for how the
+stored polyline was produced (and for the history of the discarded image hand trace).
+
+Both curves are CLOSED LOOPS, so the alignment is solved by cyclic arc-length
+correspondence: resample both loops uniformly by normalized arc length, brute-force the
+cyclic start offset and traversal direction, and solve the similarity transform (Umeyama,
+reflection allowed — a stored loop may be mirrored vs the local frame) from the matched
+pairs in closed form. A short nearest-point ICP polish then absorbs local parameterization
+distortion. The previous free-scale ICP against the UNORDERED aggregate point cloud
+collapsed onto an inner sub-loop (~30 % footprint coverage); the cyclic correspondence is
+global, so it cannot.
 
 This module is PURE PYTHON + numpy + a stored polyline; it has no `pacer` dependency for the
-fill itself. `centerline_local` takes the GPS aggregate (local-metre points) and returns the
-centerline in LOCAL metres, aligned to the data, as an (M,2) array (or empty).
+fill itself. `centerline_local` takes the session's best-lap loop (ordered local-metre
+points) and returns the centerline in LOCAL metres, aligned to the data, as an (M,2) array
+(or empty).
 """
 
 from __future__ import annotations
@@ -19,6 +30,15 @@ import numpy as np
 
 _HERE = os.path.dirname(__file__)
 _DATA = os.path.join(_HERE, "mk_centerline.json")
+
+# A lap point within this distance of the fitted reference counts as "covered" — generous
+# vs the ~8 m kart-track width + the hand-trace error, tight vs the ~60 m infield spacing,
+# so a collapsed/mis-fit reference scores low while a correct fit scores ~100 %.
+COVERAGE_TOL_M = 10.0
+# Resampled correspondence points for the global cyclic search (offset granularity is
+# track_length/N ≈ 2.5 m here) and for the returned polyline.
+_N_FIT = 512
+_N_OUT = 600
 
 
 def _load_normalized():
@@ -50,48 +70,119 @@ def _similarity_fit(src, dst):
     return scale, R, t
 
 
-def _resample(xy, n=400):
-    xy = np.asarray(xy, float)
-    d = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(xy[:, 0]), np.diff(xy[:, 1])))])
-    if d[-1] <= 0:
-        return xy
-    s = d / d[-1]
-    g = np.linspace(0, 1, n)
-    return np.column_stack([np.interp(g, s, xy[:, 0]), np.interp(g, s, xy[:, 1])])
+def _resample_closed(xy, n):
+    """Resample a CLOSED loop uniformly by arc length to n points (no duplicate endpoint).
 
-
-def centerline_local(aggregate_xy):
-    """Return the reference centerline in LOCAL metres, best-fit aligned to `aggregate_xy`
-    (the union of all laps' local-metre points), as an (M,2) array — empty if unavailable.
-
-    The stored polyline is normalized/arbitrary-scaled; we align it to the GPS aggregate by an
-    ICP-style similarity fit. A coarse rough alignment (centroid + bbox scale) seeds a few
-    nearest-point similarity refinement iterations (allowing reflection — image axes may be
-    flipped vs the local-metre frame).
+    The loop is closed before measuring (the final segment back to the start counts), so a
+    polyline whose last point isn't a repeat of the first still parameterizes the full ring.
     """
+    xy = np.asarray(xy, float)
+    if np.hypot(*(xy[-1] - xy[0])) > 1e-12:
+        xy = np.vstack([xy, xy[:1]])
+    d = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(xy, axis=0).T))])
+    if d[-1] <= 0:
+        return np.repeat(xy[:1], n, axis=0)
+    s = np.arange(n) * (d[-1] / n)
+    return np.column_stack([np.interp(s, d, xy[:, 0]), np.interp(s, d, xy[:, 1])])
+
+
+def _dist_to_polyline(pts, poly):
+    """Min Euclidean distance from each of `pts` (P,2) to the polyline `poly` (Q,2) —
+    true point-to-SEGMENT distance, vectorized over all P×(Q-1) pairs."""
+    pts = np.asarray(pts, float)
+    a, b = poly[:-1], poly[1:]
+    ab = b - a                                            # (S,2)
+    ab2 = np.maximum((ab ** 2).sum(1), 1e-12)             # (S,)
+    ap = pts[:, None, :] - a[None]                        # (P,S,2)
+    t = np.clip((ap * ab[None]).sum(-1) / ab2[None], 0.0, 1.0)
+    closest = a[None] + t[..., None] * ab[None]
+    return np.sqrt(((pts[:, None, :] - closest) ** 2).sum(-1)).min(1)
+
+
+def _close_ring(xy):
+    """Append the first point so the returned polyline draws as a closed ring."""
+    return np.vstack([xy, xy[:1]])
+
+
+def fit_loop_to_loop(ref_xy, loop_xy, n=_N_FIT, icp_iters=8):
+    """Fit the closed reference loop `ref_xy` onto the closed measured loop `loop_xy`
+    (both (K,2), any scale/frame) by a similarity transform.
+
+    Global search: both loops resampled to n points uniformly by normalized arc length;
+    every cyclic start offset × both traversal directions is scored by the closed-form
+    similarity residual under that correspondence; the winner seeds a few nearest-point ICP
+    iterations (against a densified copy of the measured loop) to absorb local arc-length
+    distortion. Each candidate is accepted by the REPORTED metric — RMS distance from the
+    measured points to the fitted polyline — so the polish can never trade footprint
+    coverage for nearest-point comfort (the old unordered-cloud ICP's collapse mode).
+
+    Returns `(fitted, info)`: `fitted` is the reference resampled to a closed ring in the
+    measured frame; `info` has the winning `rms` (m), `coverage` (fraction of measured
+    points within COVERAGE_TOL_M of the fitted polyline), `scale`, `R` (2×2, det ±1), `t`,
+    `offset_frac` (winning cyclic offset, fraction of a loop) and `reversed`.
+    """
+    ref_xy = np.asarray(ref_xy, float)
+    loop_xy = np.asarray(loop_xy, float)
+    ref_n = _resample_closed(ref_xy, n)
+    lap_n = _resample_closed(loop_xy, n)
+
+    # --- global search: direction × cyclic offset, scored by correspondence residual ---
+    best = None  # (residual_rms, scale, R, t, offset, reversed)
+    for rev in (False, True):
+        cand = ref_n[::-1] if rev else ref_n
+        for k in range(n):
+            src = np.roll(cand, -k, axis=0)
+            scale, R, t = _similarity_fit(src, lap_n)
+            res = (scale * src @ R.T + t) - lap_n
+            rms = float(np.sqrt((res ** 2).sum(1).mean()))
+            if best is None or rms < best[0]:
+                best = (rms, scale, R, t, k, rev)
+    _, scale, R, t, k, rev = best
+
+    # The transform was solved on the rolled/reversed resampling; it applies to the
+    # reference as a SET, so carry it over to the canonical resampled reference directly.
+    ref_out = _resample_closed(ref_xy, _N_OUT)
+    dense = _resample_closed(loop_xy, max(4 * n, 2048))
+
+    def _apply(sc, rot, tr):
+        return sc * ref_out @ rot.T + tr
+
+    def _score(fitted):
+        d = _dist_to_polyline(loop_xy, _close_ring(fitted))
+        return float(np.sqrt((d ** 2).mean())), float((d <= COVERAGE_TOL_M).mean())
+
+    fitted = _apply(scale, R, t)
+    rms, cov = _score(fitted)
+    win = (rms, cov, scale, R, t, fitted)
+
+    # --- ICP polish, accepted only by the reported lap→reference metric ---
+    cur = fitted
+    for _ in range(icp_iters):
+        d2 = ((cur[:, None, 0] - dense[None, :, 0]) ** 2
+              + (cur[:, None, 1] - dense[None, :, 1]) ** 2)
+        nn = dense[np.argmin(d2, axis=1)]
+        sc_i, R_i, t_i = _similarity_fit(ref_out, nn)
+        cur = _apply(sc_i, R_i, t_i)
+        rms_i, cov_i = _score(cur)
+        if rms_i < win[0]:
+            win = (rms_i, cov_i, sc_i, R_i, t_i, cur)
+
+    rms, cov, scale, R, t, fitted = win
+    info = {"rms": rms, "coverage": cov, "scale": float(scale), "R": R,
+            "t": np.asarray(t, float), "offset_frac": k / n, "reversed": rev}
+    return _close_ring(fitted), info
+
+
+def centerline_local(loop_xy):
+    """Return the reference centerline in LOCAL metres as an (M,2) closed ring — empty if
+    unavailable. `loop_xy` is the session's BEST-LAP loop (ordered local-metre points): a
+    closed curve, so the stored loop is aligned to it by cyclic arc-length correspondence
+    (see `fit_loop_to_loop`). Prints the winning fit RMS + footprint coverage."""
     norm = _load_normalized()
-    if norm is None or aggregate_xy is None or len(aggregate_xy) < 10:
+    if norm is None or loop_xy is None or len(loop_xy) < 10:
         return np.empty((0, 2))
-    agg = np.asarray(aggregate_xy, float)
-    ref = _resample(norm, 600)
-
-    # Rough seed: match centroids and bbox scale (the cloud is roughly the track footprint).
-    a_c, r_c = agg.mean(0), ref.mean(0)
-    a_span = np.hypot(*(agg.max(0) - agg.min(0)))
-    r_span = np.hypot(*(ref.max(0) - ref.min(0))) or 1.0
-    s0 = a_span / r_span
-    cur = (ref - r_c) * s0 + a_c
-
-    # ICP: assign each centerline point its nearest aggregate point, refit similarity, iterate.
-    for _ in range(40):
-        # nearest aggregate point for each centerline point
-        d2 = ((cur[:, None, 0] - agg[None, :, 0]) ** 2
-              + (cur[:, None, 1] - agg[None, :, 1]) ** 2)
-        nn = agg[np.argmin(d2, axis=1)]
-        scale, R, t = _similarity_fit(ref, nn)
-        new = (scale * (ref @ R.T)) + t
-        if np.max(np.hypot(*(new - cur).T)) < 1e-3:
-            cur = new
-            break
-        cur = new
-    return cur
+    fitted, info = fit_loop_to_loop(norm, loop_xy)
+    print(f"[reference] MK centerline fit: RMS {info['rms']:.1f} m, "
+          f"{info['coverage']:.0%} of best-lap points within {COVERAGE_TOL_M:.0f} m",
+          flush=True)
+    return fitted
