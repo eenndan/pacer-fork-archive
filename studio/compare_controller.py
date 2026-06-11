@@ -33,13 +33,6 @@ if TYPE_CHECKING:  # injected collaborators — typed for readers, not imported 
     from .session import Session
     from .video_view import VideoView
 
-# Seek a few ms INTO a lap rather than onto its exact start, so the whole-ms seek quantization
-# can't land the position just before the (contiguous) lap boundary and resolve to the previous
-# lap. Far smaller than a frame; invisible in a ~70 s lap. (Mirrors StudioWindow's identically-
-# valued lap-table seek nudge — kept local to avoid an import cycle with app.py.)
-_LAP_SEEK_NUDGE_S = 0.010
-
-
 class CompareController:
     def __init__(
         self,
@@ -134,12 +127,14 @@ class CompareController:
         self._set_pane_badge(1, self.session.delta_between(b, a, t_b))
 
     def _set_pane_badge(self, side: int, d: float | None) -> None:
-        """Format + colour a pane's "Δ vs other" badge (+behind / −ahead vs the other pane's lap)."""
+        """Format + colour a pane's "Δ vs other" badge (+behind / −ahead vs the other pane's lap).
+        Colour via the shared three-way rule (theme.delta_colour): green/red only when
+        meaningfully ahead/behind; a dead-even |Δ| <= theme.DELTA_EVEN_EPS_S (like no delta at
+        all) keeps the badge's neutral foreground — an exact 0 used to read GREEN."""
         if d is None:
             self.video.set_pane_badge(side, "Δ —", None)
         else:
-            colour = theme.C.ahead if d <= 0 else theme.C.behind
-            self.video.set_pane_badge(side, f"Δ {d:+.2f} s", colour)
+            self.video.set_pane_badge(side, f"Δ {d:+.2f} s", theme.delta_colour(d))
 
     # ------------------------------------------------------------------ enter / exit
     def on_toggled(self, on: bool) -> None:
@@ -236,11 +231,12 @@ class CompareController:
 
     # ------------------------------------------------------------------ pane S/F realign
     def _seek_pane_to_lap_start(self, side: int, lap_id: int) -> None:
-        """Seek one pane to a hair INTO its lap (the _LAP_SEEK_NUDGE_S nudge keeps the ms-quantized
-        position inside the lap, mirroring the lap-table seek), so it parks on the lap's start."""
+        """Seek one pane to a hair INTO its lap (the theme.LAP_SEEK_NUDGE_S nudge keeps the
+        ms-quantized position inside the lap, mirroring the lap-table seek), so it parks on the
+        lap's start."""
         window = self.session.lap_window(lap_id)
         if window is not None:
-            self.video.seek_pane(side, window[0] + _LAP_SEEK_NUDGE_S)
+            self.video.seek_pane(side, window[0] + theme.LAP_SEEK_NUDGE_S)
 
     def _reset_pair_to_start(self) -> None:
         """The user's main pain was getting both videos to start together. So EVERY change to the

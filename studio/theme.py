@@ -13,6 +13,10 @@ Public surface:
     ui_font(size, weight)   — the UI sans face (Inter / system fallback).
     mono_font(size, weight) — a tabular-figures face for numerics (tnum on Inter when Qt ≥ 6.7,
                               else a mono numeric stack).
+    delta_colour(d)   — the shared three-way Δ-readout colour (ahead/behind/neutral, with the
+                        ±DELTA_EVEN_EPS_S dead band) used by the Δ box and the compare badges.
+    LAP_SEEK_NUDGE_S  — the shared seek-into-a-lap nudge (an interaction constant, hosted here
+                        because this is the one pacer-free module every control layer imports).
 """
 
 from __future__ import annotations
@@ -73,6 +77,34 @@ CHART_SERIES = [
 #   BEST lap curve     -> C.ahead  (the same green the lap table marks the best lap with)
 #   additional laps    -> CHART_SERIES in order (the amber accent is the first categorical entry)
 SERIES_BEST = C.ahead              # green — matches the lap table's best-lap colour
+
+
+# --- shared Δ-readout semantics -------------------------------------------------------------
+# A Δ readout is displayed to 0.01 s, so a |Δ| at/below half a displayed centisecond is "even" —
+# neither ahead nor behind. Without the dead band an exact 0.00 coloured GREEN (the old `d <= 0`
+# branch), which misread "dead even with best" as "ahead".
+DELTA_EVEN_EPS_S = 0.005
+
+
+def delta_colour(d: float | None) -> str | None:
+    """The ONE three-way Δ colour rule, shared by the always-on Δ box (app._update_diff_box)
+    and the compare panes' Δ badges (CompareController._set_pane_badge): C.ahead (green) when
+    meaningfully ahead (d < -DELTA_EVEN_EPS_S), C.behind (red) when behind (d > +eps), and
+    None — "no semantic colour, use the widget's neutral foreground" — for no delta at all or
+    a dead-even |d| <= eps."""
+    if d is None or abs(d) <= DELTA_EVEN_EPS_S:
+        return None
+    return C.ahead if d < 0 else C.behind
+
+
+# --- shared interaction constants ------------------------------------------------------------
+# Seek a few ms INTO a lap rather than onto its exact start: laps are contiguous (lap N's finish
+# == lap N+1's start) and the player quantizes seeks to whole ms, so a seek to the exact boundary
+# can land a few tenths of a ms BELOW it and resolve to the PREVIOUS lap. Far smaller than a
+# frame; invisible in a ~70 s lap. Shared by the lap-table seek (app) and the compare panes'
+# seek-to-lap-start (compare_controller) — hosted here, the neutral pacer-free module both
+# already import, to avoid an app<->controller import cycle.
+LAP_SEEK_NUDGE_S = 0.010
 
 
 # --- type scale (px) ---

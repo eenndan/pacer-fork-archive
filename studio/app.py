@@ -37,11 +37,6 @@ from .scrub_controller import ScrubController
 from .session import DEFAULT_SAMPLE, Session, fmt_time
 from .video_view import VideoView
 
-# When a lap is selected we seek a few ms INTO it rather than onto its exact start, so the
-# whole-ms seek quantization can't land the playback position just before the (contiguous) lap
-# boundary and resolve to the previous lap. Far smaller than a frame; invisible in a ~70 s lap.
-_LAP_SEEK_NUDGE_S = 0.010
-
 
 class StudioWindow(QMainWindow):
     def __init__(self, paths: list[str], full: bool = False):
@@ -518,10 +513,10 @@ class StudioWindow(QMainWindow):
             # (setPosition takes int(seconds*1000)), so a seek to the exact boundary lands a few
             # tenths of a ms BELOW it — which then resolves to the PREVIOUS lap and makes the
             # ▶ marker / map / auto-follow jump back one lap (the reported "clicking a lap selects
-            # a different lap" bug). Nudging by _LAP_SEEK_NUDGE_S (a few ms, imperceptible in a
-            # ~70 s lap) guarantees the ms-quantized playback position lands INSIDE the lap, so
-            # lap_at_time(position) == the lap the user clicked.
-            target = self.session.lap_window(min(ids))[0] + _LAP_SEEK_NUDGE_S
+            # a different lap" bug). Nudging by theme.LAP_SEEK_NUDGE_S (a few ms, imperceptible
+            # in a ~70 s lap) guarantees the ms-quantized playback position lands INSIDE the lap,
+            # so lap_at_time(position) == the lap the user clicked.
+            target = self.session.lap_window(min(ids))[0] + theme.LAP_SEEK_NUDGE_S
             self.video.seek(target)
             # Don't let the auto-follow collapse a just-made (possibly multi-lap) comparison the
             # instant the seek's positionChanged lands: seed _followed_lap to the lap the seek
@@ -651,11 +646,13 @@ class StudioWindow(QMainWindow):
             # +behind / −ahead vs best, at the same track position.
             delta_txt = f"Δ {d:+.2f} s"
         speed_txt = f"{sp:.0f} km/h" if sp is not None else "— km/h"
-        # Colour cue: green when up on best (ahead), red when down (behind), primary text when no
-        # delta. The card's surface bg / font / border come from the global QSS (#DiffBox); a
-        # per-widget `color` rule merges over it and overrides ONLY the foreground (no per-tick
-        # background/border re-layout cost), and only when the colour actually changes.
-        colour = theme.C.text if d is None else (theme.C.ahead if d <= 0 else theme.C.behind)
+        # Colour cue: the shared three-way rule (theme.delta_colour) — green when meaningfully up
+        # on best, red when down, and the primary text colour when there's no delta OR it's dead
+        # even (|Δ| within ±theme.DELTA_EVEN_EPS_S; an exact 0 used to read GREEN). The card's
+        # surface bg / font / border come from the global QSS (#DiffBox); a per-widget `color`
+        # rule merges over it and overrides ONLY the foreground (no per-tick background/border
+        # re-layout cost), and only when the colour actually changes.
+        colour = theme.delta_colour(d) or theme.C.text
         self.diff_box.setText(f"{delta_txt}     {speed_txt}")
         if colour != getattr(self, "_diff_colour", None):
             self._diff_colour = colour
