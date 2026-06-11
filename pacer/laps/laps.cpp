@@ -10,10 +10,11 @@
 #include <pacer/geometry/geometry.hpp>
 #include <pacer/laps/point-track.hpp>
 
-// The gap-aware SegmentDistance + the CumulativeDistances prefix sum now live in PointTrack
-// (pacer/laps/point-track.hpp), which OWNS the point track and its coordinate system. Laps
-// delegates point/distance operations to track_ and uses its boundary-chord helper for the
-// start/finish partial segments, keeping lap/sector segmentation on top.
+// The gap-aware SegmentDistance + the CumulativeDistances prefix sum now live
+// in PointTrack (pacer/laps/point-track.hpp), which OWNS the point track and
+// its coordinate system. Laps delegates point/distance operations to track_ and
+// uses its boundary-chord helper for the start/finish partial segments, keeping
+// lap/sector segmentation on top.
 
 namespace {
 // Bounds guard for the Python-bound scalar accessors (LapTime, StartTimestamp,
@@ -31,11 +32,12 @@ void CheckIndex(const char *accessor, size_t index, size_t size) {
                             std::to_string(size));
 }
 
-// The single column-materialization loop shared by LapColumns and TrackColumns: project a run
-// of points into `cs` and fill the four point-derived columns (times, local-metre xs/ys,
-// full_speed). The fifth column (cum_distances) is NOT filled here because its source differs
-// by caller — LapColumns moves the materialized lap's per-lap odometer across, TrackColumns
-// copies the track's whole-trace odometer — each caller attaches its own.
+// The single column-materialization loop shared by LapColumns and TrackColumns:
+// project a run of points into `cs` and fill the four point-derived columns
+// (times, local-metre xs/ys, full_speed). The fifth column (cum_distances) is
+// NOT filled here because its source differs by caller — LapColumns moves the
+// materialized lap's per-lap odometer across, TrackColumns copies the track's
+// whole-trace odometer — each caller attaches its own.
 pacer::LapArrays
 PointColumns(const pacer::CoordinateSystem &cs,
              std::span<const pacer::PointInTime<pacer::GPSSample>> points) {
@@ -57,12 +59,13 @@ PointColumns(const pacer::CoordinateSystem &cs,
 } // namespace
 
 void pacer::Laps::Update() {
-  // Re-segment only when something that feeds the segmentation changed. The timing-line sentinels
-  // catch a start_line/sector_lines edit; segmentation_dirty_ catches the OTHER input — the point
-  // track / coordinate system (set by AddPoint/ClearPoints/SetCoordinateSystem). Without the latter
-  // a re-segment after the points changed but the timing lines did NOT would early-out and keep
-  // STALE lap_chunks_ pointing at the old track (the cache-staleness bug). All three must be
-  // unchanged to skip.
+  // Re-segment only when something that feeds the segmentation changed. The
+  // timing-line sentinels catch a start_line/sector_lines edit;
+  // segmentation_dirty_ catches the OTHER input — the point track / coordinate
+  // system (set by AddPoint/ClearPoints/SetCoordinateSystem). Without the
+  // latter a re-segment after the points changed but the timing lines did NOT
+  // would early-out and keep STALE lap_chunks_ pointing at the old track (the
+  // cache-staleness bug). All three must be unchanged to skip.
   if (!segmentation_dirty_ && sectors.start_line == dirty_start_line_ &&
       sectors.sector_lines == dirty_sector_lines_)
     return;
@@ -77,10 +80,12 @@ void pacer::Laps::Update() {
   if (track_.PointCount() == 0)
     return;
 
-  // With no intermediate sector lines there are no sectors to record: the rotating "sector line"
-  // would otherwise fall back to the start line (sector_index == -1) and record every start-line
-  // crossing as a phantom sector. SectorCount() is already 0 in that case; this keeps the recorded
-  // sector_chunks_ consistent with it (RecordedSectors() == 0) instead of carrying start crossings.
+  // With no intermediate sector lines there are no sectors to record: the
+  // rotating "sector line" would otherwise fall back to the start line
+  // (sector_index == -1) and record every start-line crossing as a phantom
+  // sector. SectorCount() is already 0 in that case; this keeps the recorded
+  // sector_chunks_ consistent with it (RecordedSectors() == 0) instead of
+  // carrying start crossings.
   const bool has_sectors = !sectors.sector_lines.empty();
 
   const CoordinateSystem &cs_ = track_.Cs();
@@ -119,9 +124,10 @@ void pacer::Laps::Update() {
     }
 
     auto lap_split = Split(global_start, previous, current);
-    // Only test the rotating sector line when there ARE intermediate sector lines; otherwise the
-    // line is the start line and every crossing would be recorded as a phantom sector (see the
-    // has_sectors note above). With no sector lines this stays empty -> nothing recorded.
+    // Only test the rotating sector line when there ARE intermediate sector
+    // lines; otherwise the line is the start line and every crossing would be
+    // recorded as a phantom sector (see the has_sectors note above). With no
+    // sector lines this stays empty -> nothing recorded.
     auto sector_split =
         has_sectors ? Split(global_sector, previous, current) : std::nullopt;
 
@@ -134,9 +140,9 @@ void pacer::Laps::Update() {
       }
 
       lap_chunks_.push_back(LapChunk{.start = *lap_split,
-                               .finish = *lap_split,
-                               .start_index = i,
-                               .finish_index = i});
+                                     .finish = *lap_split,
+                                     .start_index = i,
+                                     .finish_index = i});
     }
 
     if (sector_split) {
@@ -203,10 +209,11 @@ auto pacer::Laps::MinMax() const -> std::pair<Point, Point> {
 double pacer::Laps::LapChunk::Time() const { return finish.time - start.time; }
 
 double pacer::Laps::GetLapDistance(size_t lap) const {
-  // Uses the track's single coordinate system for ALL terms (via track_.ChordDistance /
-  // track_.DistanceBetween) so the result is coherent with the cached cumulative odometer
-  // (built from that same cs). (The old vestigial `cs` param was removed; it was always
-  // ignored in favour of the member coordinate system.)
+  // Uses the track's single coordinate system for ALL terms (via
+  // track_.ChordDistance / track_.DistanceBetween) so the result is coherent
+  // with the cached cumulative odometer (built from that same cs). (The old
+  // vestigial `cs` param was removed; it was always ignored in favour of the
+  // member coordinate system.)
   //
   // This must equal the lap's true traversed distance as modelled by
   // GetLap()/FillDistances, whose materialized points are:
@@ -215,7 +222,8 @@ double pacer::Laps::GetLapDistance(size_t lap) const {
   // The previous implementation summed cum[finish_index] - cum[start_index] and
   // joined points_[finish_index] -> finish, over-counting exactly one segment.
   // Uses SegmentDistance (gap-aware, same as cum_point_dist_ and FillDistances)
-  // for the two partial chords so this AGREES exactly with GetLap().cum_distances.
+  // for the two partial chords so this AGREES exactly with
+  // GetLap().cum_distances.
   CheckIndex("GetLapDistance", lap, lap_chunks_.size());
   const LapChunk &chunk = lap_chunks_[lap];
   const size_t start_index = chunk.start_index;
@@ -228,12 +236,14 @@ double pacer::Laps::GetLapDistance(size_t lap) const {
     return track_.ChordDistance(chunk.start, chunk.finish);
   }
 
-  // start -> first interior point, then the bulk over the interior interpolation
-  // points [start_index, finish_index), then the partial chord from the last
-  // interior point to the finish crossing.
-  double distance = track_.ChordDistance(chunk.start, track_.Point(start_index));
+  // start -> first interior point, then the bulk over the interior
+  // interpolation points [start_index, finish_index), then the partial chord
+  // from the last interior point to the finish crossing.
+  double distance =
+      track_.ChordDistance(chunk.start, track_.Point(start_index));
   distance += track_.DistanceBetween(start_index, finish_index - 1);
-  distance += track_.ChordDistance(track_.Point(finish_index - 1), chunk.finish);
+  distance +=
+      track_.ChordDistance(track_.Point(finish_index - 1), chunk.finish);
 
   return distance;
 }
@@ -280,9 +290,10 @@ pacer::Lap pacer::Laps::GetLap(size_t lap) const {
   // cum_distances[1 + k]  = cap0 + (cum_point_dist_[start_index + k]
   //                                 - cum_point_dist_[start_index])  (interior)
   // cum_distances[last]   = prev + SegmentDistance(last interior point, finish)
-  // cum_point_dist_ already aggregates the interior steps with the same gap-aware
-  // SegmentDistance; the two partial (start/finish) chords are not covered by it
-  // and are added explicitly with the SAME SegmentDistance FillDistances used.
+  // cum_point_dist_ already aggregates the interior steps with the same
+  // gap-aware SegmentDistance; the two partial (start/finish) chords are not
+  // covered by it and are added explicitly with the SAME SegmentDistance
+  // FillDistances used.
   std::vector<double> cum_distances;
   cum_distances.reserve(points.size());
   cum_distances.push_back(0.0);
@@ -295,9 +306,9 @@ pacer::Lap pacer::Laps::GetLap(size_t lap) const {
       cum_distances.push_back(
           cap0 + track_.DistanceBetween(start_index, start_index + k));
     }
-    cum_distances.push_back(cum_distances.back() +
-                            track_.ChordDistance(track_.Point(finish_index - 1),
-                                                 chunk.finish));
+    cum_distances.push_back(
+        cum_distances.back() +
+        track_.ChordDistance(track_.Point(finish_index - 1), chunk.finish));
   } else {
     // Degenerate lap: points == [start, finish]; single chord between them.
     cum_distances.push_back(track_.ChordDistance(chunk.start, chunk.finish));
@@ -308,28 +319,32 @@ pacer::Lap pacer::Laps::GetLap(size_t lap) const {
 }
 
 pacer::LapArrays pacer::Laps::LapColumns(size_t lap) const {
-  // Materialize the lap exactly as GetLap does (interpolated start crossing + interior track
-  // points + interpolated finish crossing, with the gap-aware cum_distances), then project each
-  // point into the laps' OWN coordinate system via the shared PointColumns loop. Reusing GetLap
-  // guarantees the points and cum_distances are byte-identical to the per-element studio path
-  // (which read GetLap()'s .points / .cum_distances); the only added work is the Local()
-  // projection, which the studio layer did per point anyway — now batched into this single
-  // crossing.
-  Lap materialized = GetLap(lap); // out-of-range -> empty Lap -> empty columns below
+  // Materialize the lap exactly as GetLap does (interpolated start crossing +
+  // interior track points + interpolated finish crossing, with the gap-aware
+  // cum_distances), then project each point into the laps' OWN coordinate
+  // system via the shared PointColumns loop. Reusing GetLap guarantees the
+  // points and cum_distances are byte-identical to the per-element studio path
+  // (which read GetLap()'s .points / .cum_distances); the only added work is
+  // the Local() projection, which the studio layer did per point anyway — now
+  // batched into this single crossing.
+  Lap materialized =
+      GetLap(lap); // out-of-range -> empty Lap -> empty columns below
   LapArrays cols = PointColumns(track_.Cs(), materialized.points);
-  // The lap's per-point odometer is already built by GetLap (size == points.size()); move it
-  // across verbatim so cum_distances matches Lap::cum_distances exactly.
+  // The lap's per-point odometer is already built by GetLap (size ==
+  // points.size()); move it across verbatim so cum_distances matches
+  // Lap::cum_distances exactly.
   cols.cum_distances = std::move(materialized.cum_distances);
   return cols;
 }
 
 pacer::LapArrays pacer::Laps::TrackColumns() const {
-  // The same materialization as LapColumns, but over the WHOLE raw point track: the shared
-  // PointColumns loop projects every track point, and the distance column is the track's own
-  // gap-aware cumulative odometer (CumulativeDistance reads the cached — self-healing if
-  // dirty — prefix sum, the very array GetLap's interior distances are sliced from). The loop
-  // bound is PointCount(), so an empty track yields all-empty columns: the odometer's internal
-  // {0} seed never becomes a row (header contract).
+  // The same materialization as LapColumns, but over the WHOLE raw point track:
+  // the shared PointColumns loop projects every track point, and the distance
+  // column is the track's own gap-aware cumulative odometer (CumulativeDistance
+  // reads the cached — self-healing if dirty — prefix sum, the very array
+  // GetLap's interior distances are sliced from). The loop bound is
+  // PointCount(), so an empty track yields all-empty columns: the odometer's
+  // internal {0} seed never becomes a row (header contract).
   LapArrays cols = PointColumns(track_.Cs(), track_.Points());
   const size_t n = track_.PointCount();
   cols.cum_distances.reserve(n);
@@ -365,10 +380,11 @@ size_t pacer::Laps::LapsCount() const { return lap_chunks_.size(); }
 
 void pacer::Laps::ClearSectors() { sectors.sector_lines.clear(); }
 
-// Point/distance operations delegate to the owned PointTrack (which carries the same
-// AddPoint/SetCoordinateSystem/ClearPoints semantics and invariants documented there). Each also
-// marks the segmentation dirty so the next Update() re-segments against the changed track even when
-// the timing lines were not touched (the timing-line sentinels alone would otherwise early-out).
+// Point/distance operations delegate to the owned PointTrack (which carries the
+// same AddPoint/SetCoordinateSystem/ClearPoints semantics and invariants
+// documented there). Each also marks the segmentation dirty so the next
+// Update() re-segments against the changed track even when the timing lines
+// were not touched (the timing-line sentinels alone would otherwise early-out).
 void pacer::Laps::AddPoint(GPSSample s, double t) {
   track_.AddPoint(s, t);
   segmentation_dirty_ = true;
@@ -393,9 +409,10 @@ size_t pacer::Laps::RecordedSectors() const { return sector_chunks_.size(); }
 size_t pacer::Lap::Count() const { return points.size(); }
 
 void pacer::Lap::FillDistances(const CoordinateSystem &cs) {
-  // Gap-aware (see PointTrack::SegmentDistance): a GPS chord across a dropout cuts the corner and
-  // under-counts, so a long time-step uses the speed integral instead. Keeps the per-lap odometer
-  // the Python delta/sector math reads consistent with GetLapDistance. The accumulation loop is
+  // Gap-aware (see PointTrack::SegmentDistance): a GPS chord across a dropout
+  // cuts the corner and under-counts, so a long time-step uses the speed
+  // integral instead. Keeps the per-lap odometer the Python delta/sector math
+  // reads consistent with GetLapDistance. The accumulation loop is
   // single-sourced in PointTrack::CumulativeDistances.
   cum_distances = PointTrack::CumulativeDistances(cs, points);
 }

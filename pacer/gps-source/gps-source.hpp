@@ -14,12 +14,13 @@ namespace pacer {
 // Being raw in this context means that it does not provide any meaningful
 // timestamps to work with.
 //
-// RETURN-CODE CONVENTION: every uint32_t-returning method (ReadSamples, Seek) uses GoPro
-// GPMF-parser error codes — 0 (GPMF_OK) is success, any nonzero value is a GPMF_ERROR_*
-// diagnostic (e.g. GPMFSource::ReadSamples returns GPMF_ERROR_MEMORY == 1 when the current
-// index has no payload). Callers only distinguish zero from nonzero — no caller branches on a
-// specific error code — so sources implemented outside the parser (tests, Python subclasses)
-// can simply return 0 for success and any nonzero value for "nothing here".
+// RETURN-CODE CONVENTION: every uint32_t-returning method (ReadSamples, Seek)
+// uses GoPro GPMF-parser error codes — 0 (GPMF_OK) is success, any nonzero
+// value is a GPMF_ERROR_* diagnostic (e.g. GPMFSource::ReadSamples returns
+// GPMF_ERROR_MEMORY == 1 when the current index has no payload). Callers only
+// distinguish zero from nonzero — no caller branches on a specific error code —
+// so sources implemented outside the parser (tests, Python subclasses) can
+// simply return 0 for success and any nonzero value for "nothing here".
 class RawGPSSource {
 public:
   RawGPSSource() = default;
@@ -27,28 +28,33 @@ public:
 
   // Main interface to take samples from current GPS source.
   //
-  // Invokes `on_sample(sample, current_index, total_records)` once per GPS fix decoded from
-  // the payload the cursor is currently on (Seek/Next position it). Returns 0 on success, a
-  // nonzero error code otherwise (e.g. no payload at the current index).
+  // Invokes `on_sample(sample, current_index, total_records)` once per GPS fix
+  // decoded from the payload the cursor is currently on (Seek/Next position
+  // it). Returns 0 on success, a nonzero error code otherwise (e.g. no payload
+  // at the current index).
   //
-  // Virtual via std::function — the same idiom as ReadAccl/ReadGrav/ReadCori — so a
-  // Python-implemented RawGPSSource can override it through the binding trampoline and feed
-  // GPS samples into the engine (e.g. as a child of a C++ SequentialGPSSource chain). The
-  // former raw data-pointer + function-pointer `Samples` virtual could not be trampolined, so
-  // Python overrides silently emitted nothing. Default (RawGPSSource) emits nothing and
-  // returns 0; GPMFSource / SequentialGPSSource override.
+  // Virtual via std::function — the same idiom as ReadAccl/ReadGrav/ReadCori —
+  // so a Python-implemented RawGPSSource can override it through the binding
+  // trampoline and feed GPS samples into the engine (e.g. as a child of a C++
+  // SequentialGPSSource chain). The former raw data-pointer + function-pointer
+  // `Samples` virtual could not be trampolined, so Python overrides silently
+  // emitted nothing. Default (RawGPSSource) emits nothing and returns 0;
+  // GPMFSource / SequentialGPSSource override.
   virtual uint32_t
   ReadSamples(std::function<void(GPSSample, uint32_t, uint32_t)> on_sample);
 
-  // Reads the timestamped IMU streams (accelerometer / gravity vector) for the WHOLE source.
-  // Each sample carries a `time` on the MEDIA clock (seconds), interpolated across the
-  // payload span like the research `dump_imu.c` does, so it lines up with the GPS payload
-  // spans and the video. Multi-chapter sources shift later chapters by the cumulative
-  // duration (see SequentialGPSSource), so the times come out on one continuous global clock.
-  // Default (RawGPSSource) is a no-op; GPMFSource / SequentialGPSSource override.
+  // Reads the timestamped IMU streams (accelerometer / gravity vector) for the
+  // WHOLE source. Each sample carries a `time` on the MEDIA clock (seconds),
+  // interpolated across the payload span like the research `dump_imu.c` does,
+  // so it lines up with the GPS payload spans and the video. Multi-chapter
+  // sources shift later chapters by the cumulative duration (see
+  // SequentialGPSSource), so the times come out on one continuous global clock.
+  // Default (RawGPSSource) is a no-op; GPMFSource / SequentialGPSSource
+  // override.
   //
   // ACCL: 3-axis accelerometer in m/s^2 (native order Z,X,Y).
-  // GRAV: gravity unit vector (native order; permuted vs ACCL — resolved in the studio layer).
+  // GRAV: gravity unit vector (native order; permuted vs ACCL — resolved in the
+  // studio layer).
   virtual void ReadAccl(std::function<void(IMUSample)> /*on_sample*/) {}
   virtual void ReadGrav(std::function<void(IMUSample)> /*on_sample*/) {}
   // CORI: camera-orientation quaternion (w,x,y,z), ~60 Hz, media-clock time.
@@ -79,9 +85,10 @@ public:
 //       with option to iterate over GPSSample-s on top of it.
 class GPMFSource : public RawGPSSource {
 public:
-  // C++-ONLY: adopt an already-opened gpmf-parser MP4 handle. Excluded from the Python
-  // bindings (generate-bindings.py fn_exclude_by_name_and_signature) — a junk integer from
-  // Python would be dereferenced as a raw mp4 object pointer and segfault the process.
+  // C++-ONLY: adopt an already-opened gpmf-parser MP4 handle. Excluded from the
+  // Python bindings (generate-bindings.py fn_exclude_by_name_and_signature) — a
+  // junk integer from Python would be dereferenced as a raw mp4 object pointer
+  // and segfault the process.
   explicit GPMFSource(size_t mp4handle);
   explicit GPMFSource(const char *filename);
   ~GPMFSource() noexcept;
@@ -110,16 +117,19 @@ public:
   double GetTotalDuration() const override;
 
 private:
-  // Reads one 4-element-or-fewer GPMF stream over all payloads, emitting per-sample
-  // media-clock-timestamped values. `emit(values[4], n_elems, time)` is called per sample.
-  void ReadStream(uint32_t fourcc,
-                  const std::function<void(const double * /*vals*/, uint32_t /*nelem*/,
-                                           double /*time*/)> &emit) const;
+  // Reads one 4-element-or-fewer GPMF stream over all payloads, emitting
+  // per-sample media-clock-timestamped values. `emit(values[4], n_elems, time)`
+  // is called per sample.
+  void ReadStream(
+      uint32_t fourcc,
+      const std::function<void(const double * /*vals*/, uint32_t /*nelem*/,
+                               double /*time*/)> &emit) const;
   uint32_t index_ = 0;
   size_t mp4handle_;
-  // Owned GPMF payload resource (resObject+buffer): allocated lazily on first use and REUSED
-  // across ReadSamples()/ReadStream() calls (GetPayloadResource grows it in place), then freed
-  // in the destructor. Previously each call leaked a fresh resource. 0 == not yet allocated.
+  // Owned GPMF payload resource (resObject+buffer): allocated lazily on first
+  // use and REUSED across ReadSamples()/ReadStream() calls (GetPayloadResource
+  // grows it in place), then freed in the destructor. Previously each call
+  // leaked a fresh resource. 0 == not yet allocated.
   mutable size_t payload_res_ = 0;
 };
 
@@ -149,11 +159,12 @@ public:
   std::pair<double, double> CurrentTimeSpan() const override;
 
 private:
-  // Reads one IMU stream across both children, shifting the right (later) chapter's samples by
-  // the left subtree's cumulative duration so everything lands on one continuous global media
-  // clock. `read` is the per-source reader verb (ReadAccl/ReadGrav/ReadCori); `S` is the sample
-  // type, which must carry a `.time` field. left_ may itself be a SequentialGPSSource, so
-  // delegating through `read` recurses correctly.
+  // Reads one IMU stream across both children, shifting the right (later)
+  // chapter's samples by the left subtree's cumulative duration so everything
+  // lands on one continuous global media clock. `read` is the per-source reader
+  // verb (ReadAccl/ReadGrav/ReadCori); `S` is the sample type, which must carry
+  // a `.time` field. left_ may itself be a SequentialGPSSource, so delegating
+  // through `read` recurses correctly.
   template <class S, class Read>
   void ReadShifted(Read read, const std::function<void(S)> &on_sample) {
     (left_->*read)(on_sample);

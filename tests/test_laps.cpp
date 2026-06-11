@@ -52,19 +52,22 @@ Laps MakeThreeLapTrack(const CoordinateSystem &cs) {
   return laps;
 }
 
-// A clean UNIDIRECTIONAL loop, traversed twice, for sector segmentation. Each lap runs the
-// bottom edge left -> right (crossing the verticals x = 0, 10, 20 in order), up the right side,
-// the top edge right -> left, then down the left side to close. The start line is TALL (crossed
-// on both the bottom and top edges, so it bounds the laps), while the two sector lines are SHORT
-// (y in [-5, 5]) so they're crossed only once per lap on the bottom edge — giving an unambiguous
-// start -> sector1 -> sector2 -> start ordering (unlike the alternating-direction MakeThreeLapTrack,
-// where the reversed sweeps cross the verticals out of order).
+// A clean UNIDIRECTIONAL loop, traversed twice, for sector segmentation. Each
+// lap runs the bottom edge left -> right (crossing the verticals x = 0, 10, 20
+// in order), up the right side, the top edge right -> left, then down the left
+// side to close. The start line is TALL (crossed on both the bottom and top
+// edges, so it bounds the laps), while the two sector lines are SHORT (y in
+// [-5, 5]) so they're crossed only once per lap on the bottom edge — giving an
+// unambiguous start -> sector1 -> sector2 -> start ordering (unlike the
+// alternating-direction MakeThreeLapTrack, where the reversed sweeps cross the
+// verticals out of order).
 Laps MakeSectorLoop(const CoordinateSystem &cs) {
   Laps laps;
   double t = 0;
   auto add = [&](double x, double y) {
     GPSSample s = cs.Global(Vec3f{x, y, 0});
-    s.full_speed = 20.0; // a finite, plausible entry speed for the *EntrySpeed accessors.
+    s.full_speed =
+        20.0; // a finite, plausible entry speed for the *EntrySpeed accessors.
     laps.AddPoint(s, t++);
   };
   for (int lap = 0; lap < 2; ++lap) {
@@ -127,30 +130,35 @@ TEST_CASE("Laps segments a synthetic track at every timing-line crossing",
   }
 }
 
-TEST_CASE("Laps segments each lap into sectors at the intermediate timing lines",
-          "[laps]") {
+TEST_CASE(
+    "Laps segments each lap into sectors at the intermediate timing lines",
+    "[laps]") {
   GPSSample origin{.lat = 40.0, .lon = -74.0, .altitude = 0};
   CoordinateSystem cs(origin);
 
   Laps laps = MakeSectorLoop(cs);
 
-  // Tall start line (crossed on both edges) + two SHORT intermediate sector lines at x = 10, 20
-  // (crossed only on the bottom edge). Two intermediate lines divide each lap into 3 sectors.
+  // Tall start line (crossed on both edges) + two SHORT intermediate sector
+  // lines at x = 10, 20 (crossed only on the bottom edge). Two intermediate
+  // lines divide each lap into 3 sectors.
   laps.sectors.start_line = Segment{Point{0, -50}, Point{0, 50}};
   laps.sectors.sector_lines = {Segment{Point{10, -5}, Point{10, 5}},
                                Segment{Point{20, -5}, Point{20, 5}}};
   laps.Update();
 
-  // SectorCount() is the number of intermediate timing lines (2). The lap is divided into
-  // 3 sector chunks (start->s1, s1->s2, s2->start); the recorded-sector run carries each.
+  // SectorCount() is the number of intermediate timing lines (2). The lap is
+  // divided into 3 sector chunks (start->s1, s1->s2, s2->start); the
+  // recorded-sector run carries each.
   REQUIRE(laps.SectorCount() == 2);
   REQUIRE(laps.LapsCount() >= 1);
-  // The boundary crossings recorded: at least the 3 that bound the first complete lap.
+  // The boundary crossings recorded: at least the 3 that bound the first
+  // complete lap.
   REQUIRE(laps.RecordedSectors() >= 3);
 
   SECTION("the three sector times of lap 0 sum to its lap time") {
-    // sectors_ records crossings of the rotating boundary in order: start, s1, s2, start, ...
-    // so recorded sectors 0,1,2 are exactly the three segments of lap 0.
+    // sectors_ records crossings of the rotating boundary in order: start, s1,
+    // s2, start, ... so recorded sectors 0,1,2 are exactly the three segments
+    // of lap 0.
     double sector_sum =
         laps.SectorTime(0) + laps.SectorTime(1) + laps.SectorTime(2);
     CHECK(sector_sum == Catch::Approx(laps.LapTime(0)).margin(1e-6));
@@ -176,12 +184,14 @@ TEST_CASE("Laps segments each lap into sectors at the intermediate timing lines"
   }
 }
 
-TEST_CASE("Gap-aware distance: speed integral fills a dropout chord", "[laps]") {
-  // A straight run along +x. With a normal ~0.1 s sample step the GPS chord is the right
-  // distance; across a long DROPOUT step the chord under-counts (the kart curved out and back,
-  // so the fixes are close in space but far in travel), so the speed integral 1/2 (v0+v1) dt
-  // is used instead. Build the per-lap odometer (Lap::FillDistances — the array the studio
-  // delta/sector math reads) directly and check the gap segment is the speed integral.
+TEST_CASE("Gap-aware distance: speed integral fills a dropout chord",
+          "[laps]") {
+  // A straight run along +x. With a normal ~0.1 s sample step the GPS chord is
+  // the right distance; across a long DROPOUT step the chord under-counts (the
+  // kart curved out and back, so the fixes are close in space but far in
+  // travel), so the speed integral 1/2 (v0+v1) dt is used instead. Build the
+  // per-lap odometer (Lap::FillDistances — the array the studio delta/sector
+  // math reads) directly and check the gap segment is the speed integral.
   GPSSample origin{.lat = 40.0, .lon = -74.0, .altitude = 0};
   CoordinateSystem cs(origin);
   auto sample = [&](double x, double y, double speed) {
@@ -191,20 +201,22 @@ TEST_CASE("Gap-aware distance: speed integral fills a dropout chord", "[laps]") 
   };
 
   SECTION("normal sampling uses the geometric chord") {
-    // 0.1 s steps, 2 m apart, 20 m/s — chord (2 m) == speed integral (20*0.1 = 2 m).
+    // 0.1 s steps, 2 m apart, 20 m/s — chord (2 m) == speed integral (20*0.1 =
+    // 2 m).
     Lap lap{.points = {{sample(0, 0, 20.0), 0.0},
-                              {sample(2, 0, 20.0), 0.1},
-                              {sample(4, 0, 20.0), 0.2}}};
+                       {sample(2, 0, 20.0), 0.1},
+                       {sample(4, 0, 20.0), 0.2}}};
     lap.FillDistances(cs);
     CHECK(lap.cum_distances.at(2) == Catch::Approx(4.0).margin(0.05));
   }
 
   SECTION("a dropout step is measured by the speed integral, not the chord") {
-    // Big time hole (1.0 s > 0.35 s gap): the kart kept moving at 20 m/s -> ~20 m travelled,
-    // but the two fixes are only 2 m apart in space. Chord = 2 m, speed integral = 20 m.
+    // Big time hole (1.0 s > 0.35 s gap): the kart kept moving at 20 m/s -> ~20
+    // m travelled, but the two fixes are only 2 m apart in space. Chord = 2 m,
+    // speed integral = 20 m.
     Lap lap{.points = {{sample(0, 0, 20.0), 0.0},
-                              {sample(2, 0, 20.0), 1.0},
-                              {sample(4, 0, 20.0), 1.1}}};
+                       {sample(2, 0, 20.0), 1.0},
+                       {sample(4, 0, 20.0), 1.1}}};
     lap.FillDistances(cs);
     // step 1 is the gap (dt = 1.0): speed integral 20 m, not the 2 m chord.
     CHECK(lap.cum_distances.at(1) == Catch::Approx(20.0).margin(0.5));
@@ -213,10 +225,10 @@ TEST_CASE("Gap-aware distance: speed integral fills a dropout chord", "[laps]") 
   }
 
   SECTION("a bad (zero) speed across a gap never shortens the chord") {
-    // Guard: if the reported speed is garbage (0) across a gap, fall back to the chord so the
-    // distance never DROPS below the straight-line distance between the gap mouths.
-    Lap lap{.points = {{sample(0, 0, 0.0), 0.0},
-                              {sample(30, 0, 0.0), 1.0}}};
+    // Guard: if the reported speed is garbage (0) across a gap, fall back to
+    // the chord so the distance never DROPS below the straight-line distance
+    // between the gap mouths.
+    Lap lap{.points = {{sample(0, 0, 0.0), 0.0}, {sample(30, 0, 0.0), 1.0}}};
     lap.FillDistances(cs);
     CHECK(lap.cum_distances.at(1) == Catch::Approx(30.0).margin(0.5));
   }
@@ -225,10 +237,10 @@ TEST_CASE("Gap-aware distance: speed integral fills a dropout chord", "[laps]") 
 TEST_CASE("GetLapDistance agrees with the GetLap/cum_distances model",
           "[laps]") {
   // Group 1 regression: the two distance code paths (the scalar GetLapDistance
-  // and the per-point GetLap().cum_distances) must AGREE, and GetLapDistance must
-  // no longer over-count the finish partial segment. The MakeThreeLapTrack laps
-  // run straight along x with 1 s steps and a vertical start line at x == 0, so
-  // each lap's geometry is hand-checkable.
+  // and the per-point GetLap().cum_distances) must AGREE, and GetLapDistance
+  // must no longer over-count the finish partial segment. The MakeThreeLapTrack
+  // laps run straight along x with 1 s steps and a vertical start line at x ==
+  // 0, so each lap's geometry is hand-checkable.
   GPSSample origin{.lat = 40.0, .lon = -74.0, .altitude = 0};
   CoordinateSystem cs(origin);
 
@@ -260,9 +272,10 @@ TEST_CASE("GetLapDistance agrees with the GetLap/cum_distances model",
 }
 
 TEST_CASE("ClearPoints then re-adding points is safe (was UB)", "[laps]") {
-  // Group 1 regression: ClearPoints() used to .clear() cum_point_dist_ (size 0),
-  // so the {0} seed the class relies on (index [0] / .back()) was gone. A later
-  // AddPoint / SetCoordinateSystem then indexed cum_point_dist_[0] out of bounds.
+  // Group 1 regression: ClearPoints() used to .clear() cum_point_dist_ (size
+  // 0), so the {0} seed the class relies on (index [0] / .back()) was gone. A
+  // later AddPoint / SetCoordinateSystem then indexed cum_point_dist_[0] out of
+  // bounds.
   GPSSample origin{.lat = 40.0, .lon = -74.0, .altitude = 0};
   CoordinateSystem cs(origin);
 
@@ -320,8 +333,8 @@ TEST_CASE("GetLap cum_distances match FillDistances (Group-2 perf refactor)",
 
   for (size_t lap = 0; lap < laps.LapsCount(); ++lap) {
     Lap got = laps.GetLap(lap);
-    // Independently recompute the odometer over the SAME points via the original
-    // FillDistances code path.
+    // Independently recompute the odometer over the SAME points via the
+    // original FillDistances code path.
     Lap ref{.points = got.points};
     ref.FillDistances(cs);
     REQUIRE(got.cum_distances.size() == ref.cum_distances.size());
@@ -354,54 +367,66 @@ TEST_CASE("Laps is safe on empty and tiny traces", "[laps]") {
   }
 }
 
-TEST_CASE("Interleaved AddPoint after SetCoordinateSystem yields correct distances (pass-2 #7)",
+TEST_CASE("Interleaved AddPoint after SetCoordinateSystem yields correct "
+          "distances (pass-2 #7)",
           "[laps]") {
-  // PointTrack used to defer ALL cumulative-distance computation to SetCoordinateSystem and only
-  // push a 0.0 placeholder in AddPoint. An AddPoint AFTER SetCoordinateSystem (with no re-set) thus
-  // left stale-ZERO cumulative distances for the appended points that no accessor repaired, so the
-  // lap distance came out short. PointTrack is now self-healing (a dirty flag rebuilds the odometer
-  // on demand in the distance accessors), so the OUT-OF-ORDER build must agree with the canonical
-  // add-all-then-set-once build. Same geometry, two construction orders.
+  // PointTrack used to defer ALL cumulative-distance computation to
+  // SetCoordinateSystem and only push a 0.0 placeholder in AddPoint. An
+  // AddPoint AFTER SetCoordinateSystem (with no re-set) thus left stale-ZERO
+  // cumulative distances for the appended points that no accessor repaired, so
+  // the lap distance came out short. PointTrack is now self-healing (a dirty
+  // flag rebuilds the odometer on demand in the distance accessors), so the
+  // OUT-OF-ORDER build must agree with the canonical add-all-then-set-once
+  // build. Same geometry, two construction orders.
   GPSSample origin{.lat = 40.0, .lon = -74.0, .altitude = 0};
   CoordinateSystem cs(origin);
   const Segment start_line{Point{0, -10}, Point{0, 10}};
 
-  // The 12 MakeThreeLapTrack vertices, replayed verbatim so the two orders are identical geometry.
-  struct XY { double x, y; };
-  const XY verts[] = {{-20, 0}, {-5, 0}, {5, 0},  {20, 0}, {20, 4},  {5, 4},
-                      {-5, 4},  {-20, 4}, {-20, 8}, {-5, 8}, {5, 8}, {20, 8}};
+  // The 12 MakeThreeLapTrack vertices, replayed verbatim so the two orders are
+  // identical geometry.
+  struct XY {
+    double x, y;
+  };
+  const XY verts[] = {{-20, 0}, {-5, 0},  {5, 0},   {20, 0}, {20, 4}, {5, 4},
+                      {-5, 4},  {-20, 4}, {-20, 8}, {-5, 8}, {5, 8},  {20, 8}};
 
-  // Canonical reference: add ALL points, THEN set the coordinate system once (the byte-identical
-  // path) — this is exactly MakeThreeLapTrack.
+  // Canonical reference: add ALL points, THEN set the coordinate system once
+  // (the byte-identical path) — this is exactly MakeThreeLapTrack.
   Laps canonical = MakeThreeLapTrack(cs);
   canonical.sectors.start_line = start_line;
   canonical.Update();
   REQUIRE(canonical.LapsCount() == 3);
 
-  // Interleaved: add the first half, SetCoordinateSystem, add the SECOND half (no re-set), Update.
+  // Interleaved: add the first half, SetCoordinateSystem, add the SECOND half
+  // (no re-set), Update.
   Laps interleaved;
   double t = 0;
   for (int i = 0; i < 6; ++i)
     interleaved.AddPoint(cs.Global(Vec3f{verts[i].x, verts[i].y, 0}), t++);
-  interleaved.SetCoordinateSystem(cs);  // set cs with only HALF the points present
+  interleaved.SetCoordinateSystem(
+      cs); // set cs with only HALF the points present
   for (int i = 6; i < 12; ++i)
     interleaved.AddPoint(cs.Global(Vec3f{verts[i].x, verts[i].y, 0}), t++);
-  // NOTE: deliberately NO second SetCoordinateSystem — this is the footgun path. The distance
-  // accessors must self-heal the odometer for the points added after the set.
+  // NOTE: deliberately NO second SetCoordinateSystem — this is the footgun
+  // path. The distance accessors must self-heal the odometer for the points
+  // added after the set.
   interleaved.sectors.start_line = start_line;
   interleaved.Update();
 
   REQUIRE(interleaved.LapsCount() == canonical.LapsCount());
   double interleaved_total = 0.0, canonical_total = 0.0;
   for (size_t lap = 0; lap < canonical.LapsCount(); ++lap) {
-    // The core guard: the OUT-OF-ORDER build's distance must EQUAL the canonical order's (the bug
-    // left stale zeros for the points added after SetCoordinateSystem, so the interior laps came
-    // out short). The trailing lap is degenerate (its closing crossing never happens, so
-    // finish_index == start_index and its distance is legitimately 0 in BOTH builds) — hence equate
-    // rather than blanket > 0; the totals below confirm real distance was actually accumulated.
+    // The core guard: the OUT-OF-ORDER build's distance must EQUAL the
+    // canonical order's (the bug left stale zeros for the points added after
+    // SetCoordinateSystem, so the interior laps came out short). The trailing
+    // lap is degenerate (its closing crossing never happens, so finish_index ==
+    // start_index and its distance is legitimately 0 in BOTH builds) — hence
+    // equate rather than blanket > 0; the totals below confirm real distance
+    // was actually accumulated.
     CHECK(interleaved.GetLapDistance(lap) ==
           Catch::Approx(canonical.GetLapDistance(lap)).margin(1e-6));
-    // The per-point odometer must agree too (GetLap reads DistanceBetween, the self-healed array).
+    // The per-point odometer must agree too (GetLap reads DistanceBetween, the
+    // self-healed array).
     Lap il = interleaved.GetLap(lap);
     Lap cl = canonical.GetLap(lap);
     REQUIRE(il.cum_distances.size() == cl.cum_distances.size());
@@ -410,16 +435,19 @@ TEST_CASE("Interleaved AddPoint after SetCoordinateSystem yields correct distanc
     interleaved_total += interleaved.GetLapDistance(lap);
     canonical_total += canonical.GetLapDistance(lap);
   }
-  // Sanity: real distance was accumulated (not silently all-zero), and the two orders sum equal.
+  // Sanity: real distance was accumulated (not silently all-zero), and the two
+  // orders sum equal.
   CHECK(canonical_total > 0.0);
   CHECK(interleaved_total == Catch::Approx(canonical_total).margin(1e-6));
 }
 
-TEST_CASE("No phantom sectors when sector_lines is empty (pass-2 #5)", "[laps]") {
-  // With NO intermediate sector lines the rotating "sector line" falls back to the start line
-  // (sector_index == -1), so every start-line crossing was recorded as a phantom sector chunk.
-  // SectorCount() is the number of sector LINES (0 here); RecordedSectors() must now also be 0 so
-  // the recorded run is consistent with it (it used to equal the lap count).
+TEST_CASE("No phantom sectors when sector_lines is empty (pass-2 #5)",
+          "[laps]") {
+  // With NO intermediate sector lines the rotating "sector line" falls back to
+  // the start line (sector_index == -1), so every start-line crossing was
+  // recorded as a phantom sector chunk. SectorCount() is the number of sector
+  // LINES (0 here); RecordedSectors() must now also be 0 so the recorded run is
+  // consistent with it (it used to equal the lap count).
   GPSSample origin{.lat = 40.0, .lon = -74.0, .altitude = 0};
   CoordinateSystem cs(origin);
 
@@ -428,13 +456,15 @@ TEST_CASE("No phantom sectors when sector_lines is empty (pass-2 #5)", "[laps]")
   // sector_lines left EMPTY (the studio default for every normal session).
   laps.Update();
 
-  REQUIRE(laps.LapsCount() == 3);    // laps still segment exactly as before (unchanged behaviour)
-  CHECK(laps.SectorCount() == 0);    // no sector lines
-  CHECK(laps.RecordedSectors() == 0); // and so NO phantom sector chunks recorded
+  REQUIRE(laps.LapsCount() ==
+          3); // laps still segment exactly as before (unchanged behaviour)
+  CHECK(laps.SectorCount() == 0); // no sector lines
+  CHECK(laps.RecordedSectors() ==
+        0); // and so NO phantom sector chunks recorded
 
   SECTION("behaviour with sector lines present is unchanged") {
-    // Re-add the two short sector lines: sectors must come back (proves the guard only suppresses
-    // the empty case, not the real one).
+    // Re-add the two short sector lines: sectors must come back (proves the
+    // guard only suppresses the empty case, not the real one).
     laps.sectors.sector_lines = {Segment{Point{10, -5}, Point{10, 5}}};
     laps.Update();
     CHECK(laps.SectorCount() == 1);
@@ -442,10 +472,12 @@ TEST_CASE("No phantom sectors when sector_lines is empty (pass-2 #5)", "[laps]")
   }
 }
 
-TEST_CASE("Re-segmenting after a point/cs change recomputes (pass-2 #6)", "[laps]") {
-  // Update()'s dirty sentinels used to track ONLY the timing lines. Re-segmenting after the POINTS
-  // (or coordinate system) changed but the timing lines did NOT would early-out and keep the STALE
-  // lap_chunks_ from the previous track. The sentinels now also reset on AddPoint/ClearPoints/
+TEST_CASE("Re-segmenting after a point/cs change recomputes (pass-2 #6)",
+          "[laps]") {
+  // Update()'s dirty sentinels used to track ONLY the timing lines.
+  // Re-segmenting after the POINTS (or coordinate system) changed but the
+  // timing lines did NOT would early-out and keep the STALE lap_chunks_ from
+  // the previous track. The sentinels now also reset on AddPoint/ClearPoints/
   // SetCoordinateSystem, so the next Update() recomputes against the new track.
   GPSSample origin{.lat = 40.0, .lon = -74.0, .altitude = 0};
   CoordinateSystem cs(origin);
@@ -456,27 +488,32 @@ TEST_CASE("Re-segmenting after a point/cs change recomputes (pass-2 #6)", "[laps
   laps.Update();
   REQUIRE(laps.LapsCount() == 3);
 
-  // Swap in a DIFFERENT track that crosses the start line a DIFFERENT number of times (exactly ONE
-  // crossing -> ONE lap chunk vs the three above) WITHOUT touching sectors.start_line: clear +
-  // re-add + set cs. The timing line is byte-identical to before, so the old (line-only) dirty
-  // guard would early-out and report the STALE 3 laps from the previous track. The lap COUNT is the
-  // clean discriminator: 1 (recomputed against the new track) vs a stale 3.
+  // Swap in a DIFFERENT track that crosses the start line a DIFFERENT number of
+  // times (exactly ONE crossing -> ONE lap chunk vs the three above) WITHOUT
+  // touching sectors.start_line: clear + re-add + set cs. The timing line is
+  // byte-identical to before, so the old (line-only) dirty guard would
+  // early-out and report the STALE 3 laps from the previous track. The lap
+  // COUNT is the clean discriminator: 1 (recomputed against the new track) vs a
+  // stale 3.
   laps.ClearPoints();
   double t = 0;
   auto add = [&](double x, double y) {
     laps.AddPoint(cs.Global(Vec3f{x, y, 0}), t++);
   };
-  add(-20, 0);  // a single left->right sweep across x == 0 -> exactly ONE crossing
+  add(-20,
+      0); // a single left->right sweep across x == 0 -> exactly ONE crossing
   add(-5, 0);
   add(5, 0);
   add(20, 0);
   laps.SetCoordinateSystem(cs);
-  // sectors.start_line is UNCHANGED here on purpose — ONLY the points/cs changed.
+  // sectors.start_line is UNCHANGED here on purpose — ONLY the points/cs
+  // changed.
   laps.Update();
 
-  // Recomputed against the NEW 4-point track (1 crossing -> 1 chunk), NOT the stale 3-lap result of
-  // the previous MakeThreeLapTrack. With the old line-only dirty guard this would early-out and
-  // still report 3 laps from chunks that point into a track that no longer exists.
+  // Recomputed against the NEW 4-point track (1 crossing -> 1 chunk), NOT the
+  // stale 3-lap result of the previous MakeThreeLapTrack. With the old
+  // line-only dirty guard this would early-out and still report 3 laps from
+  // chunks that point into a track that no longer exists.
   CHECK(laps.LapsCount() == 1);
   for (size_t lap = 0; lap < laps.LapsCount(); ++lap) {
     Lap l = laps.GetLap(lap);
@@ -706,8 +743,7 @@ TEST_CASE("Out-of-range indices throw std::out_of_range on the bound scalar "
     // agreement (margin as in the cases above).
     for (size_t lap = 0; lap < laps.LapsCount(); ++lap) {
       Lap l = laps.GetLap(lap);
-      CHECK(laps.LapTime(lap) ==
-            l.points.back().time - l.points.front().time);
+      CHECK(laps.LapTime(lap) == l.points.back().time - l.points.front().time);
       CHECK(laps.StartTimestamp(lap) == l.points.front().time);
       CHECK(laps.LapEntrySpeed(lap) == l.points.front().point.full_speed);
       CHECK(laps.GetLapDistance(lap) ==

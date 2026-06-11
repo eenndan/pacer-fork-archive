@@ -395,8 +395,8 @@ TEST_CASE("Default-constructed CoordinateSystem is a usable identity (ECEF) "
 
   SECTION("Local() yields the raw ECEF position in metres (earth-scale)") {
     auto local = cs.Local(a);
-    double norm = std::sqrt(local.x * local.x + local.y * local.y +
-                            local.z * local.z);
+    double norm =
+        std::sqrt(local.x * local.x + local.y * local.y + local.z * local.z);
     // |ECEF position| is between the polar and (height-compensated)
     // equatorial radius — emphatically not zero.
     CHECK(norm > 6'300'000.0);
