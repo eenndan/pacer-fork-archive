@@ -30,6 +30,10 @@ add_test(NAME test_chapters
 # MAP-ONLY GPS-gap reconstruction (studio.gapfill): pure Python + numpy, no telemetry file.
 add_test(NAME test_gapfill
          COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_gapfill.py)
+# Reference-centerline closed-loop fit (studio.reference): pure Python + numpy, synthetic
+# loops with known similarity transforms (incl. cyclic offset / reversal / reflection).
+add_test(NAME test_reference
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_reference.py)
 # RawGPSSource binding surface: Python<->C++ trampoline (read_accl/grav/cori) + the
 # SequentialGPSSource chapter-offset chaining. Imports pacer only (no Qt).
 add_test(NAME test_gps_source_bindings
@@ -93,6 +97,7 @@ set_tests_properties(test_gmeter_overlay PROPERTIES
 # AttributeError. PYTHONPATH makes the deployed package win deterministically in every
 # install state; APPEND keeps the per-test QT_QPA_PLATFORM settings above intact.
 foreach(pytest IN ITEMS test_scrub_conversion test_lap_timing test_chapters test_gapfill
+                        test_reference
                         test_gps_source_bindings test_laps_bindings test_ingest_equivalence
                         test_sidecar test_session_pure test_studio_features test_compare
                         test_controllers test_validate_wallclock test_gmeter

@@ -41,11 +41,15 @@ the same frame I fit a 6-parameter affine `lon/lat → satellite pixel` by ICP b
 trace points and the satellite's track-tarmac pixels. **Residual ≈ 3 px median ≈ sub-metre** —
 the speed-coloured trace lands exactly on the tarmac (`start-line-figures/satellite-trace-overlay-0060.png`).
 
-> Note / caveat: the stored `studio/mk_centerline.json` reference centerline is **not** usable
-> for this mapping — its ICP fit (in `reference.py`) collapses onto a small inner sub-loop and
-> covers only ~30 % of the real track footprint (see investigation in the commit). That only
-> affects the rarely-used gap-fill fallback, not segmentation/timing, but it is flagged here as
-> separate tech debt. The satellite georef above is independent of it.
+> Note: at the time of this investigation the stored `studio/mk_centerline.json` reference
+> centerline was **not** usable for this mapping — its ICP fit (in `reference.py`) collapsed
+> onto a small inner sub-loop and covered only ~30 % of the real track footprint (RMS ≈ 47 m on
+> 0060). Since fixed: the fit is now a cyclic arc-length correspondence against the session's
+> best clean lap, and the stored polyline was rebuilt from measured GPS
+> (`dev/build_reference.py`) — cross-session (built from 0062, fit on 0060) it lands at
+> **RMS 2.8 m with 100 % of best-lap points within 10 m**. It only ever affected the
+> rarely-used gap-fill fallback, not segmentation/timing. The satellite georef above is
+> independent of it either way.
 
 Mapping the current `tracks.py` line through that georef puts it **on the western pit straight,
 beside the pit building**, exactly where the plan's "Start Finish" sits
