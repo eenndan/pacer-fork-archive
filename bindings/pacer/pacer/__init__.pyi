@@ -378,6 +378,21 @@ class Laps:
     def clear_points(self) -> None:
         pass
 
+    def track_columns(self) -> LapArrays:
+        """/ The WHOLE raw point track's per-point columns (times, local-metre xs/ys, full_speed,
+        / cum_distances) as parallel arrays — LapColumns' bulk idiom over the full trace instead of
+        / one lap, so the studio layer builds its full-trace arrays in ONE binding crossing instead
+        / of one GetPoint + cs.local crossing per point. Exactly as GetPoint: times[i] / xs[i] /
+        / ys[i] / full_speed[i] equal GetPoint(i).time, cs.Local(GetPoint(i).point).x|y and
+        / GetPoint(i).point.full_speed for every i in [0, PointCount()), where cs is the laps' own
+        / coordinate system (the one set via SetCoordinateSystem). cum_distances[i] is the track's
+        / gap-aware cumulative odometer from point 0 to point i (the same cached prefix sum GetLap's
+        / interior distances are sliced from; see PointTrack). All five columns have length
+        / PointCount(); an empty track yields all-empty arrays (the odometer's internal {0} seed is
+        / an implementation detail and never becomes a row).
+        """
+        pass
+
     def __init__(self, sectors: Sectors = Sectors()) -> None:
         """Auto-generated default constructor with named params"""
         pass

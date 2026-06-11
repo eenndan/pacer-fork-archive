@@ -7,6 +7,7 @@
 #include <pacer/datatypes/datatypes.hpp>
 #include <pacer/geometry/geometry.hpp>
 #include <pacer/laps/laps.hpp>
+#include <pacer/laps/point-track.hpp>
 
 using pacer::CoordinateSystem;
 using pacer::GPSSample;
@@ -563,6 +564,90 @@ TEST_CASE("LapColumns equals the per-point GetLap/Local path (PR #40)",
       CHECK(cols.full_speed.empty());
       CHECK(cols.cum_distances.empty());
     }
+  }
+}
+
+TEST_CASE("TrackColumns equals the per-point GetPoint/Local path (P1.8)",
+          "[laps]") {
+  // P1.8 claim: TrackColumns() returns, in ONE binding crossing, exactly the
+  // five per-point columns the studio layer used to materialize element-by-
+  // element over the WHOLE raw track: times (GetPoint(i).time), local-metre
+  // xs/ys (cs.Local(GetPoint(i).point).x|y), full_speed
+  // (GetPoint(i).point.full_speed), plus the track's gap-aware cumulative
+  // odometer as cum_distances. The contract (laps.hpp) promises the SAME
+  // deterministic computation over the SAME data, so every element must be
+  // EXACTLY equal to the hand-materialized per-point path — not merely
+  // approximately. The hand odometer below accumulates PointTrack's own
+  // SegmentDistance in the same left-to-right order as the cached prefix sum,
+  // so it too is bit-identical, not just close.
+  GPSSample origin{.lat = 40.0, .lon = -74.0, .altitude = 0};
+  CoordinateSystem cs(origin);
+
+  // The whole-track column equivalence check, shared by the two synthetic
+  // tracks below. `cs` is the same coordinate system the laps own (the one
+  // set via SetCoordinateSystem), which is the cs TrackColumns projects with.
+  // NOTE: no start line / Update() — TrackColumns depends only on the points
+  // and the coordinate system, never on segmentation.
+  auto check_track_columns_match = [&](const Laps &laps) {
+    LapArrays cols = laps.TrackColumns();
+
+    // All five columns have length PointCount() (header contract).
+    const size_t n = laps.PointCount();
+    REQUIRE(n > 0);
+    REQUIRE(cols.times.size() == n);
+    REQUIRE(cols.xs.size() == n);
+    REQUIRE(cols.ys.size() == n);
+    REQUIRE(cols.full_speed.size() == n);
+    REQUIRE(cols.cum_distances.size() == n);
+
+    // Element-wise EXACT equality against the per-point studio path
+    // (GetPoint + cs.Local per point), plus the hand-accumulated gap-aware
+    // odometer (prefix sum of PointTrack::SegmentDistance, seed 0).
+    double cum = 0.0;
+    pacer::PointInTime<GPSSample> prev{};
+    for (size_t i = 0; i < n; ++i) {
+      pacer::PointInTime<GPSSample> pit = laps.GetPoint(i);
+      Vec3f loc = cs.Local(pit.point);
+      CHECK(cols.times[i] == pit.time);
+      CHECK(cols.xs[i] == loc.x);
+      CHECK(cols.ys[i] == loc.y);
+      CHECK(cols.full_speed[i] == pit.point.full_speed);
+      if (i > 0)
+        cum += pacer::PointTrack::SegmentDistance(cs, prev, pit);
+      CHECK(cols.cum_distances[i] == cum);
+      prev = pit;
+    }
+    // Sanity: the odometer actually accumulated distance (not all-zero).
+    CHECK(cols.cum_distances.back() > 0.0);
+  };
+
+  SECTION("three-lap alternating track") {
+    Laps laps = MakeThreeLapTrack(cs);
+    check_track_columns_match(laps);
+  }
+
+  SECTION("sector loop with non-zero full_speed") {
+    // MakeSectorLoop sets full_speed = 20 (ground_speed stays 0), so the
+    // full_speed column is distinguishable from a wrong-field regression,
+    // unlike MakeThreeLapTrack's all-zero speeds.
+    Laps laps = MakeSectorLoop(cs);
+    check_track_columns_match(laps);
+  }
+
+  SECTION("empty track -> all five columns empty (the {0} odometer seed is "
+          "not a row)") {
+    // PointTrack keeps an internal {0} seed in its odometer even with zero
+    // points (so index [0]/.back() stay valid for a later AddPoint). That
+    // seed is an implementation detail: TrackColumns' columns all have length
+    // PointCount() == 0 here, pinning that the seed never leaks out as a row.
+    Laps laps;
+    REQUIRE(laps.PointCount() == 0);
+    LapArrays cols = laps.TrackColumns();
+    CHECK(cols.times.empty());
+    CHECK(cols.xs.empty());
+    CHECK(cols.ys.empty());
+    CHECK(cols.full_speed.empty());
+    CHECK(cols.cum_distances.empty());
   }
 }
 

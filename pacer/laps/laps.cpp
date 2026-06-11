@@ -1,6 +1,7 @@
 #include "laps.hpp"
 
 #include <algorithm>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -28,6 +29,30 @@ void CheckIndex(const char *accessor, size_t index, size_t size) {
     throw std::out_of_range(std::string(accessor) + ": index " +
                             std::to_string(index) + " >= size " +
                             std::to_string(size));
+}
+
+// The single column-materialization loop shared by LapColumns and TrackColumns: project a run
+// of points into `cs` and fill the four point-derived columns (times, local-metre xs/ys,
+// full_speed). The fifth column (cum_distances) is NOT filled here because its source differs
+// by caller — LapColumns moves the materialized lap's per-lap odometer across, TrackColumns
+// copies the track's whole-trace odometer — each caller attaches its own.
+pacer::LapArrays
+PointColumns(const pacer::CoordinateSystem &cs,
+             std::span<const pacer::PointInTime<pacer::GPSSample>> points) {
+  pacer::LapArrays cols;
+  const size_t n = points.size();
+  cols.times.reserve(n);
+  cols.xs.reserve(n);
+  cols.ys.reserve(n);
+  cols.full_speed.reserve(n);
+  for (const auto &p : points) {
+    pacer::Vec3f loc = cs.Local(p.point);
+    cols.times.push_back(p.time);
+    cols.xs.push_back(loc.x);
+    cols.ys.push_back(loc.y);
+    cols.full_speed.push_back(p.point.full_speed);
+  }
+  return cols;
 }
 } // namespace
 
@@ -286,29 +311,32 @@ pacer::Lap pacer::Laps::GetLap(size_t lap) const {
 pacer::LapArrays pacer::Laps::LapColumns(size_t lap) const {
   // Materialize the lap exactly as GetLap does (interpolated start crossing + interior track
   // points + interpolated finish crossing, with the gap-aware cum_distances), then project each
-  // point into the laps' OWN coordinate system. Reusing GetLap guarantees the points and
-  // cum_distances are byte-identical to the per-element studio path (which read GetLap()'s
-  // .points / .cum_distances); the only added work is the Local() projection, which the studio
-  // layer did per point anyway — now batched into this single crossing.
+  // point into the laps' OWN coordinate system via the shared PointColumns loop. Reusing GetLap
+  // guarantees the points and cum_distances are byte-identical to the per-element studio path
+  // (which read GetLap()'s .points / .cum_distances); the only added work is the Local()
+  // projection, which the studio layer did per point anyway — now batched into this single
+  // crossing.
   Lap materialized = GetLap(lap); // out-of-range -> empty Lap -> empty columns below
-  const CoordinateSystem &cs = track_.Cs();
-
-  LapArrays cols;
-  const size_t n = materialized.points.size();
-  cols.times.reserve(n);
-  cols.xs.reserve(n);
-  cols.ys.reserve(n);
-  cols.full_speed.reserve(n);
-  for (const auto &p : materialized.points) {
-    Vec3f loc = cs.Local(p.point);
-    cols.times.push_back(p.time);
-    cols.xs.push_back(loc.x);
-    cols.ys.push_back(loc.y);
-    cols.full_speed.push_back(p.point.full_speed);
-  }
+  LapArrays cols = PointColumns(track_.Cs(), materialized.points);
   // The lap's per-point odometer is already built by GetLap (size == points.size()); move it
   // across verbatim so cum_distances matches Lap::cum_distances exactly.
   cols.cum_distances = std::move(materialized.cum_distances);
+  return cols;
+}
+
+pacer::LapArrays pacer::Laps::TrackColumns() const {
+  // The same materialization as LapColumns, but over the WHOLE raw point track: the shared
+  // PointColumns loop projects every track point, and the distance column is the track's own
+  // gap-aware cumulative odometer (CumulativeDistance reads the cached — self-healing if
+  // dirty — prefix sum, the very array GetLap's interior distances are sliced from). The loop
+  // bound is PointCount(), so an empty track yields all-empty columns: the odometer's internal
+  // {0} seed never becomes a row (header contract).
+  LapArrays cols = PointColumns(track_.Cs(), track_.Points());
+  const size_t n = track_.PointCount();
+  cols.cum_distances.reserve(n);
+  for (size_t i = 0; i < n; ++i) {
+    cols.cum_distances.push_back(track_.CumulativeDistance(i));
+  }
   return cols;
 }
 
