@@ -17,6 +17,7 @@ is the primary off-white on the dark table surface.
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
@@ -30,6 +31,9 @@ from PySide6.QtWidgets import (
 
 from . import theme
 from ._signal import fmt_time
+
+if TYPE_CHECKING:  # the injected session — typed for readers, not imported at runtime
+    from .session import Session
 
 BASE_COLOR = QColor(theme.C.text)             # primary off-white: default row text (dark surface)
 BEST_COLOR = QColor(theme.C.ahead)            # green: the overall best lap (foreground every cell)
@@ -98,7 +102,7 @@ class _NumItem(QTableWidgetItem):
 class LapTable(QWidget):
     laps_selected = Signal(object)  # list[int]
 
-    def __init__(self, session):
+    def __init__(self, session: Session):
         super().__init__()
         self.session = session
         self._current_lap = None  # F3: the lap on the video (independent of selection)

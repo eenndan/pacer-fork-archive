@@ -9,6 +9,8 @@ seeks the video to the nearest telemetry sample.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
@@ -16,6 +18,9 @@ from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
 
 from .session import Seg
 from .theme import C
+
+if TYPE_CHECKING:  # the injected session — typed for readers, not imported at runtime
+    from .session import Session
 
 # Tokenized track-map pens (Phase 2). The best lap is a quiet faint reference; the current lap
 # is the bright amber accent so the racing line pops. Timing lines + marker use distinct tokens.
@@ -102,7 +107,7 @@ class _LapOverlay:
             self.plot.removeItem(it)
         self._items = []
 
-    def set_lap(self, session, lap_id):
+    def set_lap(self, session: Session, lap_id: int | None):
         """(Re)draw `lap_id` (or clear if None). No-op if unchanged."""
         if lap_id == self.lap_id and self._items:
             return
@@ -116,7 +121,7 @@ class _LapOverlay:
             pen = solid if seg.measured else dashed
             self._items.append(self.plot.plot(seg.xs, seg.ys, pen=pen))
 
-    def refresh(self, session):
+    def refresh(self, session: Session):
         """Force a redraw of the current lap (e.g. after re-segmentation invalidated caches)."""
         lap_id, self.lap_id = self.lap_id, None
         self.set_lap(session, lap_id)
@@ -126,7 +131,7 @@ class MapView(QWidget):
     # (start: Seg, sectors: list[Seg]) whenever a handle moves or sectors change.
     timing_lines_changed = Signal(object, object)
 
-    def __init__(self, session):
+    def __init__(self, session: Session):
         super().__init__()
         self.session = session
         self._suppress_marker = False

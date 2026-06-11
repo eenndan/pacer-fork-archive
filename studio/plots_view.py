@@ -24,6 +24,8 @@ in app.py too (values from session); the hover dot reads only the curve already 
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal
@@ -32,6 +34,9 @@ from PySide6.QtWidgets import QComboBox, QVBoxLayout, QWidget
 from . import theme
 from ._signal import fmt_time
 from .theme import C
+
+if TYPE_CHECKING:  # the injected session — typed for readers, not imported at runtime
+    from .session import Session
 
 # Antialiased path rendering is a major per-repaint cost; the cursor's InfiniteLine.setValue
 # re-renders every visible curve each ~30 Hz tick, so keep it OFF for smooth playback.
@@ -67,7 +72,7 @@ class PlotsView(QWidget):
     # boundary positions for the new mode (F2) so the vertical guide lines reposition correctly.
     modeChanged = Signal(str)  # the new mode: 'time' | 'distance'
 
-    def __init__(self, session):
+    def __init__(self, session: Session):
         super().__init__()
         self.session = session
         self._lap_ids: list[int] = []
