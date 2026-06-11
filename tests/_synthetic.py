@@ -42,6 +42,20 @@ def seed_lap(session, lap_id, times, dists):
     session._dist_cache[lap_id] = (times, dists, times - times[0])
 
 
+def seed_cols(session, lap_id, times, dists):
+    """Seed one `_cols_cache` 5-tuple (times, xs, ys, full_speed m/s, cum_distances) for a
+    STRAIGHT-LINE lap along the x-axis (xs = odometer, ys = 0), so the sector-midpoint→trace
+    projection geometry is consistent with the odometer the splits interpolate on. Feeds the
+    paths that read the bulk `lap_columns` crossing directly (`_lap_arrays` / sector splits)."""
+    times = np.asarray(times, float)
+    dists = np.asarray(dists, float)
+    if not hasattr(session, "_cols_cache"):  # bare Session.__new__ — the slot needs creating
+        session._cols_cache = {}
+    session._cols_cache[lap_id] = (
+        times, dists.copy(), np.zeros_like(dists), np.gradient(dists, times), dists.copy(),
+    )
+
+
 def bare_session(laps=None, *, best=None, valid=None):
     """A bare Session (Session.__new__ — no pacer, no telemetry file, no Qt event loop).
 

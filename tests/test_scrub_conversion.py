@@ -128,6 +128,20 @@ def test_distance_delta_no_best_distance_returns_none():
     print("test_distance_delta_no_best_distance_returns_none OK")
 
 
+def test_plot_x_zero_total_distance_returns_none():
+    """A lap with >= 2 points but a ZERO-length odometer (stationary fixes) passes the
+    <2-point cache guard, so plot_x_at_media_time's distance normalization must guard
+    dists[-1] <= 0 itself (it used to divide by it -> ZeroDivisionError). None, like the
+    other degenerate paths; time mode needs no division and still works."""
+    lid = 5
+    times = np.array([100.0, 100.1, 100.2])
+    s = bare_session({lid: (times, np.zeros(3))})
+    for mode in ("distance", "delta"):
+        assert s.plot_x_at_media_time(lid, 100.1, mode, best_distance=600.0) is None
+    assert abs(s.plot_x_at_media_time(lid, 100.1, "time") - 0.1) < 1e-9
+    print("test_plot_x_zero_total_distance_returns_none OK")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

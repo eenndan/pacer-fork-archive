@@ -182,7 +182,8 @@ gap-fill unit tests live in [`tests/test_gapfill.py`](../tests/test_gapfill.py) 
   the displayed laps, the **scrub cursor / Δ box / hover work in the followed lap**.
 - **Live Δ/speed readout + delta-plot hover dot:** an always-on box above the plots
   (`app._update_diff_box`) shows the **current-moment Δ-to-best (priority) + speed** from
-  `session.delta_at_time` / `speed_at_time` — green when ahead of best, red when behind — updating
+  `session.delta_at_lap` + the trace speed at the resolved index — green when meaningfully ahead
+  of best, red when behind, neutral within ±`theme.DELTA_EVEN_EPS_S` of zero — updating
   live as the video plays or the cursor scrubs. The delta plot additionally shows a **hover dot**
   (`ScatterPlotItem` + `TextItem` on `scene().sigMouseMoved`) that snaps to the nearest delta-curve
   sample under the mouse and labels its Δ value (+ distance/time there), independent of the playback

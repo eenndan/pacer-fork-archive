@@ -122,8 +122,12 @@ def _gps9_times(samples, naive, rate_factor: float = 1.0):
 
 
 def _sustained_moving(samples, lo, hi, run=5):
-    """First index in [lo,hi) where the car is moving for `run` consecutive samples."""
-    for i in range(lo, hi - run):
+    """First index in [lo,hi) where the car is moving for `run` consecutive samples.
+
+    The window for candidate i is samples[i .. i+run-1]; it fits inside [lo, hi) iff
+    i <= hi - run, so the last candidate is hi - run (an exclusive bound of hi - run + 1).
+    The historical `hi - run` bound skipped that trailing window."""
+    for i in range(lo, hi - run + 1):
         if all(samples[i + k].full_speed > MIN_START_SPEED for k in range(run)):
             return i
     return lo
