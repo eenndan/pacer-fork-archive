@@ -5,7 +5,9 @@ lap-vs-best delta resampling) is reused via the bound `pacer` module. This file 
 the thin Python glue around it: building plot series, the delta computation, and writing
 dragged timing lines back to the core. The LOAD pipeline itself (GPS9 true-clock time axis,
 trace cleaning/smoothing, start-line placement) lives in studio/load.py; `Session.load`
-below stays the public entry point and delegates to it.
+below stays the public entry point and delegates to it. The MAP-RENDERING cache cluster
+(gap-filled draw segments + the reference-centerline fallback donor) lives in
+studio/render_cache.py; Session keeps thin delegators so callers stay unchanged.
 
 Coordinate note (verified against pacer/laps/laps.cpp): the track trace and the timing
 lines both live in LOCAL meters (cs.local). `pick_random_start()`/`update()` must run
@@ -22,7 +24,7 @@ import numpy as np
 
 import pacer
 
-from . import chapters, gapfill, gmeter, tracks
+from . import chapters, gapfill, gmeter, render_cache, tracks
 
 # Pacer-free helpers from studio/_signal.py (numpy-only, shared with gmeter): the band filter
 # behind valid_lap_ids and the default smoothing window `Session.load` forwards to the pipeline.
@@ -100,9 +102,6 @@ class Session:
         # once per lap (an O(n_lap) cs.local pass); cleared on re-segment. Killing the double
         # rebuild the marker drag used to do per mouse-move.
         self._xyt_cache: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
-        # Per-lap gap-filled draw segments (measured + inferred runs). MAP RENDERING ONLY —
-        # computed once per lap on first draw, never per frame; cleared on re-segment.
-        self._seg_cache: dict[int, list[gapfill.Segment]] = {}
         # Memoized "real lap" sets — the 30 Hz tick resolves valid_lap_ids()/best_lap_id() many
         # times each frame (lap_at_time, delta_at_time, the readout, the map/table highlights).
         # Computed once and reused; cleared on re-segment (the only point they can change).
@@ -111,7 +110,6 @@ class Session:
         # Cached lap [start, end) windows on the GLOBAL clock for the O(log n) lap_at_time binary
         # search (parallel arrays over valid laps, in start order). Cleared on re-segment.
         self._lap_windows: tuple[np.ndarray, np.ndarray, list[int]] | None = None
-        self._reference_xy = None  # lazily-built georeferenced track centerline (fallback donor)
         # The detected registry track's name (tracks.detect_track), or None for an unknown
         # track (where the start line was auto-fitted via pick_random_start). Set by load();
         # a from-scratch Session() has no detection, so it stays None. Persisted into the
@@ -133,6 +131,18 @@ class Session:
         self.ty = np.asarray(cols.ys)
         self.tt = np.asarray(cols.times)
         self.tv = np.asarray(cols.full_speed) * 3.6
+
+        # The MAP-RENDERING cache cluster (per-lap gap-filled draw segments + the
+        # reference-centerline fallback donor) — extracted to studio/render_cache.py
+        # (pacer-free), wired with Session-bound callables over the shared per-lap caches
+        # above. set_timing_lines calls invalidate() on re-segment (the perf invariant).
+        self._render_cache = render_cache.LapRenderCache(
+            lap_xyt=self._lap_trace_xyt,
+            valid_lap_ids=self.valid_lap_ids,
+            lap_has_dropout=self.lap_has_dropout,
+            lap_time=self.lap_time,
+            trace_times=self.tt,
+        )
 
     # ---------------------------------------------------------------- loading
     @classmethod
@@ -212,7 +222,7 @@ class Session:
         self._cols_cache.clear()
         self._dist_cache.clear()
         self._xyt_cache.clear()
-        self._seg_cache.clear()
+        self._render_cache.invalidate()  # per-lap draw segments (MAP RENDERING ONLY)
         # The single re-segmentation point: every memoized "real lap" set + window table is now
         # stale (lap ids / times shifted), so drop them. They lazily recompute on next access.
         self._valid_cache = None
@@ -422,73 +432,33 @@ class Session:
             self._xyt_cache[lap_id] = got
         return got
 
-    def _median_sample_dt(self) -> float:
-        """Median inter-sample interval over the whole trace (s) — used to size gaps."""
-        if len(self.tt) < 2:
-            return 0.1
-        d = np.diff(self.tt)
-        d = d[(d > 0) & (d < 1.0)]
-        return float(np.median(d)) if len(d) else 0.1
+    # The gap-aware draw-segment computation + cache (and the reference-centerline fallback
+    # donor it borrows from) live in studio/render_cache.py (LapRenderCache, pacer-free) —
+    # wired in __init__ with callables over this session's cached per-lap arrays. The thin
+    # delegators below keep every caller (map_view, the dev tooling) on Session;
+    # set_timing_lines invalidates the segment cache on re-segment.
 
-    def _donors_for(self, lap_id: int):
-        """Ordered fill-source list for reconstructing `lap_id`'s gaps: every OTHER valid lap
-        first (cross-lap borrow, the primary source), then the georeferenced reference
-        centerline LAST (fallback). Each donor is {"xy", "name", "is_reference"}."""
-        donors = []
-        for other in self.valid_lap_ids():
-            if other == lap_id:
-                continue
-            ox, oy, _ = self._lap_trace_xyt(other)
-            if len(ox) >= 3:
-                donors.append({"xy": np.column_stack([ox, oy]),
-                               "name": str(other), "is_reference": False})
-        ref = self.reference_centerline_xy()
-        if ref is not None and len(ref) >= 3:
-            donors.append({"xy": ref, "name": "MK-ref", "is_reference": True})
-        return donors
+    def lap_trace_segments(self, lap_id: int) -> list[gapfill.Segment]:
+        """Ordered list of `gapfill.Segment` for drawing this lap: measured GPS runs and
+        reconstructed (inferred) fills, tagged so the renderer can dash/dim the inferred
+        ones. MAP RENDERING ONLY — alters no analysis quantity. Cached per lap in the
+        LapRenderCache (studio/render_cache.py); cleared on re-segment."""
+        return self._render_cache.lap_trace_segments(lap_id)
 
     def reference_centerline_xy(self):
-        """The georeferenced track centerline in LOCAL metres (an (M,2) array), or None.
+        """The georeferenced track centerline in LOCAL metres (an (M,2) array), or None —
+        the gap-fill's last-resort donor (see LapRenderCache.reference_centerline_xy)."""
+        return self._render_cache.reference_centerline_xy()
 
-        Built once and cached. Only the known-track fallback uses it; with ~18 laps the
-        cross-lap borrow covers virtually every gap, so this is rarely needed. See
-        studio/reference.py for the trace+georeference of the Daytona MK centerline:
-        the stored loop is fit against ONE clean lap's closed loop (cyclic arc-length
-        correspondence), not the unordered all-laps point cloud."""
-        if self._reference_xy is not None:
-            return self._reference_xy if len(self._reference_xy) else None
-        from . import reference  # local import: optional, only on the fallback path
-        self._reference_xy = reference.centerline_local(self._reference_fit_loop())
-        return self._reference_xy if len(self._reference_xy) else None
+    # Private delegators kept for the dev tooling (denoise_check, build_reference).
+    def _median_sample_dt(self) -> float:
+        return self._render_cache.median_sample_dt()
+
+    def _donors_for(self, lap_id: int):
+        return self._render_cache.donors_for(lap_id)
 
     def _reference_fit_loop(self):
-        """The lap loop the reference centerline is fit against: the fastest valid lap
-        WITHOUT a GPS dropout (an ordered, closed, complete track footprint), else the
-        fastest valid lap. None if there are no valid laps."""
-        valid = self.valid_lap_ids()
-        if not valid:
-            return None
-        by_time = sorted(valid, key=self.laps.lap_time)
-        pick = next((lap for lap in by_time if not self.lap_has_dropout(lap)), by_time[0])
-        xs, ys, _ = self._lap_trace_xyt(pick)
-        if len(xs) < 10:
-            return None
-        return np.column_stack([xs, ys])
-
-    def lap_trace_segments(self, lap_id: int):
-        """Ordered list of `gapfill.Segment` for drawing this lap: measured GPS runs and
-        reconstructed (inferred) fills, tagged so the renderer can dash/dim the inferred ones.
-
-        MAP RENDERING ONLY. Built from the lap's kept-point arrays (the same points
-        `lap_trace_xy` returns); it does NOT alter any analysis quantity. Cached per lap."""
-        cached = self._seg_cache.get(lap_id)
-        if cached is not None:
-            return cached
-        xs, ys, ts = self._lap_trace_xyt(lap_id)
-        donors = self._donors_for(lap_id)
-        segs, _fills = gapfill.reconstruct_lap(xs, ys, ts, donors, med_dt=self._median_sample_dt())
-        self._seg_cache[lap_id] = segs
-        return segs
+        return self._render_cache.reference_fit_loop()
 
     def lap_window(self, lap_id: int) -> tuple[float, float] | None:
         if not (0 <= lap_id < self.laps.laps_count()):
