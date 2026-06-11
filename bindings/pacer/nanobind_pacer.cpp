@@ -235,12 +235,6 @@ void py_init_module_pacer(nb::module_ &m) {
       ;
 
 
-  m.def("to_point",
-      nb::overload_cast<pacer::Point>(pacer::ToPoint), nb::arg("x"));
-
-  m.def("to_point",
-      nb::overload_cast<pacer::Vec3f>(pacer::ToPoint), nb::arg("v"));
-
   m.def("to_lon_lat",
       pacer::ToLonLat,
       nb::arg("s"),
@@ -264,7 +258,7 @@ void py_init_module_pacer(nb::module_ &m) {
       .def("intersects",
           &pacer::Segment::Intersects,
           nb::arg("fst"), nb::arg("snd"), nb::arg("ratio"),
-          " Returns True if segments intersects, if ratio is non-null, it will satisfy:\n   fst * (1 - ratio) + snd  lies  on present segment.")
+          " True iff this segment and the segment fst->snd PROPERLY cross: both straddle tests use\n strict inequalities, so a touch — any endpoint of either segment lying exactly ON the\n other segment's supporting line — is NOT a crossing (tests/test_geometry.cpp pins this,\n including the consequence that a trace vertex exactly on a timing line yields no crossing\n from either adjacent trace segment).\n On a True return, if `ratio` is non-null it receives the crossing's fraction along\n fst->snd, i.e. fst * (1 - ratio) + snd * ratio is the intersection point (Split uses it\n to interpolate the crossing sample/time). `ratio` is left untouched on a False return.")
       .def("__eq__",
           &pacer::Segment::operator==, nb::arg("other"))
       ;
@@ -287,13 +281,6 @@ void py_init_module_pacer(nb::module_ &m) {
       .def("distance",
           &pacer::CoordinateSystem::Distance, nb::arg("from_"), nb::arg("to"))
       ;
-
-
-  m.def("interpolate",
-      nb::overload_cast<pacer::Point, pacer::Point, double>(pacer::Interpolate), nb::arg("from_"), nb::arg("to"), nb::arg("ratio"));
-
-  m.def("interpolate",
-      nb::overload_cast<GPSSample, GPSSample, double>(pacer::Interpolate), nb::arg("from_"), nb::arg("to"), nb::arg("ratio"));
   ////////////////////    </generated_from:geometry.hpp>    ////////////////////
 
 
@@ -301,17 +288,15 @@ void py_init_module_pacer(nb::module_ &m) {
   auto pyClassLap =
       nb::class_<pacer::Lap>
           (m, "Lap", "")
-      .def("__init__", [](pacer::Lap * self, float width = float(), std::vector<PointInTime<GPSSample>> points = std::vector<PointInTime<GPSSample>>(), std::vector<double> cum_distances = std::vector<double>())
+      .def("__init__", [](pacer::Lap * self, std::vector<PointInTime<GPSSample>> points = std::vector<PointInTime<GPSSample>>(), std::vector<double> cum_distances = std::vector<double>())
       {
           new (self) pacer::Lap();  // placement new
           auto r_ctor_ = self;
-          r_ctor_->width = width;
           r_ctor_->points = points;
           r_ctor_->cum_distances = cum_distances;
       },
-      nb::arg("width") = float(), nb::arg("points") = std::vector<PointInTime<GPSSample>>(), nb::arg("cum_distances") = std::vector<double>()
+      nb::arg("points") = std::vector<PointInTime<GPSSample>>(), nb::arg("cum_distances") = std::vector<double>()
       )
-      .def_rw("width", &pacer::Lap::width, "")
       .def_rw("points", &pacer::Lap::points, "")
       .def_rw("cum_distances", &pacer::Lap::cum_distances, "")
       .def("fill_distances",
@@ -478,8 +463,6 @@ void py_init_module_pacer(nb::module_ &m) {
   auto pyClassGPMFSource =
       nb::class_<pacer::GPMFSource, pacer::RawGPSSource>
           (m, "GPMFSource", " Handler for GPMF track inside MP4 container.\n\n Allows for traversing media file and getting GPS data out of it.\n\n TODO: Provide even more low-level access to underlying samples,\n       might be useful to keep buffer for data in some sort of iterator\n       with option to iterate over GPSSample-s on top of it.")
-      .def(nb::init<size_t>(),
-          nb::arg("mp4handle"))
       .def(nb::init<const char *>(),
           nb::arg("filename"))
       .def("read_samples",

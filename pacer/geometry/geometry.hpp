@@ -3,7 +3,6 @@
 #include <cstdlib>
 #include <optional>
 #include <ostream>
-#include <utility>
 
 #include <pacer/datatypes/datatypes.hpp>
 #include <pacer/datatypes/ops.hpp>
@@ -62,8 +61,14 @@ bool ApproxEqual(const Point &a, const Point &b, double eps = 1e-6);
 struct Segment {
   Point first, second;
 
-  // Returns true if segments intersects, if ratio is non-null, it will satisfy:
-  //   fst * (1 - ratio) + snd  lies  on present segment.
+  // True iff this segment and the segment fst->snd PROPERLY cross: both straddle tests use
+  // strict inequalities, so a touch — any endpoint of either segment lying exactly ON the
+  // other segment's supporting line — is NOT a crossing (tests/test_geometry.cpp pins this,
+  // including the consequence that a trace vertex exactly on a timing line yields no crossing
+  // from either adjacent trace segment).
+  // On a true return, if `ratio` is non-null it receives the crossing's fraction along
+  // fst->snd, i.e. fst * (1 - ratio) + snd * ratio is the intersection point (Split uses it
+  // to interpolate the crossing sample/time). `ratio` is left untouched on a false return.
   bool Intersects(Point fst, Point snd, double *ratio) const;
 
   bool operator==(const Segment &other) const;

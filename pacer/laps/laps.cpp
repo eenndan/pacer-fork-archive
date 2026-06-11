@@ -303,8 +303,7 @@ pacer::Lap pacer::Laps::GetLap(size_t lap) const {
     cum_distances.push_back(track_.ChordDistance(chunk.start, chunk.finish));
   }
 
-  return Lap{.width = 0.0f,
-             .points = std::move(points),
+  return Lap{.points = std::move(points),
              .cum_distances = std::move(cum_distances)};
 }
 

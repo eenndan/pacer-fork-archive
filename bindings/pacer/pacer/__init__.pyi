@@ -125,13 +125,6 @@ class Point:
 
 # Local-metres -> Point (drops z for the Vec3 overload). Both inputs are already in the LOCAL
 # metric coordinate system, so the result is in metres.
-@overload
-def to_point(x: Point) -> Point:
-    pass
-
-@overload
-def to_point(v: Vec3f) -> Point:
-    pass
 
 def to_lon_lat(s: GPSSample) -> Point:
     """GPS degrees -> Point{lon, lat}. Named distinctly from ToPoint so a degrees sample can never
@@ -144,8 +137,14 @@ class Segment:
     second: Point
 
     def intersects(self, fst: Point, snd: Point, ratio: float) -> bool:
-        """Returns True if segments intersects, if ratio is non-null, it will satisfy:
-        fst * (1 - ratio) + snd  lies  on present segment.
+        """True iff this segment and the segment fst->snd PROPERLY cross: both straddle tests use
+        strict inequalities, so a touch — any endpoint of either segment lying exactly ON the
+        other segment's supporting line — is NOT a crossing (tests/test_geometry.cpp pins this,
+        including the consequence that a trace vertex exactly on a timing line yields no crossing
+        from either adjacent trace segment).
+        On a True return, if `ratio` is non-null it receives the crossing's fraction along
+        fst->snd, i.e. fst * (1 - ratio) + snd * ratio is the intersection point (Split uses it
+        to interpolate the crossing sample/time). `ratio` is left untouched on a False return.
         """
         pass
 
@@ -200,21 +199,11 @@ class CoordinateSystem:
     def distance(self, from_: GPSSample, to: GPSSample) -> float:
         pass
 
-@overload
-def interpolate(from_: Point, to: Point, ratio: float) -> Point:
-    pass
-
-@overload
-def interpolate(from_: GPSSample, to: GPSSample, ratio: float) -> GPSSample:
-    pass
-
 ####################    </generated_from:geometry.hpp>    ####################
 
 ####################    <generated_from:laps.hpp>    ####################
 
 class Lap:
-    width: float
-
     points: List[PointInTime[GPSSample]]
     cum_distances: List[float]
 
@@ -229,7 +218,6 @@ class Lap:
 
     def __init__(
         self,
-        width: float = float(),
         points: List[PointInTime[GPSSample]] = List[PointInTime < GPSSample] > (),
         cum_distances: List[float] = List[float](),
     ) -> None:
@@ -477,11 +465,9 @@ class GPMFSource(RawGPSSource):
           with option to iterate over GPSSample-s on top of it.
     """
 
-    @overload
-    def __init__(self, mp4handle: int) -> None:
-        pass
-
-    @overload
+    # C++-ONLY: adopt an already-opened gpmf-parser MP4 handle. Excluded from the Python
+    # bindings (generate-bindings.py fn_exclude_by_name_and_signature) — a junk integer from
+    # Python would be dereferenced as a raw mp4 object pointer and segfault the process.
     def __init__(self, filename: str) -> None:
         pass
 
