@@ -130,7 +130,8 @@ C++ headers → `bindings/<pkg>/generate-bindings.py` runs **litgen** (srcML) �
 
 > **Platform:** `osx-arm64` only (every pixi manifest + `pixi.lock` pin it). CI
 > ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs `pixi run build` + `pixi run test`
-> (ctest) + `pixi run lint` (ruff) on macos-14 (Apple-silicon arm64), on every push and PR.
+> (ctest) + `pixi run lint` (ruff) + `pixi run fmt-check` (clang-format) on macos-14
+> (Apple-silicon arm64), on every push and PR.
 
 ```bash
 git submodule update --init --recursive   # 3rdparty/ (gpmf-parser, nanobind) are empty otherwise
@@ -146,7 +147,8 @@ Pixi tasks (`[tool.pixi.tasks]` in [pyproject.toml](pyproject.toml)):
 | `pixi run test` | CTest: the C++ Catch2 suites **and** the registered Python studio tests |
 | `pixi run studio [-- files]` | the studio app (PySide6) — depends on `build` |
 | `pixi run gen-bindings` | regenerate the `pacer` Python bindings |
-| `pixi run fmt` / `pixi run lint` | clang-format the C/C++ / `ruff check .` |
+| `pixi run fmt` / `pixi run fmt-check` | clang-format (env-pinned) the hand-maintained C/C++ in place / non-mutating check (CI gate). Both exclude the litgen-generated `nanobind_pacer.cpp` — it must stay byte-identical to the generator's output (regen-drift gate) |
+| `pixi run lint` | `ruff check .` |
 
 The C++ build also runs the binding codegen target and deploys the compiled `.so`.
 `CMAKE_EXPORT_COMPILE_COMMANDS` is on; [.clangd](.clangd) expects `build/Release/compile_commands.json`.

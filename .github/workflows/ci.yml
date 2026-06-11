@@ -66,3 +66,9 @@ jobs:
 
       - name: Lint (ruff check via pixi)
         run: pixi run lint
+
+      - name: Format check (clang-format --dry-run --Werror via pixi)
+        # Non-mutating gate over the hand-maintained C/C++ files with the env-pinned
+        # clang-format (the generated nanobind_pacer.cpp is excluded — owned by the
+        # regen-drift gate above).
+        run: pixi run fmt-check
