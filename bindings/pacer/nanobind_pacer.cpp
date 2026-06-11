@@ -429,6 +429,8 @@ void py_init_module_pacer(nb::module_ &m) {
           &pacer::Laps::GetPoint, nb::arg("row"))
       .def("clear_points",
           &pacer::Laps::ClearPoints)
+      .def("track_columns",
+          &pacer::Laps::TrackColumns, "/ The WHOLE raw point track's per-point columns (times, local-metre xs/ys, full_speed,\n/ cum_distances) as parallel arrays — LapColumns' bulk idiom over the full trace instead of\n/ one lap, so the studio layer builds its full-trace arrays in ONE binding crossing instead\n/ of one GetPoint + cs.local crossing per point. Exactly as GetPoint: times[i] / xs[i] /\n/ ys[i] / full_speed[i] equal GetPoint(i).time, cs.Local(GetPoint(i).point).x|y and\n/ GetPoint(i).point.full_speed for every i in [0, PointCount()), where cs is the laps' own\n/ coordinate system (the one set via SetCoordinateSystem). cum_distances[i] is the track's\n/ gap-aware cumulative odometer from point 0 to point i (the same cached prefix sum GetLap's\n/ interior distances are sliced from; see PointTrack). All five columns have length\n/ PointCount(); an empty track yields all-empty arrays (the odometer's internal {0} seed is\n/ an implementation detail and never becomes a row).")
       ;
   ////////////////////    </generated_from:laps.hpp>    ////////////////////
 

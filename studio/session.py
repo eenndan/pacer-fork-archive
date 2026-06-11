@@ -122,18 +122,17 @@ class Session:
         # an empty meter until then, so a from-scratch Session() (no IMU) just has no g signal.
         self._gmeter: gmeter.GMeter = gmeter._empty()
 
-        # Full-trace arrays in local meters + the video-clock time + speed (km/h).
-        n = laps.point_count()
-        self.tx = np.empty(n)
-        self.ty = np.empty(n)
-        self.tt = np.empty(n)
-        self.tv = np.empty(n)
-        for i in range(n):
-            pit = laps.get_point(i)
-            loc = cs.local(pit.point)
-            self.tx[i], self.ty[i] = loc[0], loc[1]
-            self.tt[i] = pit.time
-            self.tv[i] = pit.point.full_speed * 3.6
+        # Full-trace arrays in local meters + the video-clock time + speed (km/h), from ONE
+        # pacer.Laps.track_columns crossing (the same bulk idiom as _lap_columns; was a
+        # per-point get_point/cs.local loop — one binding crossing per point, ~16k+ per load).
+        # Byte-identical: cs.Local in C++ is the laps' own coordinate system, which is `cs`
+        # (== self.cs) on the load path, and full_speed is widened float->double identically
+        # in both paths before the km/h scale.
+        cols = laps.track_columns()
+        self.tx = np.asarray(cols.xs)
+        self.ty = np.asarray(cols.ys)
+        self.tt = np.asarray(cols.times)
+        self.tv = np.asarray(cols.full_speed) * 3.6
 
     # ---------------------------------------------------------------- loading
     @classmethod

@@ -127,7 +127,8 @@ Captured here so the negative results aren't re-litigated. Evidence in [`docs/`]
   delta-endpoint == laptime-diff, `lap_sector_splits` sum == lap-time, `sector_plot_positions`).
 - **Perf headroom (only if needed on longer sessions)** — `useOpenGL` for the pyqtgraph views:
   evaluated and deliberately NOT adopted; revisit only with a measured >33 ms/tick paint time.
-  (The bulk `lap→numpy` accessor — `Laps::LapColumns`, bound as `lap_columns` — has shipped.)
+  (The bulk `lap→numpy` accessor — `Laps::LapColumns`, bound as `lap_columns` — has shipped,
+  as has its full-trace sibling `Laps::TrackColumns` / `track_columns`.)
 
 ---
 
