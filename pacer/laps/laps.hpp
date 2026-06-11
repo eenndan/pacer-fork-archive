@@ -1,5 +1,6 @@
 #pragma once
 
+#include <utility> // std::pair (MinMax)
 #include <vector>
 
 #include <pacer/datatypes/datatypes.hpp>
@@ -9,8 +10,6 @@
 namespace pacer {
 
 struct Lap {
-  float width;
-
   std::vector<PointInTime<GPSSample>> points;
   std::vector<double> cum_distances;
 

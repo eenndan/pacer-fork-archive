@@ -1,3 +1,5 @@
+#include <cmath>
+
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
@@ -55,6 +57,115 @@ TEST_CASE("Segment::Intersects — vertical timing line at x=0",
   SECTION("null ratio pointer is safe (no crash)") {
     bool hit = s.Intersects(Point{-1, 0}, Point{1, 0}, nullptr);
     REQUIRE(hit);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Segment::Intersects / Split — exact-on-line edge conventions
+//
+// These pin the boundary conventions the lap/sector timing path relies on
+// (laps.cpp Update() calls Split per consecutive trace-point pair). Both
+// straddle tests in Intersects use `>= 0 -> false`, i.e. STRICT proper
+// crossings only. Consequences pinned below:
+//   * a trace VERTEX lying EXACTLY on the timing line is owned by NEITHER
+//     adjacent trace segment — both report no crossing, so the crossing is
+//     dropped entirely (zero, not one). With real GPS doubles an exact zero
+//     essentially never occurs; nudge the vertex any epsilon off the line and
+//     exactly ONE of the two adjacent segments crosses (the one whose other
+//     endpoint is on the far side).
+//   * a tangential touch (the timing line's ENDPOINT grazing the trace
+//     segment) is no crossing either.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Segment::Intersects — trace vertex exactly on the timing line",
+          "[geometry][segment][edge]") {
+  // Timing line along x=0, from (0,-1) to (0,1).
+  Segment s{.first = {0, -1}, .second = {0, 1}};
+  // Trace A -> B -> C where B sits EXACTLY on the line (x == 0), strictly
+  // inside the line's span.
+  const Point a{-1, 0.2}, c{1, 0.0};
+
+  SECTION("exact vertex: NEITHER adjacent segment crosses (zero total)") {
+    const Point b{0, 0.1};
+    double ratio = -7.0; // sentinel: must stay untouched on false returns
+    CHECK_FALSE(s.Intersects(a, b, &ratio));
+    CHECK_FALSE(s.Intersects(b, c, &ratio));
+    // Contract: ratio is written only on a true return.
+    CHECK(ratio == -7.0);
+  }
+
+  SECTION("vertex nudged BEFORE the line: only the outgoing segment crosses") {
+    const Point b{-1e-9, 0.1};
+    double ratio = -7.0;
+    CHECK_FALSE(s.Intersects(a, b, &ratio)); // both endpoints still left of x=0
+    CHECK(ratio == -7.0);
+    REQUIRE(s.Intersects(b, c, &ratio)); // crosses essentially AT b
+    CHECK(ratio == Catch::Approx(0.0).margin(1e-6));
+  }
+
+  SECTION("vertex nudged PAST the line: only the incoming segment crosses") {
+    const Point b{1e-9, 0.1};
+    double ratio = -7.0;
+    REQUIRE(s.Intersects(a, b, &ratio)); // crosses essentially AT b
+    CHECK(ratio == Catch::Approx(1.0).margin(1e-6));
+    ratio = -7.0;
+    CHECK_FALSE(s.Intersects(b, c, &ratio)); // both endpoints right of x=0
+    CHECK(ratio == -7.0);
+  }
+}
+
+TEST_CASE("Segment::Intersects — tangential touch (line endpoint grazes the "
+          "trace segment) is no crossing",
+          "[geometry][segment][edge]") {
+  // Timing line from (0,0) to (0,1): its endpoint `first` == (0,0) lies
+  // EXACTLY on the trace segment (-1,0) -> (1,0). The first straddle test
+  // (line endpoints vs the trace's supporting line) hits exactly 0 -> false.
+  Segment s{.first = {0, 0}, .second = {0, 1}};
+  double ratio = -7.0;
+  CHECK_FALSE(s.Intersects(Point{-1, 0}, Point{1, 0}, &ratio));
+  CHECK(ratio == -7.0);
+
+  // Same convention from the other side: trace grazing the OTHER endpoint.
+  Segment s2{.first = {0, -1}, .second = {0, 0}};
+  CHECK_FALSE(s2.Intersects(Point{-1, 0}, Point{1, 0}, &ratio));
+  CHECK(ratio == -7.0);
+}
+
+namespace {
+PointInTime<GPSSample> TracePoint(double lon, double lat, double t) {
+  return PointInTime<GPSSample>{
+      .point = GPSSample{.lat = lat,
+                         .lon = lon,
+                         .altitude = 0,
+                         .full_speed = 0,
+                         .ground_speed = 0,
+                         .timestamp_ms = 0},
+      .time = t,
+  };
+}
+} // namespace
+
+TEST_CASE("Split — vertex exactly on the timing line is dropped by both "
+          "adjacent trace segments",
+          "[geometry][split][edge]") {
+  // Split is the timing-path entry (laps.cpp Update()): segments are in
+  // lon/lat degrees via ToLonLat (Point{lon, lat}). Same geometry as above.
+  Segment line{.first = {0, -1}, .second = {0, 1}};
+  auto a = TracePoint(-1.0, 0.2, /*t=*/10.0);
+  auto c = TracePoint(1.0, 0.0, /*t=*/12.0);
+
+  SECTION("exact vertex: both Splits return nullopt (crossing lost)") {
+    auto b = TracePoint(0.0, 0.1, /*t=*/11.0);
+    CHECK_FALSE(Split(line, a, b).has_value());
+    CHECK_FALSE(Split(line, b, c).has_value());
+  }
+
+  SECTION("epsilon-off vertex: exactly one Split fires, at the vertex's time") {
+    auto b = TracePoint(-1e-9, 0.1, /*t=*/11.0);
+    CHECK_FALSE(Split(line, a, b).has_value());
+    auto hit = Split(line, b, c);
+    REQUIRE(hit.has_value());
+    CHECK(hit->time == Catch::Approx(11.0).margin(1e-6));
   }
 }
 
@@ -259,5 +370,51 @@ TEST_CASE(
 
   SECTION("distance between distinct points is positive") {
     CHECK(cs.Distance(a, b) > 0.0);
+  }
+}
+
+TEST_CASE("Default-constructed CoordinateSystem is a usable identity (ECEF) "
+          "frame, not silent zeros",
+          "[geometry][coordinate_system]") {
+  // The members used to default to an all-zero basis, which made every
+  // Local()/Distance() silently return 0 for code that forgot to install a
+  // track-centred frame. The default is now the identity ECEF basis.
+  CoordinateSystem cs;
+  GPSSample a{.lat = 40.0,
+              .lon = -74.0,
+              .altitude = 10.0,
+              .full_speed = 0,
+              .ground_speed = 0,
+              .timestamp_ms = 0};
+  GPSSample b{.lat = 40.01,
+              .lon = -73.99,
+              .altitude = 10.0,
+              .full_speed = 0,
+              .ground_speed = 0,
+              .timestamp_ms = 0};
+
+  SECTION("Local() yields the raw ECEF position in metres (earth-scale)") {
+    auto local = cs.Local(a);
+    double norm = std::sqrt(local.x * local.x + local.y * local.y +
+                            local.z * local.z);
+    // |ECEF position| is between the polar and (height-compensated)
+    // equatorial radius — emphatically not zero.
+    CHECK(norm > 6'300'000.0);
+    CHECK(norm < 6'400'000.0);
+  }
+
+  SECTION("Distance() is the true 3D chord, not zero") {
+    // ~0.01 deg lat + 0.01 deg lon near 40N is roughly 1.4 km.
+    double d = cs.Distance(a, b);
+    CHECK(d > 1'000.0);
+    CHECK(d < 2'000.0);
+  }
+
+  SECTION("Global(Local(p)) round-trips through the identity frame") {
+    auto recovered = cs.Global(cs.Local(a));
+    CHECK_THAT(recovered.lat, Catch::Matchers::WithinRelMatcher(a.lat, 1e-9));
+    CHECK_THAT(recovered.lon, Catch::Matchers::WithinRelMatcher(a.lon, 1e-9));
+    CHECK_THAT(recovered.altitude,
+               Catch::Matchers::WithinRelMatcher(a.altitude, 1e-6));
   }
 }

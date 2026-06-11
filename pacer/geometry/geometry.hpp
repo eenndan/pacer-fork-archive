@@ -3,7 +3,6 @@
 #include <cstdlib>
 #include <optional>
 #include <ostream>
-#include <utility>
 
 #include <pacer/datatypes/datatypes.hpp>
 #include <pacer/datatypes/ops.hpp>
@@ -62,8 +61,14 @@ bool ApproxEqual(const Point &a, const Point &b, double eps = 1e-6);
 struct Segment {
   Point first, second;
 
-  // Returns true if segments intersects, if ratio is non-null, it will satisfy:
-  //   fst * (1 - ratio) + snd  lies  on present segment.
+  // True iff this segment and the segment fst->snd PROPERLY cross: both straddle tests use
+  // strict inequalities, so a touch — any endpoint of either segment lying exactly ON the
+  // other segment's supporting line — is NOT a crossing (tests/test_geometry.cpp pins this,
+  // including the consequence that a trace vertex exactly on a timing line yields no crossing
+  // from either adjacent trace segment).
+  // On a true return, if `ratio` is non-null it receives the crossing's fraction along
+  // fst->snd, i.e. fst * (1 - ratio) + snd * ratio is the intersection point (Split uses it
+  // to interpolate the crossing sample/time). `ratio` is left untouched on a false return.
   bool Intersects(Point fst, Point snd, double *ratio) const;
 
   bool operator==(const Segment &other) const;
@@ -92,6 +97,14 @@ struct CoordinateSystem {
   //
   // This is most likely not the best way to do this, but it works for now.
 
+  // Default frame: IDENTITY basis (dx/dy/dz = the ECEF unit axes, origin at the geocentre),
+  // i.e. Local() returns the point's raw ECEF position in metres and Distance() the true 3D
+  // chord. WHY: the members used to default to all-zero, so a default-constructed
+  // CoordinateSystem made every Local()/Distance() silently return 0 — a trap for new code
+  // that forgot SetCoordinateSystem/CoordinateSystem(origin). Every real pipeline still
+  // installs a track-centred CoordinateSystem(origin) before any distance is read (verified:
+  // byte-identical lap times + trace on the real session), so this only changes what FORGOTTEN
+  // initialization yields: real metres instead of silent zeros.
   CoordinateSystem() = default;
   explicit CoordinateSystem(GPSSample origin);
 
@@ -109,7 +122,8 @@ private:
   constexpr static double R_pole = 6'357'000;
   static Vec3f CanonicalLocal(GPSSample point);
 
-  Vec3f local_origin, dx, dy, dz;
+  // Identity (ECEF) defaults — see the default-constructor note above.
+  Vec3f local_origin, dx{1, 0, 0}, dy{0, 1, 0}, dz{0, 0, 1};
 };
 
 Point Interpolate(Point from, Point to, double ratio);

@@ -51,13 +51,24 @@ def my_litgen_options() -> litgen.LitgenOptions:
     options.class_template_options.add_ignore("PointwiseOperators")
     options.class_template_options.add_ignore("LinearOperators")
 
-    # Generic template helpers we don't want auto-specialized into the bindings.
-    options.fn_template_options.add_ignore("Interpolate")
-    options.fn_template_options.add_ignore("ToPoint")
+    # NOTE: `Split` (geometry.hpp) is a function template over PointInTime<P> with no
+    # registered specialization, so litgen skips it on its own — expect one benign
+    # "Excluding template type PointInTime<P>" warning per regen. fn_template_options
+    # ignores can NOT silence it (verified: adding add_ignore("Split") changes nothing),
+    # and the former add_ignore("Interpolate"/"ToPoint") lines here were no-ops too —
+    # those are plain overloads, not templates, so they were being bound anyway. They are
+    # real exclusions below now.
 
-    # ApproxEqual is an internal geometry helper (the single epsilon-equality used by
-    # Segment::operator==), not part of the Python API — keep it off the binding surface.
-    options.fn_exclude_by_name__regex = "^ApproxEqual$"
+    # Internal geometry helpers, not part of the Python API — keep them off the binding
+    # surface: ApproxEqual (the single epsilon-equality used by Segment::operator==),
+    # Interpolate (the crossing interpolation Split uses) and the ToPoint local-space
+    # coordinate shims. ToLonLat stays bound (the deliberately-named degrees->Point API).
+    options.fn_exclude_by_name__regex = "^ApproxEqual$|^Interpolate$|^ToPoint$"
+
+    # GPMFSource(size_t mp4handle) adopts an already-opened gpmf-parser MP4 handle — from
+    # Python a junk integer would be dereferenced as a raw pointer and segfault the process.
+    # Keep it C++-only; the GPMFSource(filename) constructor remains the Python entry point.
+    options.fn_exclude_by_name_and_signature = {"GPMFSource": "size_t"}
 
     # ////////////////////////////////////////////////////////////////////
     # Format the python stubs with black

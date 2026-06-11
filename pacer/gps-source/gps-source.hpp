@@ -79,6 +79,9 @@ public:
 //       with option to iterate over GPSSample-s on top of it.
 class GPMFSource : public RawGPSSource {
 public:
+  // C++-ONLY: adopt an already-opened gpmf-parser MP4 handle. Excluded from the Python
+  // bindings (generate-bindings.py fn_exclude_by_name_and_signature) — a junk integer from
+  // Python would be dereferenced as a raw mp4 object pointer and segfault the process.
   explicit GPMFSource(size_t mp4handle);
   explicit GPMFSource(const char *filename);
   ~GPMFSource() noexcept;
