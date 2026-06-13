@@ -140,6 +140,15 @@ add_test(NAME test_gmeter_overlay
          COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_gmeter_overlay.py)
 set_tests_properties(test_gmeter_overlay PROPERTIES
                      ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# Session library (F8, studio.library + studio.library_dialog): the pacer-free index — schema
+# round-trip / float-repr exactness, the fingerprint upsert-not-duplicate rule, corruption →
+# safe-empty self-heal, pb_series extraction — plus the offscreen Library dialog (list/sort,
+# Open routes through a spy callback, missing-file greying, the PB best-vs-date mini-chart) on
+# synthetic index dicts. Imports library_dialog -> Qt, so run offscreen. No telemetry file.
+add_test(NAME test_library
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_library.py)
+set_tests_properties(test_library PROPERTIES
+                     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # The Python tests must import the cmake-deployed bindings package (bindings/pacer/pacer,
 # where the build drops the compiled module) WITHOUT relying on a pip/editable install of
@@ -155,7 +164,7 @@ foreach(pytest IN ITEMS test_scrub_conversion test_lap_timing test_chapters test
                         test_compare test_map_ghost test_cross_reference
                         test_controllers test_validate_wallclock test_corners
                         test_consistency test_gmeter test_gmeter_overlay test_export_data
-                        test_driving)
+                        test_driving test_library)
     set_property(TEST ${pytest} APPEND PROPERTY ENVIRONMENT
                  "PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/pacer")
 endforeach()

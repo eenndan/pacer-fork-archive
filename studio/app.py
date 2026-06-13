@@ -30,10 +30,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import chapters, export_data, sidecar, theme
+from . import chapters, export_data, library, sidecar, theme
 from .compare_controller import CompareController
 from .consistency_panel import ConsistencyPanel
 from .lap_table import CornerTable, LapTable
+from .library_dialog import LibraryDialog
 from .map_view import MapView
 from .plots_view import PlotsView
 from .scrub_controller import ScrubController
@@ -113,6 +114,14 @@ class StudioWindow(QMainWindow):
             self.statusBar().showMessage(notice)
         else:
             self.statusBar().clearMessage()
+
+        # F8 session library: record this recording in the local index (date / track / lap
+        # count / best / theoretical / paths) for the Library… dialog + PB progression. Done
+        # LAST — after the UI is built and shown — so it can never slow or risk the load; and
+        # fully guarded so a failure to write the index (read-only app-support dir, disk full,
+        # …) only logs a warning and never disrupts the app. A missing/empty index just starts
+        # one; a corrupt index self-heals (library.load returns an empty index).
+        self._update_library(paths)
 
     def _on_load_failed(self, paths: list[str], exc: Exception):
         """A session load failed (missing / corrupt / no-GPS file). Show a clear, non-fatal error
@@ -464,6 +473,15 @@ class StudioWindow(QMainWindow):
                                           "session's own best lap")
         self._clear_ref_action.triggered.connect(self._clear_reference)
         self._clear_ref_action.setEnabled(False)
+        # F8 session library: a local index of every analyzed recording (date / track / best /
+        # theoretical) with per-track PB progression + quick re-open. Additive — its own
+        # separated section so the File-menu region stays conflict-light against the other PRs.
+        menu.addSeparator()
+        self._library_action = menu.addAction("Library…")
+        self._library_action.setToolTip(
+            "Browse your analyzed recordings (date / track / best lap / theoretical best), "
+            "re-open any of them, and see per-track PB progression")
+        self._library_action.triggered.connect(self._open_library)
 
     # ----------------------------------------------------- keyboard shortcuts
     def _build_shortcuts(self):
@@ -544,6 +562,24 @@ class StudioWindow(QMainWindow):
         if len(sibs) > 1:
             print(f"studio: loading full recording — {len(sibs)} chapters.", flush=True)
             self._load(sibs)
+
+    # ----------------------------------------------------------- session library (F8)
+    def _update_library(self, paths: list[str]):
+        """Upsert the just-loaded recording into the local session-library index. FULLY GUARDED:
+        any failure (entry build, or an unwritable app-support dir) is swallowed with a warning
+        — a library write must NEVER disrupt a load. Called post-UI from _load (see there)."""
+        try:
+            entry = self.session.library_entry(paths)
+            library.upsert_and_save(entry)
+        except Exception as exc:  # noqa: BLE001 — the index is additive; never break a load
+            print(f"studio: session library not updated ({exc!r}).", flush=True)
+
+    def _open_library(self):
+        """File ▸ Library…: open the session-library dialog (a sortable list of analyzed
+        recordings + per-track PB progression). Re-opening an entry routes back through the
+        guarded `_load` path; the dialog reads the index defensively (empty when missing)."""
+        dlg = LibraryDialog(library.load(), open_recording=self._load, parent=self)
+        dlg.exec()
 
     # ----------------------------------------------------------- data export (F11)
     # File ▸ Export: the writers live in studio/export_data.py (pacer-free, Qt-free); this

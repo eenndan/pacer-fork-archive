@@ -117,6 +117,19 @@ All shipped and merged. Per-feature implementation notes live in [README.md](REA
   correlate **r≈1.00** in track position with the independent **GPS speed-derivative** method
   (~4–6 m median offset) and yield **zero** false onsets on the full-throttle straight (0060 +
   0062); θ_b stable across recordings (0.463 vs 0.452 g, 2.4% apart).
+- **Session library** (`library.py` + `library_dialog.py`, F8) — a versioned local index at
+  `~/Library/Application Support/pacer/library.json` (atomic write; pacer-free, the sidecar's twin).
+  **Every successful load** upserts the recording (track / date from the GPS9 wall clock / lap count /
+  best / theoretical / paths) **post-UI and fully guarded** — a library-write failure only logs a
+  warning, never disrupts or slows the load. One entry per **recording fingerprint** (`<first-chapter
+  stem>|<total duration>`), so re-opening the same recording — single chapter or the full chaptered
+  chain — **updates in place, no duplicate** (verified on the real pair: 0060 + the 3-chapter 0062 set
+  → 2 distinct entries; re-loading 0060 keeps the count at 2). **File ▸ "Library…"** opens a
+  self-contained dialog: a **sortable** list (date / track / best / theoretical), an **Open** button
+  that re-loads the selected recording through `_load`, **missing-file rows greyed + not openable**,
+  and a per-track **PB-progression mini-chart** (best-lap vs date — pyqtgraph). A corrupt/missing index
+  **self-heals to an empty library** (same load-guard philosophy as the sidecar revert). Dormant/safe:
+  with the dialog never opened, behavior is unchanged.
 - **Dark "Refined Minimal" theme** (`theme.py`) — single-source design tokens + dark `QPalette` +
   global QSS, Inter fonts, Phosphor icon buttons (`qtawesome`); charts, table, map and video chrome
   all adopt the dark surface.
