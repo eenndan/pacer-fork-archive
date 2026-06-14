@@ -132,6 +132,18 @@ add_test(NAME test_driving
          COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_driving.py)
 set_tests_properties(test_driving PROPERTIES
                      ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# Auto coaching summary (studio.coaching / coaching_panel, F10): the per-corner median-time-loss
+# ranking + the DETERMINISTIC dominant-reason selection (a planted apex-speed deficit ⇒ apex; a
+# planted late-throttle coast the best lap lacks ⇒ coasting; an earlier/longer brake ⇒ braking;
+# pure cross-lap spread ⇒ line), DETERMINISM (identical across calls / cache recomputes), the
+# <MIN_LAPS friendly-excluded gate, the Session wiring on a bare Session (ranking + corner-entry
+# projection onto the best lap + dropout exclusion), and the offscreen Opportunities dialog
+# (populate, Go→jump_to(cid, entry), excluded state). Imports coaching_panel -> Qt, so run
+# offscreen. No telemetry file.
+add_test(NAME test_coaching
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_coaching.py)
+set_tests_properties(test_coaching PROPERTIES
+                     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # Video-overlay export PURE LOGIC (studio.export_video, F9): the lap-window trim math, the
 # per-frame overlay-value lookup against a synthetic Session (same accessors the live readout
 # reads), the ffmpeg decode/encode command construction, and the Renderer pump + cancel with the
@@ -174,7 +186,7 @@ foreach(pytest IN ITEMS test_scrub_conversion test_lap_timing test_chapters test
                         test_compare test_map_ghost test_cross_reference
                         test_controllers test_validate_wallclock test_corners
                         test_consistency test_gmeter test_gmeter_overlay test_export_data
-                        test_driving test_library test_export_video)
+                        test_driving test_coaching test_library test_export_video)
     set_property(TEST ${pytest} APPEND PROPERTY ENVIRONMENT
                  "PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/pacer")
 endforeach()
