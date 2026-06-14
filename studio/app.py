@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import chapters, export_data, export_video, library, sidecar, theme
+from .coaching_panel import OpportunitiesDialog
 from .compare_controller import CompareController
 from .consistency_panel import ConsistencyPanel
 from .lap_table import CornerTable, LapTable
@@ -546,6 +547,17 @@ class StudioWindow(QMainWindow):
             "re-open any of them, and see per-track PB progression")
         self._library_action.triggered.connect(self._open_library)
 
+        # F10 auto coaching summary: a SEPARATE top-level "Coaching" menu (its own region so the
+        # File menu stays conflict-light) with the post-load "Opportunities" dialog — the top-3
+        # corners by realistic time lost vs your own best lap, each with the dominant measured
+        # reason + a jump-to. Read-only; recomputed from the session each time it's opened.
+        coaching_menu = self.menuBar().addMenu("&Coaching")
+        self._opportunities_action = coaching_menu.addAction("Opportunities…")
+        self._opportunities_action.setToolTip(
+            "Where to find time vs your own best lap: the top-3 corners by realistic time lost "
+            "(median of your clean laps), each with the measured reason and a jump-to.")
+        self._opportunities_action.triggered.connect(self._open_opportunities)
+
     # ----------------------------------------------------- keyboard shortcuts
     def _build_shortcuts(self):
         """Window-level playback shortcuts: Space (play/pause), M (mute), G (g-meter overlay),
@@ -643,6 +655,52 @@ class StudioWindow(QMainWindow):
         guarded `_load` path; the dialog reads the index defensively (empty when missing)."""
         dlg = LibraryDialog(library.load(), open_recording=self._load, parent=self)
         dlg.exec()
+
+    # -------------------------------------------------- auto coaching summary (F10)
+    def _open_opportunities(self):
+        """Coaching ▸ Opportunities…: open the read-only opportunities dialog, built from a
+        FRESH session.coaching_opportunities() (recomputed each open — zero per-tick cost; the
+        per-lap inputs it composes are already cached). The dialog handles its own friendly
+        excluded state when there are too few clean laps. Each row's Go button routes to
+        `_jump_to_opportunity` (corner select + best-lap entry seek). No-op if the FIRST load
+        failed (no session yet) — defensive, like the export actions' enabled-state gate."""
+        if getattr(self, "session", None) is None:
+            return
+        opps = self.session.coaching_opportunities()
+        dlg = OpportunitiesDialog(opps, jump_to=self._jump_to_opportunity, parent=self)
+        dlg.exec()
+
+    def _jump_to_opportunity(self, cid: int, _entry_dist: float):
+        """Jump-to for an opportunity row: select corner `cid` (map apex ring + the Corners view
+        on the BEST lap) and seek the video to the BEST lap's ENTRY to that corner.
+
+        Reuses the existing corner-select + seek paths: the best lap is selected in the lap
+        table (so the Corners view + charts describe it, exactly like a user lap-click), the
+        Corners view is shown, the map rings the apex (MapView.highlight_corner, the consistency
+        panel's cue), and the video seeks to corner_entry_media_time(best, cid) — an absolute
+        media time, fed straight to video.seek like the lap-select seek. No-op if there's no best
+        lap or the corner/entry can't be resolved (a degenerate session)."""
+        best = self.session.best_lap_id()
+        if best is None:
+            return
+        # Select the best lap (programmatic select, NOT a user-select, so it doesn't re-enter the
+        # seek-on-select path — we own the seek below, to the corner entry rather than the lap
+        # start). This repoints the Corners view + charts onto the best lap.
+        self.table.select([best])
+        self._on_laps_selected([best])
+        # Show the Corners view so the selected corner's per-corner row is visible (the toggle
+        # also updates the table header). Idempotent if already in Corners mode.
+        if not self.corners_btn.isChecked():
+            self.corners_btn.setChecked(True)
+        # Ring the corner's apex on the map (display-only cue, same as the consistency panel).
+        self.map.highlight_corner(cid)
+        # Seek the video to the best lap's entry to this corner.
+        target = self.session.corner_entry_media_time(best, cid)
+        if target is not None:
+            self.video.seek(target)
+            # Seed auto-follow to the lap the seek lands in, so the immediate post-seek tick
+            # isn't treated as a lap-change edge (mirrors the lap-select seek's handling).
+            self._followed_lap = self.session.lap_at_time(target)
 
     # ----------------------------------------------------------- data export (F11)
     # File ▸ Export: the writers live in studio/export_data.py (pacer-free, Qt-free); this

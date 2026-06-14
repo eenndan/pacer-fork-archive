@@ -28,6 +28,7 @@ import pacer
 
 from . import (
     chapters,
+    coaching,
     consistency,
     corners,
     cross_reference,
@@ -1181,6 +1182,116 @@ class Session:
                 times_by_lap.append([s.time for s in st])
         return consistency.rank_corners(
             consistency.corner_spreads([c.cid for c in corner_list], times_by_lap))
+
+    # ------------------------------------------------------ auto coaching summary (F10)
+    # The capstone: composes the corner model (F2), driving channels (F5) and consistency
+    # stats (F6) into the ranked "opportunities" — where to find time vs your own best lap,
+    # with the dominant MEASURED reason per corner. The math lives pacer-free in
+    # studio/coaching.py; this accessor owns the only pacer-side extraction (the per-lap
+    # corner stats / brake events / coasting spans) and hands plain dataclasses + arrays to
+    # the model. Not cached: the panel reads it on load and after a re-segmentation only
+    # (never on the 30 Hz tick), and every per-lap input it reads is already memoized above.
+
+    def coaching_opportunities(self) -> coaching.Opportunities:
+        """The ranked coaching opportunities (F10): per corner, the MEDIAN time lost vs the
+        best lap over the consistency laps (biggest first), with the dominant measured reason
+        attached to the top-N. Deterministic and explainable (see studio/coaching.py).
+
+        Returns an Opportunities with `enough=False` (empty rows) when there are fewer than
+        coaching.MIN_LAPS valid, dropout-free laps — the friendly "need more laps" state, no
+        crash. Composes only existing accessors: corners(), lap_corner_stats(),
+        consistency_lap_ids(), corner_consistency(), lap_brake_events(), lap_coasting_spans(),
+        best_lap_id(), lap_time()."""
+        ids = self.consistency_lap_ids()
+        corner_list = self.corners()
+        best = self.best_lap_id()
+        if not corner_list or best is None:
+            return coaching.Opportunities(enough=False, n_laps=len(ids),
+                                          median_lap_id=None, rows=[])
+        n = len(corner_list)
+        # Per candidate lap: lap time + the per-corner time-in-corner aligned to corner_list.
+        # A degenerate lap projects to [] (len != n) — drop it from BOTH the id list and the
+        # matrix so every row of corner_times_by_lap is aligned to candidate_lap_ids.
+        cand_ids: list[int] = []
+        lap_times: list[float] = []
+        corner_times_by_lap: list[list[float]] = []
+        for i in ids:
+            st = self.lap_corner_stats(i)
+            if len(st) != n:
+                continue
+            cand_ids.append(i)
+            lap_times.append(self.lap_time(i))
+            corner_times_by_lap.append([s.time for s in st])
+
+        # The best lap's own per-corner time-in-corner (its self-delta is 0; we need the raw
+        # times as the per-corner baseline the median loss is measured against).
+        best_stats = self.lap_corner_stats(best)
+        if len(best_stats) != n:
+            return coaching.Opportunities(enough=False, n_laps=len(cand_ids),
+                                          median_lap_id=None, rows=[])
+        best_corner_times = [s.time for s in best_stats]
+
+        # The representative ("median") lap — its time is the median of the candidate set.
+        med_id = coaching.median_lap_id(cand_ids, lap_times)
+
+        # Cross-lap σ of time-in-corner per cid (from the F6 ranking), as the LINE signal.
+        sigmas_by_cid = {sp.cid: sp.sigma for sp in self.corner_consistency()}
+
+        # The median lap's per-corner apex-speed delta vs best (km/h) — the APEX signal. From
+        # lap_corner_stats (deltas measured against the best lap). [] if no median lap.
+        if med_id is not None:
+            med_stats = self.lap_corner_stats(med_id)
+            median_apex_deltas = ([s.apex_speed_delta for s in med_stats]
+                                  if len(med_stats) == n else [])
+        else:
+            median_apex_deltas = []
+
+        # The driving channels (brake/coast) for the median + best laps — the BRAKING/COASTING
+        # signals. [] when there's no g signal (the apex/line signals still drive the reasons).
+        med_brakes = self.lap_brake_events(med_id) if med_id is not None else []
+        best_brakes = self.lap_brake_events(best)
+        med_coast = self.lap_coasting_spans(med_id) if med_id is not None else []
+        best_coast = self.lap_coasting_spans(best)
+
+        return coaching.summarize(
+            corners=corner_list,
+            candidate_lap_ids=cand_ids,
+            lap_times=lap_times,
+            corner_times_by_lap=corner_times_by_lap,
+            best_corner_times=best_corner_times,
+            sigmas_by_cid=sigmas_by_cid,
+            median_brake_events=med_brakes,
+            best_brake_events=best_brakes,
+            median_coast_spans=med_coast,
+            best_coast_spans=best_coast,
+            median_apex_deltas=median_apex_deltas,
+        )
+
+    def corner_entry_media_time(self, lap_id: int, cid: int) -> float | None:
+        """The media-clock time (s) at which `lap_id` ENTERS corner `cid` — the jump-to seek
+        target for an opportunity (seek the best lap to the corner's entry). The corner's
+        reference-odometer enter point is projected onto this lap by normalized distance (the
+        SAME projection lap_corner_stats / lap_corner_grip use), then the lap's elapsed→media
+        time is read at that distance. None when the corner/lap is unknown or degenerate.
+
+        Returned as an ABSOLUTE media time (lap start + elapsed at entry) so the caller can
+        hand it straight to video.seek, like the lap-select seek does."""
+        basis = self._corner_basis()
+        if basis is None or not basis[0]:
+            return None
+        corner_list, total_ref = basis
+        corner = next((c for c in corner_list if c.cid == cid), None)
+        if corner is None:
+            return None
+        td = self._lap_time_dist(lap_id)
+        if td is None:
+            return None
+        times, dists = td
+        total_lap = float(dists[-1])
+        if total_lap <= 0:
+            return None
+        d_enter = corner.enter / total_ref * total_lap  # project onto THIS lap's odometer
+        return float(np.interp(d_enter, dists, times))
 
     # ----------------------------------------------------- driving channels (F5)
     # Brake events / coasting spans / per-corner grip, derived in studio/driving.py (pacer-free)

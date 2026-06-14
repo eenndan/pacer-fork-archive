@@ -130,6 +130,25 @@ All shipped and merged. Per-feature implementation notes live in [README.md](REA
   and a per-track **PB-progression mini-chart** (best-lap vs date — pyqtgraph). A corrupt/missing index
   **self-heals to an empty library** (same load-guard philosophy as the sidecar revert). Dormant/safe:
   with the dialog never opened, behavior is unchanged.
+- **Auto coaching summary** (`coaching.py` + `coaching_panel.py`, F10) — the capstone "opportunities"
+  list: **where to find time vs your OWN best lap**, composing the corner model (F2), driving
+  channels (F5) and consistency stats (F6) **without recomputing any of them** (pure numpy,
+  pacer-free). Per corner, the **median time lost vs the best lap's same corner** over the
+  consistency laps (the ⚠-clean set), ranked **biggest realistic gain first**; the **top-3** each
+  get the **dominant MEASURED reason** — the largest seconds-of-loss contribution among **apex**
+  (typical lap's apex/min-speed deficit vs best ⇒ "carry more apex speed −X km/h"), **braking**
+  (more time on the brakes than best in the corner's approach ⇒ "brake later/shorter"), **coasting**
+  (a coast inside the corner the best lap lacks ⇒ "back to throttle sooner") and **line** (high
+  cross-lap σ ⇒ "be consistent here"), ties broken by a fixed reason priority. The "typical" lap is
+  the **median-lap-time** lap. Everything **deterministic + explainable — numbers only, no ML/vibes**
+  (`summarize()` byte-identical across calls). UI: **Coaching ▸ "Opportunities…"** — a read-only
+  3-row dialog (corner · time lost · reason+numbers · a **"Go →"** that selects the corner on the
+  map + Corners view and **seeks the video to the best lap's entry** to it), rebuilt from a fresh
+  summary each open (zero per-tick cost). **Excluded under `MIN_LAPS` (3) clean laps** with a
+  friendly "need more laps" message (no crash). On the real D24 0060 the #1 corner matches the delta
+  chart's biggest median-lap bleed (cross-checked); the time-LOSS ranking and the F6 σ-ranking are
+  both legitimate and can differ (loss = where the typical lap is slow vs best; σ = where it's
+  erratic). Unit-tested in `tests/test_coaching.py`.
 - **Dark "Refined Minimal" theme** (`theme.py`) — single-source design tokens + dark `QPalette` +
   global QSS, Inter fonts, Phosphor icon buttons (`qtawesome`); charts, table, map and video chrome
   all adopt the dark surface.
@@ -263,9 +282,9 @@ Captured here so the negative results aren't re-litigated. Evidence in [`docs/`]
   trace clean/smooth, segmentation + start-line fit); `tracks.py` is pure geometry; `ingest.py` is
   the GoPro/GPMF data-loading layer (the `SequentialGPSSource` chain build + the raw GPS/IMU stream
   readers). **Every other studio module stays pacer-free** — the views
-  (`map_view`/`plots_view`/`lap_table`/`video_view`/`player_pane`/`gmeter_overlay`/`app`), the
-  controllers (`scrub_controller`/`compare_controller`), and the pure helpers
-  (`gapfill`/`reference`/`gmeter`/`chapters`/`theme`/`_signal`/`transponder`).
+  (`map_view`/`plots_view`/`lap_table`/`video_view`/`player_pane`/`gmeter_overlay`/`coaching_panel`/`app`),
+  the controllers (`scrub_controller`/`compare_controller`), and the pure analysis/helpers
+  (`corners`/`driving`/`consistency`/`coaching`/`gapfill`/`reference`/`gmeter`/`chapters`/`theme`/`_signal`/`transponder`).
 - `pacer` is GPMF/GoPro **`.MP4` only**. It supplies the
   telemetry time axis; the app brings its own video player (pacer doesn't decode pixels).
 - **Perf invariants — do not regress:** the 30 Hz tick decouple (`_on_position` only stores the time;
