@@ -281,6 +281,23 @@ class PlayerPane(QWidget):
             return 0.0
         return self._chapters.chapters[self._current_chapter].offset
 
+    def _source_is_chapter(self, index: int) -> bool:
+        """True iff the player's CURRENT media source is in fact chapter `index`'s file — i.e. the
+        genuine target load has landed (not a leftover load from an earlier _set_source still in
+        flight). Compares resolved absolute local-file paths. The headless null player has no
+        source() (the deferred seek there is synchronous + raceless), so it reports True so the
+        PACER_NO_MEDIA path stays byte-identical."""
+        if self._chapters is None:
+            return True
+        source = getattr(self.player, "source", None)
+        if source is None:
+            return True  # null/inert player (headless): no async load to race
+        loaded = source().toLocalFile()
+        if not loaded:
+            return True  # no resolvable source URL — don't block the legacy apply path
+        want = os.path.abspath(self._chapters.chapters[index].path)
+        return os.path.abspath(loaded) == want
+
     def _set_source(self, index: int, switching: bool = True):
         """Load chapter `index` as the player's source (no seek/play here — callers arrange the
         post-load seek via self._pending, applied once the NEW media has genuinely loaded).
@@ -567,7 +584,15 @@ class PlayerPane(QWidget):
         )
         if loaded and self._pending is not None:
             index, local, resume = self._pending
-            if index == self._current_chapter:
+            # Apply the deferred seek ONLY when the genuinely-loaded source is in fact the pending
+            # chapter's FILE — not merely when the pending chapter index matches _current_chapter.
+            # On a FRESH pane the initial _set_source(0) and an immediate cross-chapter seek to a
+            # LATER chapter are both in flight: the gate can be opened (LoadingMedia) by the chapter-0
+            # load while _current_chapter is already the target index, so a chapter-0 LoadedMedia
+            # would otherwise pass the index check and seek the WRONG file. Matching the actual loaded
+            # URL closes that race: a leftover/early load that isn't the target file is ignored (its
+            # LoadingMedia merely opened the gate), and _pending survives until the real target loads.
+            if index == self._current_chapter and self._source_is_chapter(index):
                 self._apply_pending(local, resume)
             return
 

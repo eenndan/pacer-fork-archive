@@ -104,6 +104,10 @@ class StudioWindow(QMainWindow):
         super().__init__()
         self.resize(1440, 900)
         self._tick_timer = None  # created on the first _build_ui; reused across reloads
+        # F6: the consistency panel is HIDDEN by default; the View menu toggle (built below) flips
+        # this. Held on the window (not the rebuilt central widget) so the user's choice survives a
+        # reload. The check item + the panel's visibility are re-synced to it in _build_ui.
+        self._consistency_visible = False
         self._build_menu()
         self._build_shortcuts()
         # If opt-in full-recording was requested on the CLI, discover the sibling chapters of the
@@ -350,6 +354,12 @@ class StudioWindow(QMainWindow):
         # it mounts as one widget below the table stack.
         self.consistency = ConsistencyPanel(self.session)
         self.consistency.corner_clicked.connect(self.map.highlight_corner)
+        # F6 default-hidden: the consistency strip is OFF by default (a real hide, not just
+        # collapsed) so the lap table owns the whole table panel — the View ▸ "Show consistency
+        # panel" check item (unchecked by default, wired in _build_menu) brings it back and refreshes
+        # its stats. Hidden via setVisible(False), which drops it from the table panel's layout
+        # entirely (the table stack keeps all the height), so the lap-table layout is intact.
+        self.consistency.setVisible(self._consistency_visible)
         table_panel = self._headered(table_header, (self.table_stack, 1), self.consistency)
 
         # MAP header: title (left) + the rainbow-channel cycle, snap toggle and sector buttons
@@ -375,10 +385,15 @@ class StudioWindow(QMainWindow):
         plots_header = self._header_bar(plots_label, 1, (self.diff_box, 0), 1, self.plots.x_mode_combo)
         plots_panel = self._headered(plots_header, (self.plots, 1))
 
+        # Bias more default height to the VIDEO (it read small): ~66% of the left column to the
+        # video vs ~34% for the lap table, and stretch factors so the video grows faster than the
+        # table on a window resize (the table only needs enough for a handful of lap rows).
         left = QSplitter(Qt.Vertical)
         left.addWidget(video_panel)
         left.addWidget(table_panel)
-        left.setSizes([540, 360])
+        left.setStretchFactor(0, 66)
+        left.setStretchFactor(1, 34)
+        left.setSizes([620, 320])
 
         # Rebalance the right column: the charts (the analytical core) get the MAJORITY — map ~40%
         # / charts ~60%. The map only needs enough to read the (now-tighter) track clearly.
@@ -389,10 +404,15 @@ class StudioWindow(QMainWindow):
         right.setStretchFactor(1, 60)
         right.setSizes([360, 540])
 
+        # Give the left column (video + table) a larger share of the window width than before so the
+        # video reads bigger, and add stretch factors (the main splitter had none) so the columns
+        # keep their ratio on a horizontal resize instead of the right column taking all the growth.
         main = QSplitter(Qt.Horizontal)
         main.addWidget(left)
         main.addWidget(right)
-        main.setSizes([580, 860])
+        main.setStretchFactor(0, 46)
+        main.setStretchFactor(1, 54)
+        main.setSizes([660, 780])
         self.setCentralWidget(main)
 
         # --- cross-panel wiring ---
@@ -573,6 +593,20 @@ class StudioWindow(QMainWindow):
             "(median of your clean laps), each with the measured reason and a jump-to.")
         self._opportunities_action.triggered.connect(self._open_opportunities)
 
+        # F6: a View menu with the "Show consistency panel" check item (UNCHECKED by default — the
+        # panel is hidden on launch). Toggling it shows/hides the consistency strip under the lap
+        # table and refreshes its stats when shown. Lives on the persistent menu bar (untouched by
+        # the central-widget rebuild), so the user's choice survives a reload; _build_ui re-syncs the
+        # live panel's visibility to this item's state.
+        view_menu = self.menuBar().addMenu("&View")
+        self._consistency_action = view_menu.addAction("Show consistency panel")
+        self._consistency_action.setCheckable(True)
+        self._consistency_action.setChecked(self._consistency_visible)
+        self._consistency_action.setToolTip(
+            "Show the consistency strip under the lap table: the lap-time trend sparkline and the "
+            "top-5 most inconsistent corners.")
+        self._consistency_action.toggled.connect(self._on_consistency_toggled)
+
     # ----------------------------------------------------- keyboard shortcuts
     def _build_shortcuts(self):
         """Window-level playback shortcuts: Space (play/pause), M (mute), G (g-meter overlay),
@@ -716,6 +750,19 @@ class StudioWindow(QMainWindow):
             # Seed auto-follow to the lap the seek lands in, so the immediate post-seek tick
             # isn't treated as a lap-change edge (mirrors the lap-select seek's handling).
             self._followed_lap = self.session.lap_at_time(target)
+
+    def _on_consistency_toggled(self, on: bool):
+        """View ▸ "Show consistency panel": show/hide the consistency strip under the lap table.
+        The choice is remembered on the window so it survives a reload. Showing it refreshes its
+        stats first (it may have been built for an old session, or never shown). No-op before the
+        first successful load (no panel yet)."""
+        self._consistency_visible = bool(on)
+        panel = getattr(self, "consistency", None)
+        if panel is None:
+            return
+        if self._consistency_visible:
+            panel.refresh()  # ensure the shown stats are current for this session
+        panel.setVisible(self._consistency_visible)
 
     # ----------------------------------------------------------- data export (F11)
     # File ▸ Export: the writers live in studio/export_data.py (pacer-free, Qt-free); this
