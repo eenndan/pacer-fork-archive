@@ -35,12 +35,13 @@ slider/readout; in compare mode the slider spans each lap's window via the prima
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QSplitter,
     QVBoxLayout,
@@ -57,6 +58,11 @@ _ICON_BTN = QSize(32, 30)           # compact square-ish icon button
 # 0 = primary (left, drives telemetry); 1 = secondary (right, video-only). Used by the lap-picker
 # repoint signal so app knows which side to repoint.
 PRIMARY, SECONDARY = 0, 1
+
+# Horizontal inset (px) inside each compare cell so the native QVideoWidget surface doesn't cover
+# the splitter handle strip (the native surface composites above sibling chrome on macOS, so a flush
+# video would swallow the handle's mouse events and the split couldn't be dragged).
+_PANE_INSET = 5
 
 
 class _PaneCell(QWidget):
@@ -99,7 +105,11 @@ class _PaneCell(QWidget):
         strip.addWidget(self.badge)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
+        # A small horizontal inset so the pane's NATIVE QVideoWidget surface doesn't butt right up
+        # to the splitter handle: on macOS the native video surface composites ABOVE sibling chrome,
+        # so a flush video would cover the thin handle strip and swallow its mouse events (the handle
+        # then won't drag). The inset keeps a clear strip beside the handle for it to receive drags.
+        lay.setContentsMargins(_PANE_INSET, 0, _PANE_INSET, 0)
         lay.setSpacing(0)
         lay.addLayout(strip)
         lay.addWidget(self.pane, 1)
@@ -421,6 +431,20 @@ class VideoView(QWidget):
         self.compare_btn.style().unpolish(self.compare_btn)
         self.compare_btn.style().polish(self.compare_btn)
 
+    def _sync_compare_btn(self, on: bool):
+        """Sync the compare toggle's CHECKED state + labeled OFF/ON appearance to the live two-pane
+        layout, WITHOUT re-emitting compareToggled. set_compare / exit_compare are themselves driven
+        from the app's compare orchestration; flipping the button with signals live would re-enter
+        on_toggled and run a SECOND, conflicting enter()/exit() — fatal for enter_cross, whose
+        set_compare would otherwise trigger a same-recording enter() that REBUILDS pane B on the
+        PRIMARY source (the cross-recording reference footage is lost). So block the toggled signal
+        for the programmatic sync; a genuine USER click still routes through _on_compare_toggled."""
+        if self.compare_btn.isChecked() != on:
+            self.compare_btn.blockSignals(True)
+            self.compare_btn.setChecked(on)
+            self.compare_btn.blockSignals(False)
+        self._set_compare_btn_state(on)
+
     def _on_compare_toggled(self, on: bool):
         """The toggle flipped: swap its labeled OFF/ON appearance and emit compareToggled so the app
         seeds the lap pair (enter) or restores single-pane (exit). The actual pane build/teardown
@@ -485,7 +509,7 @@ class VideoView(QWidget):
             self._cell_b.repointRequested.connect(
                 lambda lid: self.paneRepointRequested.emit(SECONDARY, lid))
             self._splitter.insertWidget(SECONDARY, self._cell_b)
-            self._splitter.setSizes([1000, 1000])
+            self._equalize_panes()
             self._cell_b.show()
         if self._splitter is None:
             self._cell_a = _PaneCell(self.pane, PRIMARY)
@@ -497,7 +521,19 @@ class VideoView(QWidget):
             self._splitter = QSplitter(Qt.Horizontal)
             self._splitter.addWidget(self._cell_a)
             self._splitter.addWidget(self._cell_b)
-            self._splitter.setSizes([1000, 1000])  # two EQUAL panes
+            # Make the handle a real DRAG target: a visible width, no pane collapse (a collapsed
+            # pane swallows the handle), and opaque (live) resize so the drag tracks. Each cell
+            # gets an Expanding/Ignored size policy so neither pane's native QVideoWidget size hint
+            # can PIN the split (the QVideoWidget reports an aspect-ratio hint that otherwise fights
+            # an equal 50/50). Stretch factors keep the two panes sharing space 1:1 on any resize.
+            self._splitter.setHandleWidth(8)
+            self._splitter.setChildrenCollapsible(False)
+            self._splitter.setOpaqueResize(True)
+            for cell in (self._cell_a, self._cell_b):
+                cell.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+            self._splitter.setStretchFactor(0, 1)
+            self._splitter.setStretchFactor(1, 1)
+            self._equalize_panes()
             # Re-pin BOTH g-meter overlays when the user drags the splitter handle: a top-level
             # overlay does not follow its pane on a splitter resize unless the pane gets a
             # resizeEvent — which it does — but the handle drag can move a pane without the
@@ -511,9 +547,14 @@ class VideoView(QWidget):
             self._stage_lay.addWidget(self._splitter, 1)
             self.secondary.show()
             self._splitter.show()
+        # Equalize AFTER the splitter is shown/laid out: setSizes applied before the splitter has a
+        # width doesn't stick (the ratio is computed against a zero width), so re-split 50/50 from
+        # the splitter's ACTUAL width on entry and defer one more equalize to the next event-loop
+        # turn (when the first real layout has given the splitter its on-screen width).
+        self._equalize_panes()
+        QTimer.singleShot(0, self._equalize_panes)
         self._two_panes = True
-        if self.compare_btn.isChecked() != self._two_panes:
-            self.compare_btn.setChecked(self._two_panes)
+        self._sync_compare_btn(True)
 
         # Seed each pane's lap window + caption + picker. The app seeks the panes to their starts.
         self.pane.set_lap_window(*window_a)
@@ -557,8 +598,7 @@ class VideoView(QWidget):
         if not self._two_panes:
             return
         self._two_panes = False
-        if self.compare_btn.isChecked():
-            self.compare_btn.setChecked(False)
+        self._sync_compare_btn(False)
         # Restore the single-pane stage: pull the primary pane out of its cell, drop the splitter.
         if self._splitter is not None:
             self._stage_lay.removeWidget(self._splitter)
@@ -590,6 +630,23 @@ class VideoView(QWidget):
         sec.dispose()         # stop decoder + detach sinks + deleteLater player/audio/overlay
         sec.setParent(None)
         sec.deleteLater()     # schedule the pane widget itself for deletion on the event loop
+
+    def _equalize_panes(self):
+        """Split the two compare panes 50/50 from the splitter's ACTUAL current width. setSizes with
+        fixed counts ([1000,1000]) only sets a RATIO that Qt re-normalizes against the real width on
+        the first layout — fine in principle, but applied before the splitter has any width the ratio
+        is computed against zero and the panes can come up unequal. Computing both halves from the
+        live width (falling back to the ratio when the width isn't known yet) makes the equal split
+        reliable on entry; called again on the next event-loop turn once the real width is in."""
+        if self._splitter is None or self._splitter.count() < 2:
+            return
+        w = self._splitter.width()
+        if w > 0:
+            handle = self._splitter.handleWidth()
+            half = max((w - handle) // 2, 1)
+            self._splitter.setSizes([half, w - handle - half])
+        else:
+            self._splitter.setSizes([1000, 1000])
 
     def _on_splitter_moved(self, _pos: int, _index: int):
         """Re-pin BOTH g-meter overlays after a splitter-handle drag (each pane re-pins its own

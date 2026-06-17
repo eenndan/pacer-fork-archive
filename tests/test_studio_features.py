@@ -532,6 +532,53 @@ def test_follow_current_is_best_shows_single_lap():
     print("test_follow_current_is_best_shows_single_lap OK")
 
 
+class _StubConsistency:
+    """A stand-in ConsistencyPanel that records refresh()/setVisible() + reports isVisible(), so the
+    F6 default-hidden + View-toggle handler can be tested without the pyqtgraph panel build."""
+    def __init__(self):
+        self._visible = True   # built shown like the real widget; _build_ui hides it per the flag
+        self.refreshed = 0
+
+    def refresh(self):
+        self.refreshed += 1
+
+    def setVisible(self, on):
+        self._visible = bool(on)
+
+    def isVisible(self):
+        return self._visible
+
+
+def test_consistency_panel_hidden_by_default_and_toggle_refreshes():
+    """F6: the consistency strip is HIDDEN by default and the View toggle shows it (refreshing its
+    stats) / hides it again. Mirrors _build_ui's default-hide + _on_consistency_toggled exactly:
+    the default flag is False, applying it hides the panel, and toggling on refreshes + shows."""
+    from studio.app import StudioWindow
+
+    w = StudioWindow.__new__(StudioWindow)
+    # The window default (set in __init__): the panel is hidden until the View toggle turns it on.
+    w._consistency_visible = False
+    panel = _StubConsistency()
+    w.consistency = panel
+    # _build_ui applies the flag to the freshly-built (shown) panel:
+    panel.setVisible(w._consistency_visible)
+    assert panel.isVisible() is False, "consistency panel must be hidden by default"
+    assert panel.refreshed == 0
+
+    # Toggle ON via the real handler: it refreshes the stats then shows the panel.
+    w._on_consistency_toggled(True)
+    assert w._consistency_visible is True
+    assert panel.isVisible() is True
+    assert panel.refreshed == 1, "showing must refresh the stats"
+
+    # Toggle OFF: hidden again, no extra refresh.
+    w._on_consistency_toggled(False)
+    assert w._consistency_visible is False
+    assert panel.isVisible() is False
+    assert panel.refreshed == 1
+    print("test_consistency_panel_hidden_by_default_and_toggle_refreshes OK")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

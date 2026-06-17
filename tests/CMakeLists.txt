@@ -76,6 +76,14 @@ add_test(NAME test_compare
          COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_compare.py)
 set_tests_properties(test_compare PROPERTIES
                      ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# Cross-recording compare + layout fixes (f7 phase B): REAL VideoView / PlayerPane widgets (the
+# PR-#80 fakes hid the bugs) — the toggle-re-entrancy that put pane B on the primary source, the
+# equal+draggable compare splitter, and the file-matched deferred-seek gate. PACER_NO_MEDIA builds
+# the inert media triplet; the opt-in real-media proof self-skips without ~/Desktop/D24. Offscreen.
+add_test(NAME test_video_view_compare
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_video_view_compare.py)
+set_tests_properties(test_video_view_compare PROPERTIES
+                     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # F4 compare-mode map ghost: CompareController places lap B's kart on a REAL MapView at
 # index_at_time(t_b) per tick (setPos-only, one lazy item); exit restores the item state
 # byte-identically; zero ghost work outside compare. Imports map_view -> Qt, so run offscreen.
