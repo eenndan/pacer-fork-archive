@@ -18,8 +18,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from . import theme
@@ -34,7 +34,13 @@ if TYPE_CHECKING:  # the injected session — typed for readers, not imported at
 # is the bright amber accent so the racing line pops. Timing lines + marker use distinct tokens.
 START_COLOR = C.accent              # start/finish line — accent so it's the clear anchor
 SECTOR_COLOR = C.text_dim           # sector lines — visible but quieter than the start line
-BEST_COLOR = C.text_muted           # quiet reference line for the best lap (legible, not loud)
+# C4 legibility: the always-drawn reference line was C.text_muted (#6B7280) at width 1 — a
+# barely-visible hairline the louder glyphs (brake ▼, corner dots, marker) sat ON TOP of, an
+# INVERTED hierarchy where the racing line read as the faintest thing on the map. Lift it to
+# the secondary grey at width 1.5 so the base track reads clearly as a line, while the bright
+# amber CURRENT_COLOR (width 3) still wins as the emphasis (the lap you're watching).
+BEST_COLOR = C.text_dim             # legible reference line for the best lap (clear, not loud)
+BEST_WIDTH = 1.5                    # thicker than a hairline so the track shape reads at a glance
 CURRENT_COLOR = C.accent            # highlighted current-lap trace (the racing line — pops)
 MARKER_COLOR = C.behind             # video position marker — warm coral, reads on the trace
 _MARKER_RGB = QColor(C.behind)      # for the translucent marker brush below
@@ -55,7 +61,20 @@ INFERRED_DARKEN = 0.55  # blend the lap colour toward black for the fill pen
 CORNER_LEFT_COLOR = theme.CHART_SERIES[1]    # cyan — left-handers
 CORNER_RIGHT_COLOR = theme.CHART_SERIES[4]   # coral — right-handers
 CORNER_DOT_ALPHA = 170                       # 0-255: subtle, under the text label
-CORNER_LABEL_COLOR = C.text_dim
+# C4 legibility: the C# labels were C.text_dim with a fixed (0.5, 1.25) anchor, so at the tight
+# infield they overlapped each other AND sat over the trace nearly unreadable. Lift them toward
+# primary text, give each a subtle dark halo (a translucent surface fill behind the glyphs so
+# they read over the line), OFFSET each one OUTWARD from the track centroid (perpendicular-ish,
+# away from the shape's middle, where there's room), and greedily DROP any label whose box would
+# still overlap one already placed — fewer, legible labels beat a pile of unreadable ones.
+CORNER_LABEL_COLOR = C.text                   # near-primary so the label reads over the surface
+CORNER_LABEL_HALO = QColor(C.surface)         # dark translucent plate behind the glyphs
+CORNER_LABEL_HALO.setAlpha(190)
+CORNER_LABEL_OFFSET_PX = 14                    # px the label is nudged outward from the centroid
+# Approx px box of a CAPTION-mono "C12" used for the greedy overlap test (data coords are scaled
+# to px via the viewbox at paint time; this is a deliberately generous constant so close labels
+# de-collide without per-frame metrics — corner labels are static once built).
+CORNER_LABEL_BOX_PX = (22.0, 16.0)
 # F6: the consistency panel's click-to-locate cue — an accent ring around ONE corner's apex
 # dot. Hollow (pen only) and slightly larger than the dot so it reads as a locator, not a
 # selection; accent amber so it pops without adding a new colour.
@@ -154,8 +173,10 @@ def _inferred_pen(color, base_width):
 # connect='finite' let a single item hold all of its bucket's disjoint runs. ≤16 items total,
 # rebuilt ONLY on lap change / channel change / re-segment (never on the 30 Hz marker tick).
 RAINBOW_WIDTH = 3  # same width as the current-lap overlay, so the painted line reads identically
-# Header-button captions for the channel cycle (OFF → Speed → Δ-vs-best → OFF …).
-_RAINBOW_LABELS = {"off": "Color: off", "speed": "Color: speed", "delta": "Color: Δ"}
+# Header-button captions for the channel cycle (OFF → Speed → Δ-vs-best → OFF …). C5: plain
+# language — "Line:" names WHAT is being coloured (the racing line) rather than the jargon
+# "Color:", so a first-time reader understands the toggle without a tooltip.
+_RAINBOW_LABELS = {"off": "Line: Off", "speed": "Line: Speed", "delta": "Line: Δ"}
 
 
 def bucketize(values, n_buckets: int, lo: float | None = None, hi: float | None = None):
@@ -294,6 +315,119 @@ class _RainbowLegend(QWidget):
         self.hi_label.setText(hi_text)
 
 
+# --------------------------------------------------------------- map key/legend (C3)
+# The map stacks many glyphs with NO key — a red marker, green brake ▼, corner apex dots + C#
+# labels, amber crosshair timing handles, a cyan compare ghost. A first-time reader sees "glyph
+# soup". This is a compact, corner-anchored, COLLAPSIBLE key that draws each glyph exactly as it
+# renders on the map (pen-for-pen, like _RainbowLegend's strip == the rendered buckets) next to a
+# plain-language label. Subtle by construction: a dim translucent surface plate, theme tokens,
+# CAPTION type — it sits OVER the bottom-left of the plot without competing with the trace.
+_LEGEND_ROW_H = 18        # px per key row
+_LEGEND_GLYPH_W = 22      # px column reserved for the glyph
+_LEGEND_PAD = 8           # px inner padding of the plate
+_LEGEND_GAP = 6           # px between the glyph column and its label
+
+
+class _MapLegend(QWidget):
+    """A small collapsible key for the map's glyphs, anchored over the plot's bottom-left. Click
+    the header to collapse to just the title (so it never blocks the track when not needed). The
+    glyph cells are PAINTED to match the real markers; labels are plain language."""
+
+    # Each row: (kind, label). `kind` selects the painter below — the same colours/shapes the
+    # overlays use, so the key is literally a miniature of what's on the map.
+    _ROWS = (
+        ("marker", "Video position"),
+        ("brake", "Brake point"),
+        ("corner", "Corner apex (C#)"),
+        ("start", "Drag = start / sector line"),
+    )
+
+    def __init__(self, on_resize=None):
+        super().__init__()
+        self._collapsed = False
+        self._on_resize = on_resize  # MapView re-pins the key when collapse changes its height
+        self._font = theme.ui_font(theme.CAPTION)
+        self._title_font = theme.ui_font(theme.PANEL_HEADER, theme.W_SEMIBOLD)
+        # Translucent so the trace shows faintly through; sized to the content in sizeHint().
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        self.setCursor(Qt.PointingHandCursor)
+        self._relayout()
+
+    def _relayout(self):
+        rows = 0 if self._collapsed else len(self._ROWS)
+        # plate width: widest label ("Drag = start / sector line") + glyph column; a fixed
+        # comfortable width keeps it tidy and fully shows every row.
+        self._w = 196
+        self._h = _LEGEND_PAD * 2 + _LEGEND_ROW_H + rows * _LEGEND_ROW_H
+        self.setFixedSize(self._w, self._h)
+
+    def mousePressEvent(self, _event):
+        # Click anywhere on the key toggles collapse — the whole plate is the affordance.
+        self._collapsed = not self._collapsed
+        self._relayout()
+        if self._on_resize is not None:  # the plate changed height — re-pin it to the corner
+            self._on_resize()
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        # The plate: dim translucent surface + a hairline border (theme tokens), rounded.
+        plate = QColor(C.surface)
+        plate.setAlpha(214)
+        p.setBrush(QBrush(plate))
+        p.setPen(QPen(QColor(C.border), 1))
+        p.drawRoundedRect(QRectF(0.5, 0.5, self._w - 1, self._h - 1), 6, 6)
+        # Title row with a caret showing the collapse state.
+        p.setFont(self._title_font)
+        p.setPen(QPen(QColor(C.text_dim)))
+        caret = "▾" if not self._collapsed else "▸"
+        p.drawText(QRectF(_LEGEND_PAD, _LEGEND_PAD, self._w - 2 * _LEGEND_PAD, _LEGEND_ROW_H),
+                   int(Qt.AlignVCenter | Qt.AlignLeft), f"{caret}  Map key")
+        if self._collapsed:
+            p.end()
+            return
+        p.setFont(self._font)
+        y = _LEGEND_PAD + _LEGEND_ROW_H
+        for kind, label in self._ROWS:
+            cell = QRectF(_LEGEND_PAD, y, _LEGEND_GLYPH_W, _LEGEND_ROW_H)
+            self._paint_glyph(p, kind, cell)
+            p.setPen(QPen(QColor(C.text_dim)))
+            p.setFont(self._font)
+            lx = _LEGEND_PAD + _LEGEND_GLYPH_W + _LEGEND_GAP
+            p.drawText(QRectF(lx, y, self._w - lx - _LEGEND_PAD, _LEGEND_ROW_H),
+                       int(Qt.AlignVCenter | Qt.AlignLeft), label)
+            y += _LEGEND_ROW_H
+        p.end()
+
+    def _paint_glyph(self, p: QPainter, kind: str, cell: QRectF):
+        """Draw one key glyph centred in `cell`, mirroring the on-map marker for that kind."""
+        cx, cy = cell.center().x(), cell.center().y()
+        if kind == "marker":  # filled coral ring — the video position marker
+            mc = QColor(MARKER_COLOR)
+            p.setPen(QPen(mc, 2))
+            fill = QColor(MARKER_COLOR)
+            fill.setAlpha(110)
+            p.setBrush(QBrush(fill))
+            p.drawEllipse(QPointF(cx, cy), 5, 5)
+        elif kind == "brake":  # down-triangle (▼) — brake-point glyph
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(QColor(MARKER_COLOR)))
+            tri = QPolygonF([QPointF(cx - 5, cy - 4), QPointF(cx + 5, cy - 4),
+                             QPointF(cx, cy + 5)])
+            p.drawPolygon(tri)
+        elif kind == "corner":  # cyan apex dot (the left/right hues collapse to one in the key)
+            qc = QColor(CORNER_LEFT_COLOR)
+            qc.setAlpha(CORNER_DOT_ALPHA)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(qc))
+            p.drawEllipse(QPointF(cx, cy), 3.5, 3.5)
+        elif kind == "start":  # amber crosshair — the draggable start/sector handle
+            p.setPen(QPen(QColor(START_COLOR), 1.5))
+            p.drawLine(QPointF(cx - 5, cy), QPointF(cx + 5, cy))
+            p.drawLine(QPointF(cx, cy - 5), QPointF(cx, cy + 5))
+
+
 class _LapOverlay:
     """Draws ONE lap as a group of plot items: solid measured runs + dashed/dimmed inferred
     gap-fills (`session.lap_trace_segments`). Tracks its items so it can clear/redraw without
@@ -381,11 +515,29 @@ class _CornerMarkers:
         self._highlight_item = None
         self.highlighted: str | None = None
 
+    def _px_per_data(self) -> tuple[float, float]:
+        """(px-per-data-x, px-per-data-y) from the viewbox geometry, so a px offset / a px
+        overlap box can be expressed in the data (local-metre) coords TextItems live in. The
+        map is aspect-locked + range-frozen, so this is stable once the view is laid out; falls
+        back to a neutral 1.0 before the widget has a size (headless construction)."""
+        vb = self.plot.getViewBox()
+        rect = vb.viewRect()          # data-space rect currently shown
+        size = vb.boundingRect()      # px-space rect of the viewbox
+        if rect.width() <= 0 or rect.height() <= 0 or size.width() <= 0 or size.height() <= 0:
+            return 1.0, 1.0
+        return size.width() / rect.width(), size.height() / rect.height()
+
     def set_corners(self, markers):
         """(Re)build the labels from `markers`: a list of (label, x, y, direction) with the
         apex position in local metres and direction +1 = left / -1 = right. [] clears.
         Any active highlight ring is cleared too — a new corner set means the old cid may
-        name a different corner (the consistency panel re-populates alongside)."""
+        name a different corner (the consistency panel re-populates alongside).
+
+        C4 legibility: each label is OFFSET outward from the corner-cloud centroid (toward the
+        track edge, away from the crowded middle) and then GREEDILY de-collided — a label whose
+        px box would overlap one already placed is dropped, so the surviving labels read clearly
+        instead of stacking into glyph soup. The apex DOTS are always drawn (the geometry cue);
+        only the redundant text is thinned."""
         self.set_highlight(None)
         self._markers = list(markers)
         for it in self._items:
@@ -404,10 +556,31 @@ class _CornerMarkers:
             dots.setZValue(5)  # above the lap traces, below the red video marker (z=10)
             self.plot.addItem(dots)
             self._items.append(dots)
+        # Outward = away from the centroid of the apex cloud (the infield middle); push each
+        # label that way by a fixed px nudge so the text clears the track and the dots.
+        cx = float(np.mean([x for _l, x, _y, _d in markers]))
+        cy = float(np.mean([y for _l, _x, y, _d in markers]))
+        sx, sy = self._px_per_data()
+        bw, bh = CORNER_LABEL_BOX_PX
+        placed_px: list[tuple[float, float]] = []  # (px_x, px_y) centres of kept labels
         for label, x, y, _d in markers:
-            text = pg.TextItem(text=label, color=CORNER_LABEL_COLOR, anchor=(0.5, 1.25))
+            dx, dy = float(x) - cx, float(y) - cy
+            norm = (dx * dx + dy * dy) ** 0.5 or 1.0
+            # px offset converted back to data units along the outward unit vector.
+            ox = (dx / norm) * CORNER_LABEL_OFFSET_PX / max(sx, 1e-6)
+            oy = (dy / norm) * CORNER_LABEL_OFFSET_PX / max(sy, 1e-6)
+            lx, ly = float(x) + ox, float(y) + oy
+            # Greedy de-collision in PX space: drop this label if its box overlaps a kept one.
+            px_x, px_y = lx * sx, ly * sy
+            if any(abs(px_x - px) < bw and abs(px_y - py) < bh for px, py in placed_px):
+                continue
+            placed_px.append((px_x, px_y))
+            # fill = a translucent dark plate behind the glyphs (the "halo"); border None keeps
+            # it subtle. Anchor centred on the offset point so the nudge reads symmetrically.
+            text = pg.TextItem(text=label, color=CORNER_LABEL_COLOR, anchor=(0.5, 0.5),
+                               fill=pg.mkBrush(CORNER_LABEL_HALO))
             text.setFont(self._font)
-            text.setPos(float(x), float(y))
+            text.setPos(lx, ly)
             text.setZValue(6)
             self.plot.addItem(text)
             self._items.append(text)
@@ -503,7 +676,7 @@ class MapView(QWidget):
         # the best lap (faint reference) and the current lap (highlighted) — a few hundred points.
         # Each lap is drawn as measured (solid) + reconstructed (dashed/dimmed) segments, so GPS
         # dropouts no longer show as straight chords across the hole.
-        self._best_overlay = _LapOverlay(self.plot, BEST_COLOR, base_width=1)
+        self._best_overlay = _LapOverlay(self.plot, BEST_COLOR, base_width=BEST_WIDTH)
         self._best_lap_id: int | None = None
         self._current_overlay = _LapOverlay(self.plot, CURRENT_COLOR, base_width=3)
 
@@ -548,6 +721,12 @@ class MapView(QWidget):
         self._ghost: pg.TargetItem | None = None
         self.ghost_updates = 0
 
+        # E2 provisional-start cue: a dashed start line + a "drag to set start/finish" callout,
+        # shown only while the track is UNKNOWN (session.track_name is None). Declared BEFORE
+        # _rebuild so the cue refresh it triggers can safely test these slots. None = no cue
+        # (track known — today's behaviour).
+        self._provisional_line: pg.PlotDataItem | None = None
+        self._provisional_label: pg.TextItem | None = None
         self._start: _TimingLine | None = None
         self._sectors: list[_TimingLine] = []
         self._rebuild(session.start_line, session.sector_lines)
@@ -565,7 +744,7 @@ class MapView(QWidget):
         # point on the track trace before the one re-segmentation. Exposed like the sector
         # buttons so app.py mounts it in the map header. (The early snap-as-DEFAULT experiment
         # was rejected — free placement stays the default; this is the PLAN-sanctioned toggle.)
-        self.snap_btn = QPushButton("Snap")
+        self.snap_btn = QPushButton("Snap to track")  # C5: plain language (was the jargon "Snap")
         self.snap_btn.setIcon(icon("ph.magnet"))
         self.snap_btn.setCheckable(True)
         self.snap_btn.setToolTip(
@@ -593,10 +772,31 @@ class MapView(QWidget):
         self._legend = _RainbowLegend()
         self._legend.setVisible(False)
 
+        # C3 map key: a compact collapsible glyph key, OVERLAID on the plot's bottom-left corner
+        # (parented to the PlotWidget, not in the layout) so it floats over the trace without
+        # stealing panel height. Kept anchored by _reposition_key on resize. Raised above the
+        # pyqtgraph canvas so it's clickable (collapse toggle).
+        self._map_key = _MapLegend(on_resize=self._reposition_key)
+        self._map_key.setParent(self.widget)
+        self._map_key.raise_()
+        self._map_key.show()
+
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.widget, 1)
         lay.addWidget(self._legend)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reposition_key()
+
+    def _reposition_key(self):
+        """Keep the floating map key pinned to the plot's bottom-left, just inside the edge."""
+        if getattr(self, "_map_key", None) is None:
+            return
+        m = 8  # px inset from the panel edges
+        host = self.widget
+        self._map_key.move(m, host.height() - self._map_key.height() - m)
 
     # ----------------------------------------------------------- timing lines
     def _rebuild(self, start: Seg, sectors: list[Seg]):
@@ -606,6 +806,51 @@ class MapView(QWidget):
         self._start = _TimingLine(self.plot, start, START_COLOR, self._emit, self._snap_to_trace)
         self._sectors = [_TimingLine(self.plot, s, SECTOR_COLOR, self._emit, self._snap_to_trace)
                          for s in sectors]
+        # The start handle was just rebuilt at a new position — re-pin the provisional cue (or
+        # remove it if the track is known). Cheap; runs only on build / add / reset sector.
+        self._refresh_provisional_cue()
+
+    def _refresh_provisional_cue(self):
+        """E2 (the map part): when the track is UNKNOWN the start/finish line was auto-fitted to
+        an ARBITRARY position, so lap times are provisional until the user drags it — but nothing
+        on the map said so. When `session.track_name is None`, overlay the start segment with a
+        DASHED accent line and a small "drag to set start/finish — lap timing provisional" callout
+        anchored at its midpoint, so the placement reads as a guess to be corrected. When the
+        track IS known the cue is removed — today's behaviour, byte-identical.
+
+        Re-run on build and whenever the start line moves (_emit) so the dashed overlay + callout
+        track the handle the user is dragging. Reading `session.track_name` directly keeps this a
+        pure map concern (no app.py change)."""
+        provisional = getattr(self.session, "track_name", None) is None and self._start is not None
+        if not provisional:
+            for it in (self._provisional_line, self._provisional_label):
+                if it is not None:
+                    self.plot.removeItem(it)
+            self._provisional_line = self._provisional_label = None
+            return
+        seg = self._start.seg()
+        mx, my = (seg.x1 + seg.x2) / 2.0, (seg.y1 + seg.y2) / 2.0
+        if self._provisional_line is None:
+            # Dashed accent line ON TOP of the (solid amber) start segment so the dashes read as
+            # "not yet confirmed". Above the start line (z just over the handles' segment) but
+            # well below the marker so it never hides the playhead.
+            pen = pg.mkPen(C.accent, width=2)
+            pen.setStyle(Qt.DashLine)
+            pen.setDashPattern([4, 4])
+            self._provisional_line = pg.PlotDataItem([seg.x1, seg.x2], [seg.y1, seg.y2], pen=pen)
+            self._provisional_line.setZValue(4)
+            self.plot.addItem(self._provisional_line)
+            halo = QColor(C.surface)
+            halo.setAlpha(200)  # a dark plate so the amber callout reads over the trace
+            self._provisional_label = pg.TextItem(
+                text="drag to set start/finish\nlap timing provisional",
+                color=C.accent, anchor=(0.5, -0.25), fill=pg.mkBrush(halo))
+            self._provisional_label.setFont(theme.mono_font(theme.CAPTION))
+            self._provisional_label.setZValue(8)
+            self.plot.addItem(self._provisional_label)
+        else:
+            self._provisional_line.setData([seg.x1, seg.x2], [seg.y1, seg.y2])
+        self._provisional_label.setPos(mx, my)
 
     def _snap_to_trace(self, x: float, y: float) -> tuple[float, float] | None:
         """The snap hook handed to every _TimingLine. Toggle OFF (default): return None so the
@@ -624,6 +869,9 @@ class MapView(QWidget):
 
     def _emit(self):
         start, sectors = self._current()
+        # Keep the provisional cue glued to the start handle while it's being dragged (no-op when
+        # the track is known — the cue doesn't exist then).
+        self._refresh_provisional_cue()
         self.timing_lines_changed.emit(start, sectors)
 
     def _add_sector(self):
