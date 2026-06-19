@@ -59,6 +59,16 @@ add_test(NAME test_sidecar
 # only (session/load chain has no Qt, verified), no telemetry file.
 add_test(NAME test_session_pure
          COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_session_pure.py)
+# F1 god-object decomposition (studio.corner_model.CornerModel + studio.driving_channels.
+# DrivingChannels): Session composes + DELEGATES to the per-domain services, and the cache
+# invalidation (set_timing_lines drives both invalidate()s; the reference set/clear drives the
+# narrower CornerModel.invalidate_stats()) clears exactly what the old hand-clearing did. Pins
+# the delegation + caching + invalidate-actually-clears contracts on a deterministic synthetic
+# session (stadium loop + seeded g-meter). Imports Session -> Qt, so run offscreen.
+add_test(NAME test_session_services
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_session_services.py)
+set_tests_properties(test_session_services PROPERTIES
+                     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 add_test(NAME test_studio_features
          COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_studio_features.py)
 set_tests_properties(test_studio_features PROPERTIES
@@ -198,7 +208,8 @@ set_tests_properties(test_library PROPERTIES
 foreach(pytest IN ITEMS test_scrub_conversion test_lap_timing test_chapters test_gapfill
                         test_reference
                         test_gps_source_bindings test_laps_bindings test_ingest_equivalence
-                        test_sidecar test_session_pure test_studio_features test_rainbow_map
+                        test_sidecar test_session_pure test_session_services
+                        test_studio_features test_rainbow_map
                         test_compare test_map_ghost test_cross_reference test_delta_engine
                         test_controllers test_validate_wallclock test_corners
                         test_consistency test_gmeter test_gmeter_overlay test_export_data

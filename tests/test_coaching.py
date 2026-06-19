@@ -293,7 +293,7 @@ def test_apex_signal_and_loss_share_local_best_baseline_under_reference():
     # Load a reference whose apex speeds are 10% lower than the local best's (so the OLD code, which
     # measured the median's apex vs the reference, would report a DIFFERENT — smaller — deficit).
     s._reference = _stadium_reference(s, apex_scale=0.90)
-    s._corner_stats_cache.clear()  # drop the deltas computed against the now-different baseline
+    s._cm.invalidate_stats()  # drop the deltas computed against the now-different baseline (F1)
     with_ref = s.coaching_opportunities()
     with_ref_apex = {r.cid: r.reason.apex_speed_deficit for r in with_ref.rows}
     assert base_apex == with_ref_apex, (base_apex, with_ref_apex)
@@ -310,20 +310,17 @@ def _stadium_session():
     corner vs the best lap, plus a 5th dropout lap that must be EXCLUDED. The best lap (0) is the
     fastest; laps 1-3 are slower THROUGH ONE CORNER by construction (a slower speed profile only
     on the second half of the lap, where corner 2 lives)."""
-    from _synthetic import bare_session
+    from _synthetic import bare_session, reset_corner_caches, reset_driving_caches
     from test_corners import elapsed_for, speed_profile, stadium
 
-    from studio.session import _UNSET
     s = bare_session(valid=[0, 1, 2, 3, 4], best=0)
     s._cols_cache = {}
-    s._corner_cache = _UNSET
-    s._corner_stats_cache = {}
-    s._corner_bests = _UNSET
-    s._driving_thresholds_cache = None      # no g signal -> brake/coast empty (apex/line drive)
-    s._brake_events_cache = {}
-    s._coasting_spans_cache = {}
-    s._corner_grip_cache = {}
-    s._gmeter = SimpleNamespace(has_data=False)
+    s._gmeter = SimpleNamespace(has_data=False)  # no g signal -> brake/coast empty
+    # F1: corner + driving caches live in the CornerModel / DrivingChannels services now; reset
+    # through the service-aware helpers (REAL corner detection; thresholds re-derive None for
+    # the no-g meter, so the apex/line signals drive the coaching reasons).
+    reset_corner_caches(s)
+    reset_driving_caches(s)
 
     xs, ys, cum = stadium()
     # best lap: fast everywhere
@@ -396,11 +393,11 @@ def test_session_corner_entry_media_time_projects_onto_best():
 def test_session_determinism_across_reloads():
     s = _stadium_session()
     a = s.coaching_opportunities()
-    # clear the per-lap caches (simulate a recompute) and run again — must be identical
-    s._corner_stats_cache.clear()
-    from studio.session import _UNSET
-    s._corner_cache = _UNSET
-    s._corner_bests = _UNSET
+    # clear the corner caches (simulate a recompute) and run again — must be identical. F1: the
+    # corner caches live in the CornerModel service; invalidate() drops all three (basis, per-lap
+    # stats, session bests) so the second call genuinely recomputes from scratch.
+    from _synthetic import reset_corner_caches
+    reset_corner_caches(s)
     b = s.coaching_opportunities()
     assert a == b, "coaching_opportunities must be deterministic across recomputes"
     print("ok session determinism: identical Opportunities after a cache clear")
@@ -408,18 +405,14 @@ def test_session_determinism_across_reloads():
 
 def test_session_gate_under_min_laps():
     """A session with only 2 clean laps yields the friendly excluded state."""
-    from _synthetic import bare_session
+    from _synthetic import bare_session, reset_corner_caches, reset_driving_caches
     from test_corners import elapsed_for, speed_profile, stadium
 
-    from studio.session import _UNSET
     s = bare_session(valid=[0, 1], best=0)
     s._cols_cache = {}
-    s._corner_cache = _UNSET
-    s._corner_stats_cache = {}
-    s._corner_bests = _UNSET
     s._gmeter = SimpleNamespace(has_data=False)
-    s._driving_thresholds_cache = None
-    s._brake_events_cache, s._coasting_spans_cache, s._corner_grip_cache = {}, {}, {}
+    reset_corner_caches(s)  # F1: corner + driving caches live in the services now
+    reset_driving_caches(s)
     xs, ys, cum = stadium()
     for lid, ph, base in ((0, 0.7, 100.0), (1, 2.1, 300.0)):
         sp = speed_profile(cum, ph)

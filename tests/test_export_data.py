@@ -27,7 +27,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from _synthetic import bare_session, odometer, seed_cols  # noqa: E402
+from _synthetic import bare_session, odometer, reset_corner_caches, seed_cols  # noqa: E402
 
 from studio import export_data, gmeter  # noqa: E402
 from studio._signal import fmt_time  # noqa: E402
@@ -114,15 +114,15 @@ def make_session(*, with_sectors=True, with_corners=True, with_g=True):
     }
     s.laps = FakeLaps(lap_data, sector_lines=[_sector_line(250.0)] if with_sectors else [])
     s.track_name = "Daytona MK"
-    # Corner caches: seeded basis (two corners on the best lap's 498 m odometer); the
-    # per-lap stats then come from the REAL session.lap_corner_stats projection.
-    s._corner_stats_cache = {}
-    s._corner_bests = []
-    s._corner_cache = (
+    # Corner caches (CornerModel service, F1): seed the basis (two corners on the best lap's
+    # 498 m odometer); the per-lap stats then come from the REAL session.lap_corner_stats
+    # projection. reset_corner_caches owns the post-extraction cache slots.
+    corner_basis = (
         [Corner(cid=1, enter=100.0, exit=150.0, apex=125.0, direction=1, turn_deg=90.0),
          Corner(cid=2, enter=300.0, exit=380.0, apex=340.0, direction=-1, turn_deg=120.0)],
         float(d1[-1]),
     ) if with_corners else None
+    reset_corner_caches(s, basis=corner_basis)
     if with_g:
         gt = np.arange(5.0, 60.0, 0.02)  # covers all three laps at the gmeter's own rate
         s._gmeter = gmeter.GMeter(times=gt, lat_g=np.sin(gt * 1.7) * 1.3,
