@@ -99,15 +99,12 @@ def _stadium_session():
     """The test_corners bare-Session idiom: two clean stadium laps + a THIRD lap whose
     kept-point times contain an interior gap > gapfill.GAP_TIME_S (a GPS dropout), to
     drive the ⚠ exclusion. Lap times come from a stub `laps` (lap_time + no sectors)."""
-    from _synthetic import bare_session
+    from _synthetic import bare_session, reset_corner_caches
     from test_corners import elapsed_for, speed_profile, stadium
 
-    from studio.session import _UNSET
     s = bare_session(valid=[0, 1, 2], best=0)
     s._cols_cache = {}
-    s._corner_cache = _UNSET
-    s._corner_stats_cache = {}
-    s._corner_bests = _UNSET
+    reset_corner_caches(s)  # F1: the corner caches live in the CornerModel service now
     xs, ys, cum = stadium()
     sp_a = speed_profile(cum, 0.7)
     sp_b = speed_profile(cum, 2.1)

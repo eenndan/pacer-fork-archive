@@ -30,9 +30,11 @@ from . import (
     chapters,
     coaching,
     consistency,
-    corners,
+    corner_model,
+    corners,  # still used for the corners.Corner / corners.CornerStat return-type hints below
     cross_reference,
-    driving,
+    driving,  # still used for the driving.BrakeEvent / CoastSpan return-type hints below
+    driving_channels,
     gapfill,
     gmeter,
     library,
@@ -212,24 +214,20 @@ class Session:
         # cross-checked against GPS-derived g. Built in load() (needs the trace arrays below);
         # an empty meter until then, so a from-scratch Session() (no IMU) just has no g signal.
         self._gmeter: gmeter.GMeter = gmeter._empty()
-        # Corner-model caches (studio/corners.py, pacer-free): the detected corner list +
-        # its reference total ((corners, total_ref) tuple), the per-lap projected stats, and
-        # the per-corner session-best times. All derived from the segmentation, so all three
-        # are computed once and cleared together with the other per-lap caches on a
-        # timing-line change (set_timing_lines — the single re-segmentation point).
-        self._corner_cache: object = _UNSET            # (list[Corner], total_ref) | None
-        self._corner_stats_cache: dict[int, list[corners.CornerStat]] = {}
-        self._corner_bests: object = _UNSET            # list[float] (min time per corner)
-        # Driving-channel caches (studio/driving.py, pacer-free): the brake/coast thresholds
-        # derived ONCE from this session's own g distribution, plus the per-lap brake events,
-        # coasting spans, and per-corner grip utilization. The thresholds depend only on the g
-        # series (constant for the recording), but the per-lap/per-corner results are projected
-        # through the segmentation, so all the per-lap caches clear together on a timing-line
-        # change (set_timing_lines), exactly like the corner caches above.
-        self._driving_thresholds_cache: object = _UNSET   # driving.Thresholds | None
-        self._brake_events_cache: dict[int, list[driving.BrakeEvent]] = {}
-        self._coasting_spans_cache: dict[int, list[driving.CoastSpan]] = {}
-        self._corner_grip_cache: dict[int, list[float]] = {}
+        # The CORNER-model analysis cluster (corner detection + per-lap corner stats + the
+        # per-corner session bests) — extracted to studio/corner_model.py (pacer-free,
+        # studio/corners.py-backed), the same compose+delegate template as LapRenderCache.
+        # It owns the three corner caches (the basis, the per-lap stats, the session bests),
+        # all derived from the segmentation; set_timing_lines calls invalidate() on re-segment
+        # and set_reference_session/clear_reference call invalidate_stats() when only the Δ
+        # baseline moved. Wired with a back-reference + the REFERENCE_ID sentinel key.
+        self._cornermodel = corner_model.CornerModel(self, REFERENCE_ID)
+        # The DRIVING-channel analysis cluster (brake events + coasting spans + per-corner grip
+        # + the session-wide thresholds) — extracted to studio/driving_channels.py (pacer-free,
+        # studio/driving.py-backed). It owns the four driving caches; the derived thresholds
+        # depend only on the (constant) g series so they survive a re-segment, while the three
+        # per-lap caches clear via invalidate() in set_timing_lines.
+        self._driving = driving_channels.DrivingChannels(self)
 
         # Cross-recording reference lap (F7): a lap loaded from ANOTHER recording that REPLACES
         # the local best lap as the reference for the Δ charts, the map overlay, the chart
@@ -407,11 +405,10 @@ class Session:
         # getattr-guarded set so a bare Session (test path, no __init__) gains the slot lazily.
         self._reference_session = ref
         # The per-corner Δ baseline just changed (best lap -> reference lap), so every cached
-        # per-lap corner-stat delta is stale. Drop them; they recompute lazily against the new
-        # reference. (The corner DETECTION — windows — is unchanged, so _corner_cache stays.)
-        # getattr so a bare Session (Session.__new__, no __init__) used in unit tests works.
-        if getattr(self, "_corner_stats_cache", None) is not None:
-            self._corner_stats_cache.clear()
+        # per-lap corner-stat delta is stale. invalidate_stats() drops ONLY the per-lap stats
+        # (the corner DETECTION windows are unchanged), recomputed lazily against the new
+        # reference. (`_cm` is getattr-guarded for the bare-Session test path, no __init__.)
+        self._cm.invalidate_stats()
         return None
 
     def clear_reference(self) -> None:
@@ -423,11 +420,10 @@ class Session:
         # F7 Phase B: drop the retained live reference Session too (frees its decode/arrays) — the
         # cross-recording video compare can no longer be entered once the reference is cleared.
         self._reference_session = None
-        # Revert the per-corner Δ baseline to the local best lap: the cached deltas (measured
-        # against the now-cleared reference) are stale. Drop them; they recompute lazily.
-        # getattr-guarded for the bare-Session test path (no __init__ ran to create the slot).
-        if getattr(self, "_corner_stats_cache", None) is not None:
-            self._corner_stats_cache.clear()
+        # Revert the per-corner Δ baseline to the local best lap: the cached per-lap deltas
+        # (measured against the now-cleared reference) are stale. invalidate_stats() drops only
+        # those (the detection windows are unchanged); recomputed lazily on next access.
+        self._cm.invalidate_stats()
 
     @property
     def _ref(self) -> cross_reference.ReferenceLap | None:
@@ -435,6 +431,29 @@ class Session:
         `Session.__new__` for tests (no `__init__`, so no `_reference` slot) reads as dormant —
         the same getattr idiom the other cache slots use for the test-seeded path."""
         return getattr(self, "_reference", None)
+
+    @property
+    def _cm(self) -> corner_model.CornerModel:
+        """The composed CornerModel service (corner detection + per-lap stats + session bests),
+        lazily created on FIRST access for a BARE Session built via `Session.__new__` (tests:
+        no `__init__` ran, so `_cornermodel` doesn't exist yet). A real load builds it in
+        `__init__`; this getattr-guarded accessor just makes the bare-Session path Just Work
+        (the same defensiveness `_ref` uses), so views/tests never see the slot absent."""
+        cm = getattr(self, "_cornermodel", None)
+        if cm is None:
+            cm = corner_model.CornerModel(self, REFERENCE_ID)
+            self._cornermodel = cm
+        return cm
+
+    @property
+    def _dc(self) -> driving_channels.DrivingChannels:
+        """The composed DrivingChannels service (brake/coast/grip + thresholds), lazily created
+        on FIRST access for a bare Session (same idiom as `_cm`)."""
+        dc = getattr(self, "_driving", None)
+        if dc is None:
+            dc = driving_channels.DrivingChannels(self)
+            self._driving = dc
+        return dc
 
     def has_reference(self) -> bool:
         """True iff a cross-recording reference lap is currently active."""
@@ -633,18 +652,13 @@ class Session:
         self._valid_cache = None
         self._best_cache = _UNSET
         self._lap_windows = None
-        # The corner model is derived from the segmentation (detected on the best lap's
-        # grid, projected per lap) — stale with the rest; recomputed lazily on next access.
-        self._corner_cache = _UNSET
-        self._corner_stats_cache.clear()
-        self._corner_bests = _UNSET
-        # The per-lap driving channels (brake events / coasting spans / per-corner grip) are
-        # projected through the same segmentation — stale with the corner model. The derived
-        # thresholds depend only on the (unchanged) g series, so they're kept; only the per-lap
-        # results clear (recomputed lazily on next access).
-        self._brake_events_cache.clear()
-        self._coasting_spans_cache.clear()
-        self._corner_grip_cache.clear()
+        # The corner model + driving channels are derived from / projected through the
+        # segmentation — stale with the rest. Each service owns its caches and clears exactly
+        # them via invalidate() (the corner basis + per-lap stats + session bests; the per-lap
+        # brake/coast/grip — the driving thresholds depend only on the unchanged g series so
+        # they survive), replacing the ~7 hand-cleared cache slots this block used to enumerate.
+        self._cm.invalidate()
+        self._dc.invalidate()
 
     # ------------------------------------------ timing-line persistence (sidecar glue)
     # The sidecar (studio/sidecar.py, pacer-free) stores the user's timing lines as ABSOLUTE
@@ -1254,62 +1268,28 @@ class Session:
     # projection lap_sector_splits uses for sector boundaries. All cached; cleared with the
     # per-lap caches in set_timing_lines (the corner set depends on the segmentation).
 
+    # The corner model now lives in studio/corner_model.py (CornerModel, pacer-free) — it owns
+    # the three corner caches (basis / per-lap stats / session bests) + their invalidate() seam.
+    # The thin delegators below keep every caller (lap_table, map_view, coaching, the dev tooling)
+    # on Session; `_corner_basis` stays as a delegator because the coaching summary + the driving
+    # grip channel read it.
     def _corner_basis(self) -> tuple[list[corners.Corner], float] | None:
         """The cached (corner list, reference total distance) pair, or None when there is no
-        usable best lap. The reference total is the best lap's odometer length — the basis
-        the corner windows (and the delta plot's distance axis) are expressed in."""
-        if self._corner_cache is not _UNSET:
-            return self._corner_cache
-        self._corner_cache = None
-        best = self.best_lap_id()
-        if best is not None:
-            _t, _xs, _ys, _v, cum_best = self._lap_columns(best)
-            if len(cum_best) >= 8 and float(cum_best[-1]) > 0:
-                total_ref = float(cum_best[-1])
-                # The median curvature profile pools the session's clean laps (valid, no GPS
-                # dropout); the best lap is always included so a session where every lap is
-                # dropout-flagged still detects on the best lap alone.
-                ids = [i for i in self.valid_lap_ids() if not self.lap_has_dropout(i)]
-                if best not in ids:
-                    ids.append(best)
-                traces = []
-                for lid in ids:
-                    _lt, xs, ys, _lv, cum = self._lap_columns(lid)
-                    traces.append((xs, ys, cum))
-                d_grid, kappa = corners.pooled_curvature(traces, total_ref)
-                self._corner_cache = (corners.detect_corners(d_grid, kappa), total_ref)
-        return self._corner_cache
+        usable best lap. The reference total is the best lap's odometer length — the basis the
+        corner windows (and the delta plot's distance axis) are expressed in. Delegates to the
+        composed CornerModel (studio/corner_model.py); cleared on re-segment via its invalidate()."""
+        return self._cm.basis()
 
     def corners(self) -> list[corners.Corner]:
         """The detected corners (C1… in track order) in best-lap odometer metres. [] when
-        no best lap exists. Computed once per segmentation (see _corner_basis)."""
-        basis = self._corner_basis()
-        return basis[0] if basis is not None else []
+        no best lap exists. Computed once per segmentation (delegates to CornerModel)."""
+        return self._cm.corner_list()
 
     def _reference_corner_stats(self) -> list[corners.CornerStat] | None:
         """The cross-recording reference lap's per-corner stats projected onto THIS session's
-        corner windows (the same normalized-distance projection any local lap uses), or None
-        when no reference is loaded. Cached on the ReferenceLap so it isn't recomputed per lap;
-        invalidated when the reference or the segmentation changes (clear/load_reference and
-        set_timing_lines drop _corner_stats_cache, where this is parked under REFERENCE_ID)."""
-        ref = self._ref
-        if ref is None:
-            return None
-        got = self._corner_stats_cache.get(REFERENCE_ID)
-        if got is not None:
-            return got
-        basis = self._corner_basis()
-        if basis is None or not basis[0]:
-            return None
-        corner_list, total_ref = basis
-        dist, speed_kmh, elapsed = ref.arrays()
-        if len(dist) < 2 or float(dist[-1]) <= 0:
-            return None
-        # ref=None on the reference itself -> its own deltas are 0 (it IS the baseline).
-        stats = corners.lap_corner_stats(corner_list, total_ref, dist, speed_kmh, elapsed,
-                                         ref=None)
-        self._corner_stats_cache[REFERENCE_ID] = stats
-        return stats
+        corner windows, or None when no reference is loaded. Delegates to CornerModel (cached
+        under REFERENCE_ID; invalidated on a reference change via its invalidate_stats())."""
+        return self._cm.reference_corner_stats()
 
     def lap_corner_stats(self, lap_id: int) -> list[corners.CornerStat]:
         """Per-corner metrics for one lap (time-in-corner, apex/entry/exit speeds, deltas vs
@@ -1317,60 +1297,21 @@ class Session:
         no corners were detected. Cached per lap; cleared on re-segment.
 
         The Δ baseline is the local best lap normally, or the CROSS-RECORDING reference lap's
-        projected corner stats when one is loaded (F7) — the deltas then read against the other
-        recording's corners. DORMANT: with no reference this is byte-identical to before."""
-        got = self._corner_stats_cache.get(lap_id)
-        if got is not None:
-            return got
-        basis = self._corner_basis()
-        best = self.best_lap_id()
-        if basis is None or not basis[0] or best is None:
-            return []
-        corner_list, total_ref = basis
-        dist, speed_kmh, elapsed = self._lap_arrays(lap_id)
-        if len(dist) < 2 or float(dist[-1]) <= 0:
-            return []
-        # The reference stats are the baseline lap's own (deltas measured against them): the
-        # cross-recording reference when loaded, else the local best lap (whose self-deltas are
-        # 0). Computed first, then this lap's deltas are measured against them.
-        ref_stats = self._reference_corner_stats()
-        if ref_stats is not None:
-            ref = ref_stats
-        else:
-            ref = self.lap_corner_stats(best) if lap_id != best else None
-        stats = corners.lap_corner_stats(corner_list, total_ref, dist, speed_kmh, elapsed,
-                                         ref=ref or None)
-        self._corner_stats_cache[lap_id] = stats
-        return stats
+        projected corner stats when one is loaded (F7). DORMANT: byte-identical to before.
+        Delegates to CornerModel (studio/corner_model.py)."""
+        return self._cm.lap_corner_stats(lap_id)
 
     def corner_session_bests(self) -> list[float]:
         """Per-corner session-best time-in-corner across all VALID laps (the purple-cell
         convention, matching the per-sector session bests). [] when no corners. Cached;
-        cleared on re-segment."""
-        if self._corner_bests is not _UNSET:
-            return self._corner_bests
-        per_lap = [self.lap_corner_stats(i) for i in self.valid_lap_ids()]
-        per_lap = [s for s in per_lap if s]
-        n = len(self.corners())
-        self._corner_bests = [
-            min(s[i].time for s in per_lap) for i in range(n)
-        ] if per_lap and n else []
-        return self._corner_bests
+        cleared on re-segment. Delegates to CornerModel."""
+        return self._cm.corner_session_bests()
 
     def corner_map_markers(self) -> list[tuple[str, float, float, int]]:
         """(label, x, y, direction) per corner — the apex position in LOCAL metres on the
-        best lap's trace, for the map's corner labels. [] when no corners/best lap."""
-        basis = self._corner_basis()
-        best = self.best_lap_id()
-        if basis is None or not basis[0] or best is None:
-            return []
-        corner_list, _total_ref = basis
-        _t, xs, ys, _v, cum = self._lap_columns(best)
-        apexes = np.asarray([c.apex for c in corner_list])
-        mx = np.interp(apexes, cum, xs)
-        my = np.interp(apexes, cum, ys)
-        return [(c.label, float(mx[i]), float(my[i]), c.direction)
-                for i, c in enumerate(corner_list)]
+        best lap's trace, for the map's corner labels. [] when no corners/best lap. Delegates
+        to CornerModel."""
+        return self._cm.corner_map_markers()
 
     # ------------------------------------------------------------- data export (F11)
     # The export writers (studio/export_data.py) are pacer-free by contract, so the two
@@ -1596,146 +1537,51 @@ class Session:
         time is read at that distance. None when the corner/lap is unknown or degenerate.
 
         Returned as an ABSOLUTE media time (lap start + elapsed at entry) so the caller can
-        hand it straight to video.seek, like the lap-select seek does."""
-        basis = self._corner_basis()
-        if basis is None or not basis[0]:
-            return None
-        corner_list, total_ref = basis
-        corner = next((c for c in corner_list if c.cid == cid), None)
-        if corner is None:
-            return None
-        td = self._lap_time_dist(lap_id)
-        if td is None:
-            return None
-        times, dists = td
-        total_lap = float(dists[-1])
-        if total_lap <= 0:
-            return None
-        d_enter = corner.enter / total_ref * total_lap  # project onto THIS lap's odometer
-        return float(np.interp(d_enter, dists, times))
+        hand it straight to video.seek, like the lap-select seek does. Delegates to CornerModel
+        (it owns the corner basis the projection reads)."""
+        return self._cm.corner_entry_media_time(lap_id, cid)
 
     # ----------------------------------------------------- driving channels (F5)
-    # Brake events / coasting spans / per-corner grip, derived in studio/driving.py (pacer-free)
-    # off the VALIDATED vehicle-frame g (the gmeter ACCL->kart series, GPS-cross-checked at
-    # load). The brake/coast thresholds come from this session's OWN g distribution (no magic
-    # constants — see driving.derive_thresholds); all per-lap results cache per segmentation and
-    # clear with the corner caches in set_timing_lines.
-
-    def _lap_g_arrays(self, lap_id: int):
-        """(long_g, lat_g) for a lap, aligned 1:1 to the lap's cached (dist, elapsed) arrays.
-
-        The g series (self._gmeter) lives on the MEDIA clock — the SAME clock the lap's own
-        per-point `times` come from (both flow from self.tt) — so the per-lap g is just the
-        meter's long/lat g interpolated at the lap's media times. Returns (None, None) when
-        there's no g signal (no IMU and no GPS-fallback meter) or the lap is degenerate, so the
-        callers degrade to empty channels."""
-        gm = self._gmeter
-        if not gm.has_data:
-            return None, None
-        td = self._lap_time_dist_elapsed(lap_id)
-        if td is None:
-            return None, None
-        times, _dists, _elapsed = td
-        long_g = np.interp(times, gm.times, gm.long_g)
-        lat_g = np.interp(times, gm.times, gm.lat_g)
-        return long_g, lat_g
+    # The driving channels now live in studio/driving_channels.py (DrivingChannels, pacer-free,
+    # studio/driving.py-backed) off the VALIDATED vehicle-frame g (the gmeter ACCL->kart series,
+    # GPS-cross-checked at load). That service owns the four driving caches (the session-wide
+    # thresholds — kept across re-segments since the g series is constant — plus the per-lap
+    # brake / coast / grip, cleared via its invalidate() in set_timing_lines). The thin
+    # delegators below keep every caller (lap_table, map_view, plots_view, coaching) on Session.
 
     def driving_thresholds(self):
         """The brake/coast thresholds (driving.Thresholds) derived ONCE from this session's
         own full-session g distribution over its moving samples — no magic constants. None when
         there's no g signal. Cached for the recording (the g series is constant); reported at
-        load via .describe(). Built from the WHOLE g series + the matching speed (resampled to
-        the g clock), so the distribution reflects the entire session, not one lap."""
-        if self._driving_thresholds_cache is not _UNSET:
-            return self._driving_thresholds_cache
-        gm = self._gmeter
-        if not gm.has_data:
-            self._driving_thresholds_cache = None
-            return None
-        # Speed (km/h) on the g clock: the full-trace speed tv (km/h) interpolated onto gm.times
-        # (the trace + the g series share the media clock).
-        speed_kmh = np.interp(gm.times, self.tt, self.tv)
-        self._driving_thresholds_cache = driving.derive_thresholds(
-            gm.long_g, gm.lat_g, speed_kmh)
-        return self._driving_thresholds_cache
+        load via .describe(). Delegates to DrivingChannels."""
+        return self._dc.thresholds()
 
     def lap_brake_events(self, lap_id: int) -> list[driving.BrakeEvent]:
         """Braking zones detected on one lap's longitudinal-g series (onset odometer/time,
         peak decel, duration — see driving.BrakeEvent), in track order. [] when there's no g
-        signal or the lap is degenerate. Cached per lap; cleared on re-segment."""
-        got = self._brake_events_cache.get(lap_id)
-        if got is not None:
-            return got
-        th = self.driving_thresholds()
-        long_g, _lat_g = self._lap_g_arrays(lap_id)
-        td = self._lap_time_dist_elapsed(lap_id)
-        if th is None or long_g is None or td is None:
-            return []
-        _times, dists, elapsed = td
-        events = driving.brake_events(dists, elapsed, long_g, th.theta_b)
-        self._brake_events_cache[lap_id] = events
-        return events
+        signal or the lap is degenerate. Cached per lap; cleared on re-segment. Delegates to
+        DrivingChannels."""
+        return self._dc.lap_brake_events(lap_id)
 
     def lap_coasting_spans(self, lap_id: int) -> list[driving.CoastSpan]:
         """Coasting spans (neither braking/accelerating nor cornering) on one lap, in track
         order — see driving.CoastSpan. [] when there's no g signal or the lap is degenerate.
-        Cached per lap; cleared on re-segment."""
-        got = self._coasting_spans_cache.get(lap_id)
-        if got is not None:
-            return got
-        th = self.driving_thresholds()
-        long_g, lat_g = self._lap_g_arrays(lap_id)
-        td = self._lap_time_dist_elapsed(lap_id)
-        if th is None or long_g is None or td is None:
-            return []
-        _times, dists, _elapsed = td
-        _d, speed_kmh, elapsed = self._lap_arrays(lap_id)
-        spans = driving.coasting_spans(dists, elapsed, speed_kmh[:len(dists)], long_g, lat_g,
-                                       th.theta_c, th.theta_lat)
-        self._coasting_spans_cache[lap_id] = spans
-        return spans
+        Cached per lap; cleared on re-segment. Delegates to DrivingChannels."""
+        return self._dc.lap_coasting_spans(lap_id)
 
     def lap_corner_grip(self, lap_id: int) -> list[float]:
         """Per-corner friction-circle grip utilization for one lap (median |g| / lap-envelope
         max inside each corner window, in (0,1]; higher in the hard corners — see
         driving.corner_grip), one value per detected corner in track order. [] when there's no
-        g signal, no corners, or the lap is degenerate. Cached per lap; cleared on re-segment."""
-        got = self._corner_grip_cache.get(lap_id)
-        if got is not None:
-            return got
-        long_g, lat_g = self._lap_g_arrays(lap_id)
-        basis = self._corner_basis()
-        if long_g is None or basis is None or not basis[0]:
-            return []
-        corner_list, total_ref = basis
-        td = self._lap_time_dist_elapsed(lap_id)
-        if td is None:
-            return []
-        _times, dists, _elapsed = td
-        total_lap = float(dists[-1])
-        if total_lap <= 0:
-            return []
-        # Project each corner's reference-odometer window onto this lap by normalized distance
-        # (d_lap = d_ref / total_ref * total_lap) — the SAME projection lap_corner_stats uses.
-        windows = [(c.enter / total_ref * total_lap, c.exit / total_ref * total_lap)
-                   for c in corner_list]
-        grip = driving.corner_grip(dists, long_g, lat_g, windows)
-        self._corner_grip_cache[lap_id] = grip
-        return grip
+        g signal, no corners, or the lap is degenerate. Cached per lap; cleared on re-segment.
+        Delegates to DrivingChannels (which reads the corner windows off CornerModel's basis)."""
+        return self._dc.lap_corner_grip(lap_id)
 
     def lap_brake_map_markers(self, lap_id: int) -> list[tuple[float, float, float]]:
         """(x, y, peak_decel) per brake onset on one lap, in LOCAL metres on that lap's own
         trace — for the map's brake glyphs. peak_decel (g) drives the glyph size. [] when no
-        brake events. The onset odometer is mapped to the lap's (x, y) via the lap's cached
-        columns (the same cum->xy interpolation corner_map_markers uses)."""
-        events = self.lap_brake_events(lap_id)
-        if not events:
-            return []
-        _t, xs, ys, _v, cum = self._lap_columns(lap_id)
-        onsets = np.asarray([e.onset_dist for e in events])
-        mx = np.interp(onsets, cum, xs)
-        my = np.interp(onsets, cum, ys)
-        return [(float(mx[i]), float(my[i]), e.peak_decel) for i, e in enumerate(events)]
+        brake events. Delegates to DrivingChannels."""
+        return self._dc.lap_brake_map_markers(lap_id)
 
     def lap_brake_plot_positions(self, lap_id: int, mode: str) -> list[tuple[float, float]]:
         """(plot-x, peak_decel) per brake onset on one lap, on the speed chart's SHARED axis
@@ -1743,53 +1589,17 @@ class Session:
         glyphs sit on the speed trace. [] when no brake events / no best lap (distance mode).
           * 'distance': x = (onset_dist / lap_total) * best_distance  (the s*best_distance axis)
           * 'time':     x = onset_time (elapsed into the lap)
-        peak_decel (g) is returned alongside so the caller can size the glyph."""
-        events = self.lap_brake_events(lap_id)
-        if not events:
-            return []
-        if mode == "time":
-            return [(e.onset_time, e.peak_decel) for e in events]
-        # 'distance' — normalize by this lap's total, scale to the ACTIVE baseline's distance
-        # (the reference total when one is loaded) so the glyphs sit on the curves/cursor, which
-        # delta() scales the same way. Same single-source as the cursor mappers (D12).
-        best = self.best_lap_id()
-        td = self._lap_time_dist(lap_id)
-        if best is None or td is None:
-            return []
-        _times, dists = td
-        total_lap = float(dists[-1])
-        best_total = self.active_baseline_total_distance()
-        if total_lap <= 0 or not best_total:
-            return []
-        return [(e.onset_dist / total_lap * best_total, e.peak_decel) for e in events]
+        peak_decel (g) is returned alongside so the caller can size the glyph. Delegates to
+        DrivingChannels (which reads active_baseline_total_distance() off this Session for the
+        D12 single-source distance axis)."""
+        return self._dc.lap_brake_plot_positions(lap_id, mode)
 
     def lap_coasting_plot_spans(self, lap_id: int, mode: str) -> list[tuple[float, float]]:
         """(plot-x0, plot-x1) per coasting span on one lap, on the speed chart's SHARED axis
         for `mode` — for the shaded coast regions on the speed chart. Same projection as
-        lap_brake_plot_positions. [] when no spans / no best lap (distance mode)."""
-        spans = self.lap_coasting_spans(lap_id)
-        if not spans:
-            return []
-        if mode == "time":
-            # Elapsed at each span edge: interp the span's odometer edges into the lap's elapsed.
-            td = self._lap_time_dist_elapsed(lap_id)
-            if td is None:
-                return []
-            _times, dists, elapsed = td
-            return [(float(np.interp(s.start_dist, dists, elapsed)),
-                     float(np.interp(s.end_dist, dists, elapsed))) for s in spans]
-        best = self.best_lap_id()
-        td = self._lap_time_dist(lap_id)
-        if best is None or td is None:
-            return []
-        _times, dists = td
-        total_lap = float(dists[-1])
-        # ACTIVE baseline total (reference when loaded) — the shared axis delta() uses (D12).
-        best_total = self.active_baseline_total_distance()
-        if total_lap <= 0 or not best_total:
-            return []
-        return [(s.start_dist / total_lap * best_total, s.end_dist / total_lap * best_total)
-                for s in spans]
+        lap_brake_plot_positions. [] when no spans / no best lap (distance mode). Delegates to
+        DrivingChannels."""
+        return self._dc.lap_coasting_plot_spans(lap_id, mode)
 
     def library_entry(self, paths: list[str]) -> dict:
         """Build this recording's session-library entry (F8) — a plain dict fed to the

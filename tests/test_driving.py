@@ -185,12 +185,11 @@ def test_thresholds_track_distribution_and_are_floored():
 # ------------------------------------------------------------------- Session wiring
 def _bare_driving_session():
     """A bare Session (tests/_synthetic idiom) with one straight lap + a seeded g-meter that
-    brakes mid-lap, and the driving-channel + corner cache slots Session.__init__ creates."""
+    brakes mid-lap, and the driving-channel + corner caches reset through the F1 services."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from _synthetic import bare_session
+    from _synthetic import bare_session, reset_corner_caches, reset_driving_caches
 
     from studio import gmeter
-    from studio.session import _UNSET
 
     s = bare_session(valid=[0], best=0)
     n = 600
@@ -208,13 +207,10 @@ def _bare_driving_session():
     lat_g = np.zeros(n)
     s._gmeter = gmeter.GMeter(times=times.copy(), lat_g=lat_g, long_g=long_g,
                               cross=None, source="accl")
-    s._driving_thresholds_cache = _UNSET
-    s._brake_events_cache = {}
-    s._coasting_spans_cache = {}
-    s._corner_grip_cache = {}
-    s._corner_cache = _UNSET
-    s._corner_stats_cache = {}
-    s._corner_bests = _UNSET
+    # F1: the driving + corner caches live in the DrivingChannels / CornerModel services now;
+    # reset them through the service-aware helpers (the raw slots moved off Session).
+    reset_driving_caches(s)
+    reset_corner_caches(s)
     return s
 
 
@@ -247,10 +243,9 @@ def test_session_no_gmeter_degrades_to_empty():
     """With no g signal (empty meter), every driving accessor returns [] and the thresholds are
     None — the channels degrade gracefully (a recording with no IMU + no GPS fallback)."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from _synthetic import bare_session
+    from _synthetic import bare_session, reset_corner_caches, reset_driving_caches
 
     from studio import gmeter
-    from studio.session import _UNSET
     s = bare_session(valid=[0], best=0)
     n = 100
     times = np.linspace(0.0, 5.0, n)
@@ -260,13 +255,8 @@ def test_session_no_gmeter_degrades_to_empty():
     s.tt = times.copy()
     s.tv = np.full(n, 57.6)
     s._gmeter = gmeter._empty()
-    s._driving_thresholds_cache = _UNSET
-    s._brake_events_cache = {}
-    s._coasting_spans_cache = {}
-    s._corner_grip_cache = {}
-    s._corner_cache = _UNSET
-    s._corner_stats_cache = {}
-    s._corner_bests = _UNSET
+    reset_driving_caches(s)
+    reset_corner_caches(s)
     assert s.driving_thresholds() is None
     assert s.lap_brake_events(0) == []
     assert s.lap_coasting_spans(0) == []

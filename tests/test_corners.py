@@ -203,17 +203,14 @@ def test_corner_stats_deltas_and_window_speeds():
 # ------------------------------------------------------------------- Session wiring
 def _bare_corner_session():
     """A bare Session (tests/_synthetic idiom) with two stadium laps seeded into the bulk
-    `_cols_cache` (times, xs, ys, full_speed m/s, cum) + the corner-model cache slots that
-    Session.__init__ would have created."""
+    `_cols_cache` (times, xs, ys, full_speed m/s, cum); the corner model lives in the F1
+    CornerModel service now, reset (REAL detection, no seeded basis) via reset_corner_caches."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from _synthetic import bare_session
+    from _synthetic import bare_session, reset_corner_caches
 
-    from studio.session import _UNSET
     s = bare_session(valid=[0, 1], best=0)
     s._cols_cache = {}
-    s._corner_cache = _UNSET
-    s._corner_stats_cache = {}
-    s._corner_bests = _UNSET
+    reset_corner_caches(s)
     xs, ys, cum_a = stadium()
     sp_a = speed_profile(cum_a, 0.7)
     s._cols_cache[0] = (100.0 + elapsed_for(cum_a, sp_a), xs, ys, sp_a, cum_a)

@@ -56,6 +56,36 @@ def seed_cols(session, lap_id, times, dists):
     )
 
 
+_MISSING = object()  # "no basis seed" sentinel for reset_corner_caches
+
+
+def reset_corner_caches(session, *, basis=_MISSING):
+    """Reset the CornerModel service's caches on a bare Session — the post-F1 replacement for
+    the pre-extraction ``s._corner_cache = _UNSET; s._corner_stats_cache = {}; s._corner_bests
+    = _UNSET`` seeding (those raw slots moved into studio.corner_model.CornerModel). Force a
+    fresh service so the next access recomputes; optionally SEED the (corner_list, total_ref)
+    basis so a test that hand-builds corners (no real curvature on a FakeLaps) gets them back
+    from ``corners()`` / ``lap_corner_stats()``. The per-lap stats then come from the REAL
+    projection against the seeded basis, exactly as before."""
+    cm = session._cm  # lazily builds the service on a bare Session.__new__
+    cm.invalidate()
+    if basis is not _MISSING:
+        cm._basis_cache = basis  # seeded basis (or None); the per-lap stats stay real-projected
+
+
+def reset_driving_caches(session):
+    """Reset the DrivingChannels service's caches on a bare Session — the post-F1 replacement
+    for the pre-extraction ``s._driving_thresholds_cache = ...; s._brake_events_cache = {}; …``
+    seeding (those raw slots moved into studio.driving_channels.DrivingChannels). Forces a fresh
+    service so the next access derives the thresholds from the seeded ``s._gmeter`` + reprojects
+    the per-lap channels. The thresholds slot is reset to the service's own _UNSET sentinel so
+    they re-derive lazily (matching production)."""
+    from studio.driving_channels import _UNSET as driving_unset
+    dc = session._dc  # lazily builds the service on a bare Session.__new__
+    dc._thresholds_cache = driving_unset
+    dc.invalidate()
+
+
 def bare_session(laps=None, *, best=None, valid=None):
     """A bare Session (Session.__new__ — no pacer, no telemetry file, no Qt event loop).
 
