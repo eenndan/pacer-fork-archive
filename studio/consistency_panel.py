@@ -4,7 +4,9 @@ Two read-only views over `studio/consistency.py`'s session statistics (computed 
 VALID, dropout-free laps — Session.consistency_lap_ids, the ⚠ rule):
 
   * a lap-time TREND sparkline (lap id → lap time; pyqtgraph mini-plot, downsample-safe,
-    mouse off) with the session-best laps — the running PBs — marked in the best-lap green;
+    mouse off) with the session-best laps — the running PBs — marked in the best-lap green,
+    and minimal context so it isn't a debug plot: a dashed best-lap-green baseline at the
+    session best, fastest/slowest lap-time y labels, and first/last lap-number x ticks;
   * the TOP-5 "most inconsistent corners" list, ranked by σ × median-loss (corners that are
     BOTH erratic and slow first — the weighting rationale lives in consistency.py): corner
     id, sample σ of time-in-corner, and the median time lost vs that corner's session best.
@@ -37,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import consistency, theme
+from ._signal import fmt_time
 from .lap_table import CORNER_DIR_GLYPH
 from .theme import C
 
@@ -59,8 +62,17 @@ TREND_PEN = pg.mkPen(C.text_dim, width=1)
 TREND_DOT_BRUSH = pg.mkBrush(C.text_muted)
 PB_DOT_BRUSH = pg.mkBrush(C.ahead)
 PB_DOT_PEN = pg.mkPen(C.canvas, width=1)
+# Faint horizontal reference at the session-best lap time (the green-dot floor): a dashed
+# best-lap-green hairline so the swing magnitude reads AGAINST the demonstrated best, not in a
+# vacuum. Dim/dashed so it stays a quiet baseline, not a third series.
+BASELINE_PEN = pg.mkPen(C.ahead, width=1, style=Qt.DashLine)
+SPARK_AXIS_FONT = 10  # tabular tick font for the minimal min/max + first/last labels
+# A hair of vertical headroom (fraction of the time range) so the top/bottom dots + the min/max
+# tick labels aren't clipped flush against the plot frame.
+SPARK_Y_PAD_FRAC = 0.12
 TREND_TOOLTIP = ("Lap-time trend over the valid laps (GPS-dropout ⚠ laps excluded). "
-                 "Green dots mark session-best (PB) laps.")
+                 "Green dots mark session-best (PB) laps; the dashed green line is the "
+                 "session best (the floor). The y labels are the fastest / slowest laps.")
 LIST_TOOLTIP = ("Most inconsistent corners, ranked by σ × median time lost vs that "
                 "corner's session best — corners that are both erratic AND slow rank "
                 "highest. Click a row to ring its apex on the map.")
@@ -103,12 +115,28 @@ class ConsistencyPanel(QWidget):
         self.spark = pg.PlotWidget()
         self.spark.setToolTip(TREND_TOOLTIP)
         plot = self.spark.getPlotItem()
-        plot.hideAxis("left")
-        plot.hideAxis("bottom")
+        # Minimal-but-REAL axes (it used to hide both, reading as a debug plot). Both stay shown
+        # with custom 2-tick label sets injected in refresh(): the LEFT axis shows the fastest /
+        # slowest lap time (so the swing magnitude is legible) and the BOTTOM axis the first /
+        # last lap number. Styled with the plots_view tokens — dim line, dimmed tabular tick text,
+        # no minor ticks — so it reads as a quiet labelled sparkline, not a full chart.
+        for side in ("left", "bottom"):
+            ax = plot.getAxis(side)
+            ax.setPen(C.border)            # dim axis line
+            ax.setTextPen(C.text_dim)      # tick labels
+            ax.setTickFont(theme.mono_font(SPARK_AXIS_FONT))  # tabular figures, align digits
+            ax.setStyle(maxTickLevel=0, tickLength=3)  # only our explicit ticks; tiny tick marks
+        # Give the left axis just enough fixed width for an "m:ss.mmm" label so the curve doesn't
+        # jump around as labels change width across recordings.
+        plot.getAxis("left").setWidth(58)
         plot.setMouseEnabled(x=False, y=False)
         plot.setMenuEnabled(False)
         plot.hideButtons()
         self.spark.setBackground(None)  # the panel surface shows through (sparkline idiom)
+        # Faint dashed baseline at the session best (set in refresh()): the floor the trend swings
+        # above, so the magnitude of the swings reads against the demonstrated best.
+        self._baseline = pg.InfiniteLine(angle=0, pen=BASELINE_PEN, movable=False)
+        plot.addItem(self._baseline)
         # The trend curve + per-lap dots; data set in refresh(). Downsample-safe by
         # construction (auto downsampling + clip-to-view, the plots_view idiom) even though
         # a session is tens of laps, not thousands.
@@ -180,6 +208,7 @@ class ConsistencyPanel(QWidget):
                            [t for t, on in zip(times, pb, strict=True) if not on])
         self._pb_dots.setData([i for i, on in zip(ids, pb, strict=True) if on],
                               [t for t, on in zip(times, pb, strict=True) if on])
+        self._refresh_spark_context(ids, times)
 
         # Top-N inconsistent corners (ranked by session.corner_consistency).
         ranked = self.session.corner_consistency()[:TOP_N]
@@ -199,6 +228,34 @@ class ConsistencyPanel(QWidget):
                     item.setFont(self._num_font)
                 self.table.setItem(r, col, item)
         self.table.blockSignals(False)
+
+    def _refresh_spark_context(self, ids: list[int], times: list[float]):
+        """Give the trend sparkline minimal-but-real context (it used to hide both axes and read
+        as a debug plot): a dashed baseline at the session best, fastest/slowest y labels so the
+        swing magnitude is legible, and first/last lap ticks on x. Driven from the trend data, so
+        it follows a re-segmentation. With <2 laps there's nothing to contextualise — clear the
+        baseline + axes so the strip degrades to a quiet empty plot rather than stale labels."""
+        plot = self.spark.getPlotItem()
+        left, bottom = plot.getAxis("left"), plot.getAxis("bottom")
+        if len(times) < 2:
+            self._baseline.setVisible(False)
+            left.setTicks([])
+            bottom.setTicks([])
+            return
+        lo, hi = min(times), max(times)  # fastest / slowest lap time over the valid laps
+        # Baseline at the session best (the green-dot floor) so the swings read against it.
+        self._baseline.setVisible(True)
+        self._baseline.setValue(lo)
+        # A hair of headroom above/below so the extreme dots + the y labels aren't clipped against
+        # the frame; range frozen here (the sparkline never autoranges to a moving cursor).
+        pad = max((hi - lo) * SPARK_Y_PAD_FRAC, 1e-3)
+        plot.setYRange(lo - pad, hi + pad, padding=0)
+        plot.setXRange(ids[0], ids[-1], padding=0.04)
+        # Exactly two ticks per axis (our own — maxTickLevel=0 suppresses pyqtgraph's): y shows the
+        # fastest/slowest lap TIMES (m:ss.mmm), x the first/last lap NUMBERS, so the magnitude of
+        # the swing and the lap span are both legible without cluttering the tiny strip.
+        left.setTicks([[(lo, fmt_time(lo)), (hi, fmt_time(hi))]])
+        bottom.setTicks([[(ids[0], str(ids[0])), (ids[-1], str(ids[-1]))]])
 
     # ------------------------------------------------------------- interaction
     def _on_row_selected(self):

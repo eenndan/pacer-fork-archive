@@ -8,10 +8,11 @@ These exercise the load-bearing pure logic directly on synthetic data:
   * F5 — per-sector session-best = the per-column MINIMUM split across valid laps (now
     `Session.session_best_splits`, hoisted from lap_table so the purple cells and the
     theoretical-best footer share one computation).
-  * Theoretical/rolling footer (F1-roadmap) — a real offscreen LapTable on a fake session:
-    the two footer rows exist OUTSIDE the sortable table, carry the purple session-best
-    style + defining tooltips, show fmt_time'd session values, survive a sort, and update
-    on refresh() after a (simulated) timing-line move.
+  * Theoretical/rolling footer (F1-roadmap; C10 redesign) — a real offscreen LapTable on a
+    fake session: the two SESSION-BESTS tiles exist OUTSIDE the sortable table, carry NEUTRAL
+    (not purple — the purple is the per-sector best cells') values + defining tooltips, show
+    fmt_time'd session values, survive a sort, and update on refresh() after a (simulated)
+    timing-line move.
   * Auto-follow — `StudioWindow._follow_current_lap`: the speed+delta charts switch to the
     playhead's lap (vs best) only on a lap-change EDGE; None (lead-in) HOLDS the last lap; the
     table re-select uses the programmatic (no-seek) path so it never fights playback.
@@ -200,9 +201,12 @@ def _footer_texts(table):
 
 
 def test_lap_table_footer_rows_present_styled_and_valued():
-    """The two footer rows exist BELOW the table (never as sortable table rows), read the
-    session's theoretical/rolling values through fmt_time, carry the purple session-best
-    styling + a defining tooltip each."""
+    """The two SESSION-BESTS tiles exist BELOW the table (never as sortable table rows), read the
+    session's theoretical/rolling values through fmt_time, and carry a defining tooltip each.
+
+    C10: the values are styled in the NEUTRAL primary text — NOT the C.best purple — so the
+    purple is reserved strictly for the per-sector best cells (a former semantic-colour
+    collision); the block instead gets hierarchy from a "SESSION BESTS" section header."""
     from PySide6.QtWidgets import QLabel
 
     sess = _FakeFooterSession()
@@ -210,11 +214,13 @@ def test_lap_table_footer_rows_present_styled_and_valued():
     # Footer is NOT table rows: the table holds exactly the 3 laps.
     assert table.table.rowCount() == 3
     assert _footer_texts(table) == [fmt_time(68.2), fmt_time(68.3)]
-    # The purple session-best style + tooltips on both value labels.
+    # Neutral text colour (NOT purple) + a tooltip on every value label.
     for label in table._footer_values:
         assert isinstance(label, QLabel)
-        assert theme.C.best in label.styleSheet(), label.styleSheet()
-        assert label.toolTip(), "footer row must carry its defining tooltip"
+        assert theme.C.text in label.styleSheet(), label.styleSheet()
+        assert theme.C.best not in label.styleSheet(), \
+            "footer value must NOT reuse the per-sector best purple (C10)"
+        assert label.toolTip(), "footer tile must carry its defining tooltip"
     # The purple-cell target the table paints is the SAME accessor the footer sums.
     assert table._best_split == sess.session_best_splits()
     # And the fake's numbers respect the sandwich the real session guarantees.

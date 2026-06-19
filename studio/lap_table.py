@@ -13,11 +13,14 @@ trailing ⚠ low-confidence marker (+ row tooltip) on laps with a GPS dropout. C
 alignment and the tabular numeric font come from the design tokens in `theme`; base row text
 is the primary off-white on the dark table surface.
 
-Under the table sit two summary FOOTER rows (F1-roadmap) — "Theoretical best" (sum of the
-purple session-best splits) and "Best rolling" (fastest start-anywhere full loop) — plain
-labels OUTSIDE the QTableWidget, so they can never participate in sorting/selection and
-survive any sort by construction; refresh() rewrites their values (session is the single
-source: `theoretical_best` / `best_rolling_lap`).
+Under the table sits a designed SESSION-BESTS footer block (F1-roadmap; C10 redesign) — a
+"SESSION BESTS" section divider over two stat tiles, "Theoretical" (sum of the purple
+session-best splits) and "Best rolling" (fastest start-anywhere full loop) — plain labels
+OUTSIDE the QTableWidget, so they can never participate in sorting/selection and survive any
+sort by construction; refresh() rewrites their values (session is the single source:
+`theoretical_best` / `best_rolling_lap`). Their values read in the NEUTRAL primary text, NOT
+the C.best purple, which is reserved strictly for the per-sector best cells (a former
+semantic-colour collision).
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QGridLayout,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
     QStackedWidget,
@@ -58,20 +61,23 @@ NUMERIC_COL_START = 1
 NUM_ROLE = Qt.UserRole  # the numeric sort key stored on every cell
 LAP_ROLE = Qt.UserRole + 1  # the lap id (stable across sorts), stored on the Lap cell
 
-# The summary footer rows under the table: (title, session accessor name, defining tooltip).
-# Both are styled like the purple per-sector session-best (they're composed FROM those bests /
-# from start-anywhere windows) and read from Session so the table cells and the footer can
-# never disagree. (The per-column session-best itself is `Session.session_best_splits` —
-# hoisted there from this module so both consumers share one computation.)
+# The SESSION-BESTS summary block under the table: (title, session accessor name, tooltip).
+# Both values are composed FROM the per-sector bests / start-anywhere windows and read from
+# Session so the table cells and the footer can never disagree (the per-column session-best
+# itself is `Session.session_best_splits` — hoisted there so both consumers share one
+# computation). C10: the values are NO LONGER painted in the C.best purple — that purple is now
+# reserved strictly for the per-sector best CELLS so the footer can't read as "more purple
+# cells". Each stat sits in its own labelled tile (dim caption + hero tabular value) under a
+# "SESSION BESTS" section divider, so the block reads as a deliberate designed footer.
 FOOTER_ROWS = (
-    ("Theoretical best", "theoretical_best",
-     "Sum of the session-best sector splits (the purple cells): the lap you'd drive by "
-     "stitching every best sector together. With no sector lines this equals the best lap "
-     "time."),
+    ("Theoretical", "theoretical_best",
+     "Theoretical best — sum of the session-best sector splits (the purple cells): the lap "
+     "you'd drive by stitching every best sector together. With no sector lines this equals "
+     "the best lap time."),
     ("Best rolling", "best_rolling_lap",
-     "The fastest single complete loop regardless of where it starts: the minimum time from "
-     "passing any track position to passing it again one lap later (windows spanning a "
-     "GPS-dropout ⚠ lap are excluded)."),
+     "Best rolling — the fastest single complete loop regardless of where it starts: the "
+     "minimum time from passing any track position to passing it again one lap later (windows "
+     "spanning a GPS-dropout ⚠ lap are excluded)."),
 )
 
 
@@ -174,36 +180,61 @@ class LapTable(QWidget):
 
     # ------------------------------------------------------------------ build
     def _build_footer(self) -> QWidget:
-        """The two session-summary footer rows ("Theoretical best" / "Best rolling").
-        Deliberately a separate widget BELOW the QTableWidget, not table rows: footer rows must
-        never participate in sorting or selection, so plain labels make that structural (they
-        survive any sort/refresh by construction). Values are styled like the purple per-sector
-        session-best cells (same colour + bold tabular font); each row carries its defining
-        tooltip. `_refresh_footer` rewrites the values on every refresh()."""
+        """The SESSION-BESTS summary block below the table (C10): a "SESSION BESTS" section
+        divider over a row of stat TILES (one per FOOTER_ROWS entry), each a dim caption above a
+        hero-sized tabular value. Deliberately a separate widget BELOW the QTableWidget, not table
+        rows: footer values must never participate in sorting or selection, so plain labels make
+        that structural (they survive any sort/refresh by construction).
+
+        DESIGN (C10): the old footer was two un-separated label rows whose values reused the
+        C.best purple — the SAME purple as the per-sector best cells, a semantic-colour collision
+        that made the block read as "more purple cells". Here the values use the neutral primary
+        text (the purple is reserved strictly for the sector-best cells); hierarchy comes from the
+        section header + caption-over-value tile, not colour. Each tile carries its defining
+        tooltip on both caption and value. `_refresh_footer` rewrites the values on refresh()."""
         footer = QWidget()
         footer.setObjectName("LapTableFooter")
-        # A hairline above the rows separates them from the table body (theme border token).
+        # A hairline above the block separates it from the table body (theme border token); the
+        # surface bg lifts it off the canvas so it reads as a designed footer, not a stray strip.
         footer.setStyleSheet(
-            f"QWidget#LapTableFooter {{ border-top: 1px solid {theme.C.border}; }}")
-        grid = QGridLayout(footer)
-        grid.setContentsMargins(8, 4, 8, 4)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(2)
-        bold_num = theme.mono_font(theme.TABLE, theme.W_SEMIBOLD)
+            f"QWidget#LapTableFooter {{ border-top: 1px solid {theme.C.border}; "
+            f"background-color: {theme.C.surface}; }}")
+        outer = QVBoxLayout(footer)
+        outer.setContentsMargins(10, 6, 10, 8)
+        outer.setSpacing(4)
+        # Section divider: the small uppercase dimmed header type (the panel's BarLabel role) so
+        # the block announces itself the way every other panel section does.
+        header = QLabel("SESSION BESTS")
+        header.setProperty("role", "BarLabel")
+        header.setToolTip("Reference targets composed from this session's best sectors / loops "
+                          "— not lap times you actually drove.")
+        outer.addWidget(header)
+
+        # The stat tiles, laid side by side. Each is a dim caption stacked over a hero tabular
+        # value, so the magnitude reads at a glance and the labels stay a quiet secondary cue.
+        tiles = QHBoxLayout()
+        tiles.setContentsMargins(0, 0, 0, 0)
+        tiles.setSpacing(20)
+        hero_num = theme.mono_font(theme.HERO - 5, theme.W_SEMIBOLD)  # a clear step up from 13px
         self._footer_values: list[QLabel] = []
-        for r, (title, _accessor, tip) in enumerate(FOOTER_ROWS):
-            name = QLabel(title)
-            name.setStyleSheet(f"color: {theme.C.text_dim};")
-            name.setToolTip(tip)
+        for title, _accessor, tip in FOOTER_ROWS:
+            tile = QVBoxLayout()
+            tile.setContentsMargins(0, 0, 0, 0)
+            tile.setSpacing(0)
+            caption = QLabel(title)
+            caption.setStyleSheet(
+                f"color: {theme.C.text_dim}; font-size: {theme.CAPTION}px;")
+            caption.setToolTip(tip)
             value = QLabel(fmt_time(float("nan")))  # "—" until refresh() fills it
-            value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            value.setFont(bold_num)
-            value.setStyleSheet(f"color: {theme.C.best};")  # the purple session-best style
+            value.setFont(hero_num)
+            value.setStyleSheet(f"color: {theme.C.text};")  # neutral — NOT the sector-best purple
             value.setToolTip(tip)
-            grid.addWidget(name, r, 0)
-            grid.addWidget(value, r, 1)
+            tile.addWidget(caption)
+            tile.addWidget(value)
+            tiles.addLayout(tile)
             self._footer_values.append(value)
-        grid.setColumnStretch(1, 1)
+        tiles.addStretch(1)  # tiles hug the left; the slack sits to their right
+        outer.addLayout(tiles)
         return footer
 
     def _refresh_footer(self):
