@@ -206,6 +206,103 @@ def test_source_is_chapter_headless_null_player_is_true():
     print("test_source_is_chapter_headless_null_player_is_true OK")
 
 
+# --------------------------------------------------------------- D6 (slider range vs real video)
+def test_d6_slider_range_uses_real_video_when_longer_than_gpmf():
+    """D6: the slider RANGE was sized off the GPMF metadata-track total (pane.total_duration) and
+    DISCARDED the real QMediaPlayer duration whenever that total was > 0. On GoPro files where the
+    telemetry track ends BEFORE the video track, the handle pinned early. Now _on_duration records
+    the observed video duration and ranges the slider to the LARGER of the GPMF total and the
+    observed video total — so the handle spans the whole playable video."""
+    cmap = chapters.ChapterMap(["/tmp/SHORT_GPMF.MP4"], [60.0])  # GPMF says 60 s
+    view = VideoView(cmap)
+    assert view.pane.total_duration == 60.0
+    # The real video track is LONGER (62.5 s) than the telemetry track — QMediaPlayer reports it.
+    view._on_duration(62_500)
+    assert view.slider.maximum() == 62_500, view.slider.maximum()
+    print(f"test_d6_slider_range_uses_real_video_when_longer_than_gpmf OK: max={view.slider.maximum()} ms")
+
+
+def test_d6_slider_range_keeps_gpmf_when_video_shorter():
+    """D6 no-regression: when the telemetry track is LONGER than the video track, the GPMF total
+    wins (max of the two), so the readout/range that already matched the telemetry clock is
+    unchanged — the fix only ever WIDENS to cover the real video, never shrinks below the GPMF total."""
+    cmap = chapters.ChapterMap(["/tmp/LONG_GPMF.MP4"], [90.0])  # GPMF says 90 s
+    view = VideoView(cmap)
+    view._on_duration(88_000)  # video track only 88 s
+    assert view.slider.maximum() == 90_000, view.slider.maximum()
+    print(f"test_d6_slider_range_keeps_gpmf_when_video_shorter OK: max={view.slider.maximum()} ms")
+
+
+def test_d6_chaptered_sums_observed_with_gpmf_fallback():
+    """D6 chaptered case: the observed video total sums each chapter's REAL video duration where
+    QMediaPlayer has reported it, falling back to the chapter's GPMF duration for any not yet loaded.
+    With 3 chapters (GPMF 100 s each = 300 s total) and chapter 0's video observed at 105 s, the
+    observed total is 105 + 100 + 100 = 305 s, which exceeds the 300 s GPMF total -> slider 305 s."""
+    cmap = chapters.ChapterMap([f"/tmp/CH_{i}.MP4" for i in range(3)], [100.0, 100.0, 100.0])
+    view = VideoView(cmap)
+    assert view.pane.total_duration == 300.0
+    # Chapter 0 is the loaded source (current_chapter() == 0) — its real video is 105 s.
+    assert view.pane.current_chapter() == 0
+    view._on_duration(105_000)
+    assert view.slider.maximum() == 305_000, view.slider.maximum()
+    print(f"test_d6_chaptered_sums_observed_with_gpmf_fallback OK: max={view.slider.maximum()} ms")
+
+
+def test_d6_compare_mode_does_not_widen_lap_window():
+    """D6 guard: in compare mode the slider is confined to lap A's window, so a per-chapter duration
+    must NOT widen it. _on_duration early-outs while _lap_window is set, leaving the lap-confined
+    range intact."""
+    view = VideoView(chapters.ChapterMap(["/tmp/CONF.MP4"], [60.0]))
+    view.set_compare(0, 0, (10.0, 20.0), (10.0, 20.0), "A", "B", [0], None, pane_b_source=None)
+    lo, hi = view.slider.minimum(), view.slider.maximum()
+    assert (lo, hi) == (10_000, 20_000), (lo, hi)  # confined to lap A's window
+    view._on_duration(62_500)  # a real video duration arriving mid-compare must not widen it
+    assert (view.slider.minimum(), view.slider.maximum()) == (lo, hi), (
+        view.slider.minimum(), view.slider.maximum())
+    print("test_d6_compare_mode_does_not_widen_lap_window OK: lap window preserved")
+
+
+# --------------------------------------------------------------- D1 (slider/arrow fan-out)
+def test_d1_slider_move_fans_out_to_pane_b_in_compare():
+    """D1: in compare mode VideoView._on_slider_moved (the single path the global slider AND the
+    ←/→ arrows route through) seeks pane A then calls the injected fan-out hook with the new global
+    time, so the app can distance-lock the SAME move to pane B. Before the fix only pane A moved.
+    In single-video mode the hook must NOT fire (no pane B)."""
+    view = VideoView(_cmap("PRIMARY"))
+    fanned = []
+    view.set_compare_seek_fanout(lambda t: fanned.append(t))
+
+    # Single mode first: a slider move must NOT fan out (no secondary pane mounted).
+    view._on_slider_moved(5_000)
+    assert fanned == [], "fan-out must not fire in single-video mode"
+
+    # Enter compare, then move the slider: the hook fires with the clamped global time.
+    view.set_compare(0, 1, (4.0, 9.0), (20.0, 30.0), "A", "B", [0, 1], None, pane_b_source=None)
+    fanned.clear()
+    view._on_slider_moved(7_000)  # 7 s, inside lap A's [4,9] window
+    assert fanned == [7.0], fanned
+    # The slider value is clamped to lap A's window before the fan-out (so pane B gets the clamped t).
+    fanned.clear()
+    view._on_slider_moved(99_000)  # past lap A's end -> clamps to 9.0 s
+    assert fanned == [9.0], fanned
+    print(f"test_d1_slider_move_fans_out_to_pane_b_in_compare OK: fanned {fanned}")
+
+
+def test_d1_step_routes_through_fanout():
+    """D1: the ←/→ arrow step (VideoView.step) routes through the SAME _on_slider_moved path, so it
+    fans out to pane B too — the arrows distance-lock the pair exactly like the slider."""
+    view = VideoView(_cmap("PRIMARY"))
+    fanned = []
+    view.set_compare_seek_fanout(lambda t: fanned.append(t))
+    view.set_compare(0, 1, (4.0, 9.0), (20.0, 30.0), "A", "B", [0, 1], None, pane_b_source=None)
+    # Park the primary near lap A's start, then step +1 s; the fan-out must fire (clamped to window).
+    view.pane.seek(5.0)
+    fanned.clear()
+    view.step(1.0)
+    assert len(fanned) == 1 and 4.0 <= fanned[0] <= 9.0, fanned
+    print(f"test_d1_step_routes_through_fanout OK: step fanned {fanned}")
+
+
 # --------------------------------------------------------------- Issue 1+3 real media (opt-in)
 def _d24():
     """The D24 cross-recording media for the OPT-IN real-media proof. Skipped unless
@@ -285,6 +382,14 @@ def _run_all():
     test_compare_splitter_equal_and_draggable()
     test_deferred_seek_waits_for_the_right_chapter_file()
     test_source_is_chapter_headless_null_player_is_true()
+    # D6: slider range reconciles the GPMF metadata total with the real video duration.
+    test_d6_slider_range_uses_real_video_when_longer_than_gpmf()
+    test_d6_slider_range_keeps_gpmf_when_video_shorter()
+    test_d6_chaptered_sums_observed_with_gpmf_fallback()
+    test_d6_compare_mode_does_not_widen_lap_window()
+    # D1: the global slider + ←/→ arrows fan the seek out to pane B (distance-lock entry point).
+    test_d1_slider_move_fans_out_to_pane_b_in_compare()
+    test_d1_step_routes_through_fanout()
     test_real_media_pane_b_is_reference_at_lap_start()
     print("ALL VIDEO-VIEW COMPARE TESTS PASSED")
 

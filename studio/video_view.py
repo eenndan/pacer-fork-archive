@@ -192,9 +192,26 @@ class VideoView(QWidget):
         self._two_panes = False
         # The PRIMARY pane's lap window (start_global, end_global) while in compare mode, or None
         # in single-video mode. The global scrub slider is CONFINED to this window in compare mode
-        # so dragging it can't escape lap A or desync the pair (both panes step within lap A's
-        # window). None => the slider spans the whole session, exactly as before.
+        # so dragging it can't escape lap A or step the primary past the lap. NOTE: the window alone
+        # does NOT keep the pair in sync — the slider/arrows seek pane A only, so pane B would freeze
+        # while A jumps unless the seek is fanned out. That fan-out is `_compare_seek_fanout`, set by
+        # the app to distance-lock the same move to pane B (see _on_slider_moved). None window =>
+        # the slider spans the whole session, exactly as before.
         self._lap_window: tuple[float, float] | None = None
+        # D1: in compare mode the global slider + ←/→ arrows (both routed through _on_slider_moved)
+        # seek the PRIMARY pane only. This hook, injected by the app (set_compare_seek_fanout), is
+        # called with the primary's new global time so the app can distance-lock the SAME move to
+        # pane B (CompareController.fanout_seek_b) — without it the two videos desync. None outside
+        # compare / before wiring; cleared on exit_compare.
+        self._compare_seek_fanout: object = None
+        # D6: the REAL per-chapter video-track durations (ms) QMediaPlayer reports via
+        # durationChanged, keyed by chapter index. The slider RANGE was sized off the GPMF
+        # metadata-track total (pane.total_duration) alone, but on GoPro files the telemetry track
+        # can end before/after the video track, so the handle pinned early / overshot while the time
+        # readout was correct. We track the observed video durations here and range the slider to the
+        # LARGER of the GPMF total and the observed video total (see _on_duration), so the handle
+        # spans the whole playable video.
+        self._chapter_video_ms: dict[int, int] = {}
         # Last g-meter source + visible state, captured so a LAZILY-created secondary pane can be
         # seeded with them on entry (toggling g-meter ON then entering compare must show the overlay
         # on BOTH panes with the right source). set by set_gmeter_source / set_gmeter_visible.
@@ -606,10 +623,13 @@ class VideoView(QWidget):
         self._stage_lay.addWidget(self.pane, 1)
         self.pane.show()
         self.pane.clear_lap_window()  # whole session again — normal mode, behaviour unchanged
-        # Drop the slider's lap-A confinement and restore the whole-session range.
+        # Drop the slider's lap-A confinement and restore the whole-session range. D6: use the
+        # reconciled video/GPMF max (not the GPMF total alone) so the handle still spans the whole
+        # playable video after leaving compare.
         self._lap_window = None
-        if self.pane.total_duration > 0:
-            self.slider.setRange(0, int(self.pane.total_duration * 1000))
+        full_ms = self._whole_session_max_ms()
+        if full_ms > 0:
+            self.slider.setRange(0, full_ms)
         self._teardown_secondary()
         # Drop the cell wrappers + splitter (the primary pane has been reparented out of _cell_a).
         for w in (self._cell_a, self._cell_b, self._splitter):
@@ -748,13 +768,27 @@ class VideoView(QWidget):
         self.slider.setValue(min(max(self.slider.value(), lo), hi))
         self.slider.blockSignals(False)
 
+    def set_compare_seek_fanout(self, fn) -> None:
+        """D1: inject the compare-mode fan-out hook (the app's CompareController.fanout_seek_b). It
+        is called from _on_slider_moved with the primary pane's new global time so the slider/arrow
+        seek is distance-locked to pane B too. None disables it (single-video mode)."""
+        self._compare_seek_fanout = fn
+
     def _on_slider_moved(self, ms: int):
         # The slider value is GLOBAL ms — route it through the PRIMARY pane's chapter-aware seek.
-        # In compare mode clamp to lap A's window so a drag can't desync the pair or escape the lap.
+        # In compare mode clamp to lap A's window so a drag can't escape the lap or step the primary
+        # past it.
         if self._lap_window is not None:
             lo, hi = self._lap_window
             ms = min(max(ms, int(lo * 1000)), int(hi * 1000))
-        self.seek(ms / 1000.0)
+        t = ms / 1000.0
+        self.seek(t)  # PRIMARY pane
+        # D1: fan the SAME move out to pane B (distance-locked) so the slider/arrows can't desync the
+        # pair. Only active in compare mode (the hook is set on enter, cleared on exit) and only when
+        # the secondary pane is live. Done AFTER the primary seek so both panes move on the one input.
+        if (self._two_panes and self.secondary is not None
+                and self._compare_seek_fanout is not None):
+            self._compare_seek_fanout(t)
 
     def _on_slider_action(self, _action: int):
         """Click-to-seek: a groove click is an ACTION, not a drag, so it never reached sliderMoved
@@ -767,15 +801,43 @@ class VideoView(QWidget):
         self._on_slider_moved(self.slider.sliderPosition())
 
     def _on_duration(self, ms: int):
-        """A per-chapter duration arrives as each source loads. Keep the slider spanning the WHOLE
-        session (the ChapterMap total when known, else this lone file's own duration). In compare
-        mode the slider is confined to lap A's window, so a per-chapter duration must NOT widen it."""
+        """A per-chapter REAL video-track duration arrives as each source loads (QMediaPlayer
+        durationChanged, ms). Keep the slider spanning the WHOLE session. In compare mode the slider
+        is confined to lap A's window, so a per-chapter duration must NOT widen it.
+
+        D6: the slider range was sized off the GPMF metadata-track total (pane.total_duration) alone,
+        discarding `ms` whenever that was > 0. But on GoPro files the telemetry track can end before
+        or after the VIDEO track, so the handle pinned early (telemetry shorter) or overshot
+        (telemetry longer) while the readout time stayed correct. Reconcile instead: record this
+        chapter's observed video duration, then range the slider to the LARGER of the GPMF total and
+        the observed video total (summed across chapters, falling back to each chapter's GPMF
+        duration for any not yet loaded). A lone file with an unknown GPMF total (total_duration == 0)
+        still just uses its own observed `ms`, exactly as before."""
         if self._lap_window is not None:
             return  # compare mode: the range is pinned to lap A's window (see _set_slider_window)
-        if self.pane.total_duration > 0:
-            self.slider.setMaximum(int(self.pane.total_duration * 1000))
-        else:
+        # Record the real video duration for whichever chapter just loaded (current source).
+        if ms > 0:
+            self._chapter_video_ms[self.pane.current_chapter()] = ms
+        if self.pane.total_duration <= 0:
+            # Lone file with no known GPMF duration: the observed video duration is the whole span.
             self.slider.setMaximum(ms)
+            return
+        self.slider.setMaximum(self._whole_session_max_ms())
+
+    def _whole_session_max_ms(self) -> int:
+        """D6: the whole-session slider max (ms) = the LARGER of the GPMF metadata total and the
+        OBSERVED video total. The observed total sums each chapter's real video-track duration where
+        QMediaPlayer has reported it (durationChanged), falling back to that chapter's GPMF duration
+        for any chapter not yet loaded — so the total is always defined across all chapters. Taking
+        the max means the handle spans the whole playable video when the telemetry track is shorter
+        than the video (the early-pin case), while a LONGER telemetry track keeps the GPMF total (no
+        regression). Returns the GPMF total when nothing has been observed yet (slider still valid)."""
+        gpmf_total_ms = int(self.pane.total_duration * 1000)
+        n = max(self.pane.chapter_count(), 1)
+        observed_total_ms = sum(
+            self._chapter_video_ms.get(i, int(self.pane.chapter_duration(i) * 1000))
+            for i in range(n))
+        return max(gpmf_total_ms, observed_total_ms)
 
     def _on_state(self, _state):
         # The transport glyph reflects whether EITHER pane is playing: in compare mode the two panes
