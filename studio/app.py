@@ -502,6 +502,10 @@ class StudioWindow(QMainWindow):
         self.scrub.set_compare(self.compare)
 
         self.video.set_compare_enabled(len(self.session.valid_lap_ids()) >= 2)
+        # D1: the global scrub slider + ←/→ arrows seek pane A only; in compare mode distance-lock
+        # the SAME move to pane B so the pair never desyncs. The hook self-guards on compare being
+        # active (fanout_seek_b no-ops outside compare), so wiring it once here is safe in single mode.
+        self.video.set_compare_seek_fanout(self.compare.fanout_seek_b)
         self.video.compareToggled.connect(self.compare.on_toggled)
         self.video.paneRepointRequested.connect(self.compare.on_pane_repoint)
         self.plots.scrubStarted.connect(self.scrub.on_started)
@@ -1089,6 +1093,10 @@ class StudioWindow(QMainWindow):
         if not hasattr(self, "session") or not self.session.has_reference():
             return
         self.session.clear_reference()
+        # D5: the reference is gone — drop the sticky "prefer cross-recording compare" preference so
+        # a later compare toggle enters SAME-recording compare (there's no reference to compare to).
+        if hasattr(self, "compare"):
+            self.compare.clear_prefer_cross()
         self._apply_reference_change()
 
     def _enter_cross_compare(self):

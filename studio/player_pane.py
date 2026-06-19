@@ -268,6 +268,19 @@ class PlayerPane(QWidget):
         """Total session duration in seconds (sum of chapter durations), or 0 if unknown."""
         return self._chapters.total_duration if self._chapters is not None else 0.0
 
+    def chapter_count(self) -> int:
+        """Number of chapters in this pane's recording (1 for a single file, 0 if no source)."""
+        return len(self._chapters) if self._chapters is not None else 0
+
+    def chapter_duration(self, index: int) -> float:
+        """The GPMF/metadata-track duration (seconds) of chapter `index`, or 0 if unknown / out of
+        range. This is the duration that built the global offset table — it can differ from the real
+        VIDEO-track duration QMediaPlayer reports (durationChanged); D6 reconciles the two for the
+        slider range."""
+        if self._chapters is None or not (0 <= index < len(self._chapters)):
+            return 0.0
+        return self._chapters.chapters[index].duration
+
     def current_chapter(self) -> int:
         return self._current_chapter
 

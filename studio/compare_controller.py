@@ -89,6 +89,15 @@ class CompareController:
         # self.session` and every pane-B feed is byte-identical to same-recording compare today.
         self._cross = False
         self._session_b: Session = session
+        # D5: a STICKY "prefer cross-recording compare" flag. The "Compare videos" TOGGLE (button /
+        # C key) always entered SAME-recording compare via on_toggled -> enter(), so toggling compare
+        # off then on AFTER a cross-recording compare (File ▸ Compare vs reference recording) silently
+        # replaced pane B's reference footage with this session's best lap. This flag remembers that
+        # the user is in cross-recording mode so on_toggled(True) RE-ENTERS cross-compare instead.
+        # Set by enter_cross (on success), cleared by enter() (an explicit same-recording entry) and
+        # by clear_prefer_cross() (when the reference is cleared). Same-recording compare with no
+        # reference loaded is unaffected (the flag stays False).
+        self._prefer_cross = False
 
     @property
     def session_b(self) -> Session:
@@ -107,6 +116,12 @@ class CompareController:
         """Inject the scrub controller after construction (mutually-referential wiring)."""
         self.scrub = scrub
 
+    def clear_prefer_cross(self) -> None:
+        """D5: drop the sticky cross-recording preference (the app calls this when the reference
+        recording is cleared) so a later compare toggle enters SAME-recording compare, not a cross
+        compare against a reference that no longer exists."""
+        self._prefer_cross = False
+
     # --- read-only state the tick loop, scrub controller + auto-follow observe ---
     @property
     def active(self) -> bool:
@@ -121,6 +136,33 @@ class CompareController:
     @property
     def lap_b(self) -> int | None:
         return self._compare_b
+
+    # ------------------------------------------------------------------ slider/arrow distance-lock
+    def fanout_seek_b(self, t_a: float) -> None:
+        """D1: the GLOBAL scrub slider + the ←/→ arrow keys seek ONLY pane A through VideoView's
+        primary-pane path; in compare mode that desyncs the pair (pane B freezes while A jumps). So
+        when compare is on, distance-lock the SAME move to pane B: convert pane A's new global media
+        time `t_a` to the equivalent NORMALIZED-DISTANCE position, then back to pane B's own lap's
+        media time, and seek pane B there too. This mirrors exactly what the plot-cursor scrub does
+        (ScrubController.on_moved) so the slider/arrows park the pair at the same track position the
+        plot scrub would — one distance-lock, two entry points. No-op outside compare, or if either
+        lap is degenerate / the conversion can't be made (the pair just stays as pane A's seek left
+        it). For the cross-recording compare pane B's lap lives on the REFERENCE session's clock, so
+        the back-conversion resolves against `session_b`; same-recording it is `self.session`."""
+        a, b = self._compare_a, self._compare_b
+        if not self._compare or a is None or b is None:
+            return
+        # The shared distance axis: pane A's media time -> a plot-x on the s×best_distance axis ->
+        # pane B's own media time at that same track position. Use the 'distance' mode (the shared
+        # normalized-distance axis both panes' cursors share) so the two laps' different lengths map
+        # to the same fraction of the lap, exactly as the plot scrub's distance-lock does.
+        best_d = self.session.best_lap_total_distance()
+        x = self.session.plot_x_at_media_time(a, t_a, "distance", best_distance=best_d)
+        if x is None:
+            return
+        t_b = self._session_b.media_time_at_plot_x(b, x, "distance", best_distance=best_d)
+        if t_b is not None:
+            self.video.seek_pane(1, t_b)
 
     # ------------------------------------------------------------------ per-tick upkeep
     def tick(self) -> None:
@@ -202,8 +244,21 @@ class CompareController:
         — default current-vs-best (if they coincide, pick the next-fastest as B) — build the two
         panes, seek each to its lap start, drive the chart overlay with [A,B], and SUSPEND
         auto-follow's lap re-point. On exit: restore the single pane, re-enable auto-follow, and
-        restore the table-driven chart selection."""
+        restore the table-driven chart selection.
+
+        D5: when the user was in a CROSS-recording compare (File ▸ Compare vs reference recording)
+        and toggles compare off then on, RE-ENTER cross-compare — not same-recording — so pane B
+        keeps the reference footage instead of being silently replaced by this session's best lap.
+        Gated on `_prefer_cross` AND a reference Session still being loaded; if enter_cross can't set
+        up (degenerate windows), fall back to same-recording enter() so the toggle still does
+        something sensible."""
         if on:
+            if self._prefer_cross and self.session.reference_session() is not None:
+                if self.enter_cross():
+                    return
+                # Cross re-entry failed (e.g. the reference lap window went degenerate) — the sticky
+                # preference no longer holds, so drop it and fall through to same-recording compare.
+                self._prefer_cross = False
             self.enter()
         else:
             self.exit()
@@ -213,6 +268,9 @@ class CompareController:
         # prior cross-recording compare (or a re-entry) resets the routing to the primary session.
         self._cross = False
         self._session_b = self.session
+        # D5: an explicit same-recording entry is the user choosing local-vs-local — drop the sticky
+        # cross-recording preference so a later toggle-off/on stays same-recording.
+        self._prefer_cross = False
         valid = self.session.valid_lap_ids()
         if len(valid) < 2:
             return  # the toggle should be disabled, but guard anyway
@@ -286,6 +344,9 @@ class CompareController:
         self._session_b = ref_sess
         self._compare = True
         self._compare_a, self._compare_b = a, ref_lap
+        # D5: remember we're in cross-recording compare so toggling compare off/on re-enters cross
+        # (on_toggled), keeping pane B's reference footage instead of falling back to same-recording.
+        self._prefer_cross = True
         # Pane B's video source is the REFERENCE recording's ChapterMap (its footage); pane A keeps
         # the primary recording's source. The pane-B picker is locked to the reference lap (one
         # choice), so its choice list is just that lap's caption.

@@ -389,6 +389,43 @@ def test_compare_scrub_is_distance_locked_to_both_panes():
     print("test_compare_scrub_is_distance_locked_to_both_panes OK")
 
 
+# ===================================================== D1: slider/arrow distance-lock fan-out
+def test_compare_fanout_seek_b_distance_locks_slider_to_pane_b():
+    """D1: the global scrub slider + ←/→ arrows seek pane A only (VideoView's primary path). In
+    compare mode CompareController.fanout_seek_b(t_a) distance-locks the SAME move to pane B: it
+    converts pane A's new global media time to the shared-distance position and back to pane B's own
+    lap's media time, then seek_pane(1, t_b). The result must match the plot-scrub distance-lock at
+    the same track position (one distance-lock, two entry points)."""
+    s, a, b = _make_session()
+    _scrub, compare, video, _plots, _map, _table, state = _make_controllers(s)
+    state["applied_t"] = 105.0
+    compare.enter()
+    video.pane_seeks.clear()  # drop enter()'s S/F reset so we assert ONLY the fan-out
+    # Pick a primary media time partway into lap A, derive the expected pane-B time INDEPENDENTLY
+    # via the shared-distance round-trip (plot-x at t_a on lap A -> media time at that x on lap B).
+    ta = _lap_times(s, a)
+    t_a = float(ta[len(ta) // 3])
+    best_d = s.best_lap_total_distance()
+    x = s.plot_x_at_media_time(a, t_a, "distance", best_distance=best_d)
+    t_b_expected = s.media_time_at_plot_x(b, x, "distance", best_distance=best_d)
+    compare.fanout_seek_b(t_a)
+    assert video.pane_seeks == [(1, t_b_expected)], video.pane_seeks
+    # The fan-out parks pane B at the SAME normalized distance as t_a — not at pane A's raw time
+    # (the bug was pane B freezing / only pane A moving). Different lap lengths => different times.
+    assert t_b_expected != t_a, "distance-lock must remap, not copy pane A's time"
+    print(f"test_compare_fanout_seek_b_distance_locks_slider_to_pane_b OK: t_a={t_a:.3f} -> t_b={t_b_expected:.3f}")
+
+
+def test_compare_fanout_seek_b_noop_outside_compare():
+    """D1 guard: fanout_seek_b is a no-op when compare is off (the hook is wired once in app.py and
+    self-guards), so the slider/arrows in single-video mode never touch a (non-existent) pane B."""
+    s, _a, _b = _make_session()
+    _scrub, compare, video, _plots, _map, _table, _state = _make_controllers(s)
+    compare.fanout_seek_b(105.0)  # compare never entered
+    assert video.pane_seeks == [], "fan-out must do nothing outside compare"
+    print("test_compare_fanout_seek_b_noop_outside_compare OK")
+
+
 # ===================================================================== CompareController
 def test_compare_tick_badges_and_g_for_two_laps():
     """Compare per-tick: each pane's "Δ vs other" badge (+behind / −ahead) at that pane's own track
@@ -665,6 +702,70 @@ def test_cross_compare_disabled_without_reference():
     assert compare.enter_cross() is False
     assert not compare.active and not compare.cross
     print("test_cross_compare_disabled_without_reference OK")
+
+
+def test_d5_toggle_reenters_cross_after_off_on():
+    """D5: after a CROSS-recording compare, toggling compare off then on must RE-ENTER cross — not
+    drop the reference footage. Before the fix, on_toggled(True) always called enter() (same-
+    recording), silently replacing pane B's reference lap with this session's best lap. Now the
+    sticky `_prefer_cross` flag routes the re-toggle back through enter_cross while the reference is
+    loaded, so pane B's source stays the reference recording's chapters."""
+    s, a, _b = _make_session()
+    ref, ref_lap = _attach_reference(s)
+    _scrub, compare, video, _plots, _map, _table, state = _make_controllers(s)
+    state["applied_t"] = 105.0
+    assert compare.enter_cross() is True
+    assert compare.cross and compare.session_b is ref
+    # Toggle compare OFF (button / C key) then ON again.
+    compare.on_toggled(False)
+    assert not compare.active and not compare.cross
+    compare.on_toggled(True)
+    # Re-entered CROSS, not same-recording: pane B is still the reference (session_b + locked lap).
+    assert compare.cross, "re-toggle must re-enter cross-recording compare"
+    assert compare.session_b is ref, "pane B must still resolve against the reference session"
+    assert (compare.lap_a, compare.lap_b) == (a, ref_lap)
+    # And the pane-B video source handed to set_compare is the REFERENCE's chapters, not this session.
+    _args, kwargs = video.compare_args
+    assert kwargs["pane_b_source"] == f"REF_CHAPTERS_{ref_lap}", kwargs["pane_b_source"]
+    print("test_d5_toggle_reenters_cross_after_off_on OK")
+
+
+def test_d5_same_recording_enter_clears_prefer_cross():
+    """D5: an explicit SAME-recording enter() (the user choosing local-vs-local) drops the sticky
+    cross preference, so a subsequent toggle-off/on stays same-recording even with a reference still
+    loaded. The flag is direction-correct: cross sets it, same-recording clears it."""
+    s, a, b = _make_session()
+    ref, _ref_lap = _attach_reference(s)
+    _scrub, compare, _video, _plots, _map, _table, state = _make_controllers(s)
+    state["applied_t"] = 105.0
+    assert compare.enter_cross() is True  # sets _prefer_cross
+    compare.exit()
+    compare.enter()                       # explicit same-recording -> clears _prefer_cross
+    assert not compare.cross and compare.session_b is s
+    # Now off/on must STAY same-recording (a reference is still loaded, but the user chose local).
+    compare.on_toggled(False)
+    compare.on_toggled(True)
+    assert not compare.cross, "after an explicit same-recording enter, re-toggle stays same-recording"
+    assert (compare.lap_a, compare.lap_b) == (a, b)
+    print("test_d5_same_recording_enter_clears_prefer_cross OK")
+
+
+def test_d5_clear_prefer_cross_drops_stickiness():
+    """D5: clear_prefer_cross() (the app calls it when the reference is CLEARED) drops the sticky
+    cross preference, so a later toggle enters same-recording compare — there is no reference to
+    compare against. Also: with the reference gone, on_toggled(True) can't re-enter cross even if the
+    flag were stale (the reference_session() guard in on_toggled)."""
+    s, a, b = _make_session()
+    _ref, _ref_lap = _attach_reference(s)
+    _scrub, compare, _video, _plots, _map, _table, state = _make_controllers(s)
+    state["applied_t"] = 105.0
+    assert compare.enter_cross() is True
+    compare.exit()
+    compare.clear_prefer_cross()          # reference cleared
+    compare.on_toggled(True)
+    assert not compare.cross, "after clear_prefer_cross, re-toggle is same-recording"
+    assert (compare.lap_a, compare.lap_b) == (a, b)
+    print("test_d5_clear_prefer_cross_drops_stickiness OK")
 
 
 def test_same_recording_compare_is_byte_identical_session_b():
