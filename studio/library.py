@@ -37,10 +37,14 @@ Schema (version 1) — one JSON object::
         "paths":       ["/abs/GX010062.MP4", ...]}, # the chapter file path(s) as opened (absolute)
        ...]}
 
-Defensive load: ANY corruption (missing file, not JSON, wrong version, malformed entries) →
-a fresh EMPTY index ``{"version": 1, "entries": []}`` — the same "self-heal to a safe default"
-philosophy as the sidecar's revert guard, so a garbage file never crashes the library and the
-next upsert writes a clean index over it.
+Defensive load (two tiers): FILE-level corruption (missing file, not JSON, not a dict, wrong
+version, non-list ``entries``) → a fresh EMPTY index ``{"version": 1, "entries": []}`` — the
+"self-heal to a safe default" philosophy of the sidecar's revert guard, so a garbage file never
+crashes the library. But a single malformed ENTRY is NOT fatal: ``load`` keeps the valid entries
+and drops only the bad rows (logging the count). Rejecting the whole index over one bad row would
+discard every OTHER recording's history — and since ``save`` rewrites only the survivors, the next
+upsert would PERSIST that loss permanently — so the all-or-nothing contract that suits a 2-line
+sidecar is data-loss for a multi-recording index.
 
 Float round-trip: json writes floats with ``repr`` (the shortest EXACT double string), so a
 save→load round trip of ``best``/``theoretical`` is bit-identical.
@@ -49,9 +53,12 @@ save→load round trip of ``best``/``theoretical`` is bit-identical.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
+
+_log = logging.getLogger(__name__)
 
 VERSION = 1
 
@@ -104,9 +111,11 @@ def fingerprint(stem: str) -> str:
 
 
 def _valid_entry(e) -> bool:
-    """True iff `e` is a structurally valid library entry. Used by the defensive load — one bad
-    entry rejects the WHOLE file (self-heal to empty), matching the sidecar's all-or-nothing
-    contract (a half-trusted index is worse than a clean empty one)."""
+    """True iff `e` is a structurally valid library entry. Used by the defensive load to filter
+    the entries list — a malformed entry is DROPPED, not fatal (see ``load``): unlike the
+    sidecar's 2-line all-or-nothing contract, a multi-recording index must not let one bad row
+    discard every OTHER recording's history (which the next upsert would then persist as a
+    permanent loss). Only a non-dict / wrong-top-level-version file resets the whole index."""
     if not isinstance(e, dict):
         return False
     fp, stem = e.get("fingerprint"), e.get("stem")
@@ -153,9 +162,14 @@ def _norm_entry(e: dict) -> dict:
 
 def load(path: str | None = None) -> dict:
     """Load + validate the library index. Returns the normalized index dict
-    (``{"version", "entries"}``); on ANY problem — file absent, unreadable, not JSON, not
-    version-1, or a single malformed entry — returns a fresh ``empty_index()`` instead of raising.
-    `path` defaults to ``library_path()`` (honours a patched app-support seam)."""
+    (``{"version", "entries"}``). FILE-LEVEL corruption — absent, unreadable, not JSON, not a
+    dict, not version-1, or an ``entries`` that isn't a list — returns a fresh ``empty_index()``
+    (the whole file is untrustworthy). But a malformed individual ENTRY is ENTRY-TOLERANT: the
+    valid entries are KEPT and only the bad ones are dropped (count logged). WHY not all-or-
+    nothing like the sidecar: rejecting the whole index over one bad row would discard every
+    OTHER recording's history — and ``save`` rewriting only the survivors makes the next upsert
+    PERSIST that loss permanently. Self-heal without nuking good history. `path` defaults to
+    ``library_path()`` (honours a patched app-support seam)."""
     if path is None:
         path = library_path()
     try:
@@ -165,9 +179,16 @@ def load(path: str | None = None) -> dict:
         return empty_index()
     if not isinstance(data, dict) or data.get("version") != VERSION:
         return empty_index()
-    entries = data.get("entries")
-    if not isinstance(entries, list) or not all(_valid_entry(e) for e in entries):
+    raw = data.get("entries")
+    if not isinstance(raw, list):
         return empty_index()
+    entries = [e for e in raw if _valid_entry(e)]
+    dropped = len(raw) - len(entries)
+    if dropped:
+        # Drop only the malformed rows; the surviving recordings' history is preserved. A re-save
+        # then heals the file (the dropped rows simply won't be re-written).
+        _log.warning("library: dropped %d malformed entr%s of %d from %s",
+                     dropped, "y" if dropped == 1 else "ies", len(raw), path)
     return {"version": VERSION, "entries": [_norm_entry(e) for e in entries]}
 
 

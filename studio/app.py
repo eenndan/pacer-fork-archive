@@ -879,8 +879,8 @@ class StudioWindow(QMainWindow):
         path = self._export_save_path("Export lap times", "_laps.csv", "CSV files (*.csv)")
         if not path:
             return
-        export_data.write_laps_csv(path, self.session)
-        self.statusBar().showMessage(f"exported {os.path.basename(path)}")
+        if self._run_export(lambda: export_data.write_laps_csv(path, self.session), path):
+            self.statusBar().showMessage(f"exported {os.path.basename(path)}")
 
     def _export_channels_csv(self):
         if not hasattr(self, "session"):
@@ -893,8 +893,8 @@ class StudioWindow(QMainWindow):
                                       f"_lap{lap}_channels.csv", "CSV files (*.csv)")
         if not path:
             return
-        export_data.write_channels_csv(path, self.session, lap)
-        self.statusBar().showMessage(f"exported {os.path.basename(path)}")
+        if self._run_export(lambda: export_data.write_channels_csv(path, self.session, lap), path):
+            self.statusBar().showMessage(f"exported {os.path.basename(path)}")
 
     def _export_report(self):
         if not hasattr(self, "session"):
@@ -907,11 +907,27 @@ class StudioWindow(QMainWindow):
         # report writer itself stays Qt-free and just embeds the bytes.
         images = [("Track map", self._grab_png(self.map)),
                   ("Speed · Δ to best", self._grab_png(self.plots))]
-        export_data.write_report_html(
-            path, self.session,
-            source_label=chapters.recording_label(self._paths) or "session",
-            images=images)
-        self.statusBar().showMessage(f"exported {os.path.basename(path)}")
+        if self._run_export(lambda: export_data.write_report_html(
+                path, self.session,
+                source_label=chapters.recording_label(self._paths) or "session",
+                images=images), path):
+            self.statusBar().showMessage(f"exported {os.path.basename(path)}")
+
+    def _run_export(self, write, path: str) -> bool:
+        """Run a data-export writer (`write()` — a 0-arg closure over the chosen path) under an
+        OSError guard, mirroring the video-export error path: a read-only folder / full disk /
+        removed volume must surface a user dialog, NOT throw a raw exception out of the triggered()
+        slot (silent abort, or a crash on some Qt builds). Returns True on success so the caller
+        shows its "exported …" status; on OSError shows a warning dialog + a statusbar note and
+        returns False. The writers in studio/export_data.py stay Qt-free — the guard lives here."""
+        try:
+            write()
+        except OSError as exc:
+            QMessageBox.warning(self, "Export failed",
+                                f"Could not write {os.path.basename(path)}:\n{exc}")
+            self.statusBar().showMessage(f"export failed: {exc}")
+            return False
+        return True
 
     @staticmethod
     def _grab_png(widget) -> bytes:

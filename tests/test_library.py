@@ -224,6 +224,61 @@ def test_load_corrupt_returns_empty_then_heals():
             "fingerprint", "stem", "track", "date", "lap_count", "best", "theoretical", "paths"}
 
 
+def test_load_drops_only_malformed_entries_keeps_valid_history():
+    """ENTRY-tolerant load (E4): one malformed entry must NOT discard the whole index — the
+    valid recordings' history SURVIVES and only the bad row is dropped. Regression for the
+    data-loss bug where one corrupt entry reset the file to empty and the next save persisted
+    that loss permanently. (FILE-level garbage still resets to empty — covered separately.)"""
+    good_a = _entry("GX010060", track="Daytona MK", best=68.4)
+    good_b = _entry("GX010061", track="Sonoma", best=71.2)
+    good_c = _entry("GX010062", track="Buttonwillow", best=99.9)
+    fps = {e["fingerprint"] for e in (good_a, good_b, good_c)}
+    # A wire-shaped index with the three valid entries plus ONE structurally-broken row
+    # (negative lap_count) sandwiched in the middle.
+    bad = {"fingerprint": "GX9999", "stem": "GX019999", "track": "x",
+           "date": None, "lap_count": -1, "best": None, "theoretical": None, "paths": []}
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "library.json")
+        with open(p, "w") as f:
+            json.dump({"version": 1, "entries": [good_a, bad, good_b, good_c]}, f)
+        idx = library.load(p)
+        survivors = {e["fingerprint"] for e in idx["entries"]}
+        # The three valid recordings survive; ONLY the malformed row is dropped.
+        assert survivors == fps, survivors
+        assert "GX9999" not in survivors
+        assert len(idx["entries"]) == 3
+        # And a re-save of the healed index keeps exactly the survivors (no resurrection of
+        # the bad row, no loss of the good ones) — the loss is NOT persisted.
+        library.save(idx, p)
+        assert {e["fingerprint"] for e in library.load(p)["entries"]} == fps
+
+
+def test_load_drops_all_when_every_entry_malformed():
+    """The boundary of the entry-tolerant load: if EVERY entry is malformed, the survivors set
+    is empty — but this is the empty-entries outcome, NOT a file-level reset. The file stayed a
+    valid version-1 dict, so the contract is 'keep the (zero) valid entries', not 'reject file'."""
+    bad1 = {"fingerprint": "", "stem": "x", "lap_count": 1, "paths": []}   # empty fingerprint
+    bad2 = {"fingerprint": "x", "stem": 7, "lap_count": 1, "paths": []}    # stem not str
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "library.json")
+        with open(p, "w") as f:
+            json.dump({"version": 1, "entries": [bad1, bad2]}, f)
+        assert library.load(p) == {"version": 1, "entries": []}
+
+
+def test_load_file_level_garbage_still_resets_to_empty():
+    """FILE-level corruption (not a dict / wrong version / non-list entries) still resets the
+    WHOLE index to empty — the entry-tolerant change is scoped to individual entries only; an
+    untrustworthy top-level shape can't be partially salvaged."""
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "library.json")
+        for body in ("{ not json", "[]", '{"version": 2, "entries": []}',
+                     '{"version": 1, "entries": 3}'):
+            with open(p, "w") as f:
+                f.write(body)
+            assert library.load(p) == {"version": 1, "entries": []}, body
+
+
 def test_null_track_date_best_roundtrip():
     """An unknown-track / GPS5 (no date) / no-valid-lap recording stores nulls and round-trips —
     the entry is still valid and listable."""
