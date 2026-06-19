@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QGridLayout,
     QLabel,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -148,10 +149,25 @@ class LapTable(QWidget):
         hdr.sortIndicatorChanged.connect(self._on_sorted)
         self.table.itemSelectionChanged.connect(self._on_selection)
 
+        # E1 in-panel EMPTY STATE: a recording with zero valid laps yields an empty table — a blank
+        # grid reads as a broken app. Stack a centred, dimmed placeholder over the table and swap to
+        # it (refresh() flips the stack) when there are no rows, so the panel always explains itself.
+        # The footer (theoretical best / best rolling) still sits below — it simply shows em-dashes.
+        self._empty = QLabel(
+            "No complete laps in this recording.\n\n"
+            "The GPS may not have locked, or the recording is too short to "
+            "cross the start/finish line.")
+        self._empty.setProperty("role", "EmptyState")
+        self._empty.setAlignment(Qt.AlignCenter)
+        self._empty.setWordWrap(True)
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self.table)   # index 0: the populated table
+        self._stack.addWidget(self._empty)  # index 1: the empty-state placeholder
+
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
-        lay.addWidget(self.table)
+        lay.addWidget(self._stack)
         lay.addWidget(self._build_footer())
         self.refresh()
 
@@ -207,6 +223,11 @@ class LapTable(QWidget):
 
     def refresh(self):
         rows = self.session.lap_rows()
+
+        # E1: flip to the centred empty-state placeholder when there are no laps to show (else the
+        # populated table). Done first so the panel never flashes a blank grid; the footer below
+        # the stack refreshes to em-dashes on its own (every accessor returns None with no laps).
+        self._stack.setCurrentIndex(1 if not rows else 0)
 
         # N sector lines split each lap into N+1 sub-sectors; show one split column per
         # sub-sector (none by default = today's 4 columns). Column count depends on this,

@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QComboBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QLabel, QStackedWidget, QVBoxLayout, QWidget
 
 from . import theme
 from ._signal import fmt_time
@@ -224,10 +224,25 @@ class PlotsView(QWidget):
         self.p_delta.addItem(self.hover_label)
         self.p_delta.scene().sigMouseMoved.connect(self._on_delta_hover)
 
+        # E1 in-panel EMPTY STATE: a recording with zero valid laps has nothing to plot, so refresh()
+        # would leave blank axes — indistinguishable from a broken app. Stack a centred, dimmed
+        # placeholder over the charts and swap to it (refresh() flips the stack) when there are no
+        # laps to draw, so the panel always explains itself instead of showing empty axes.
+        self._empty = QLabel(
+            "No lap data to plot.\n\n"
+            "This recording has no complete laps — the speed and Δ-to-best "
+            "charts need at least one finished lap.")
+        self._empty.setProperty("role", "EmptyState")
+        self._empty.setAlignment(Qt.AlignCenter)
+        self._empty.setWordWrap(True)
+
         # The view is now JUST the charts; the x-mode toggle lives in app.py's consolidated bar.
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self.glw)     # index 0: the charts
+        self._stack.addWidget(self._empty)  # index 1: the empty-state placeholder
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self.glw)
+        lay.addWidget(self._stack)
 
     def _on_mode_changed(self, index):
         self._time_mode = index == 1
@@ -464,7 +479,12 @@ class PlotsView(QWidget):
         # speed and delta curves (and the cursors) share one axis and stay x-linked → aligned.
         result = self.session.delta(draw_ids, x_mode=x_mode)
         if not result:
+            # E1: nothing to plot (zero valid laps → no baseline, no curves). Show the centred
+            # empty-state placeholder instead of leaving blank axes that read as a broken panel.
+            self._stack.setCurrentIndex(1)
             return
+        # Laps exist: ensure the charts (not the placeholder) are shown.
+        self._stack.setCurrentIndex(0)
         best, speed, delta = result
         for k, lid in enumerate(draw_ids):
             # Semantic colouring (Phase 2): the BEST lap is green (C.ahead) to match the lap

@@ -247,6 +247,148 @@ def test_lap_table_footer_survives_sort_and_updates_on_refresh():
     print("test_lap_table_footer_survives_sort_and_updates_on_refresh OK")
 
 
+# ------------------------------------------------ E1: zero-valid-lap empty states
+class _FakeEmptySession:
+    """A loaded session that reports ZERO valid laps (short clip / no GPS lock). Exposes only the
+    read surface LapTable.refresh() touches; lap_rows() is [] so every per-lap accessor is unused."""
+
+    def lap_rows(self):
+        return []
+
+    def sector_count(self):
+        return 0
+
+    def session_best_splits(self):
+        return [None]  # one entry (sector_count()+1); unused with 0 split columns
+
+    def theoretical_best(self):
+        return None
+
+    def best_rolling_lap(self):
+        return None
+
+    def best_lap_id(self):
+        return None
+
+    def dropout_lap_ids(self):
+        return set()
+
+
+def test_lap_table_shows_empty_state_when_no_laps():
+    """E1: a recording with zero valid laps must NOT render a blank grid. refresh() flips the
+    stacked widget to the centred, dimmed empty-state placeholder (index 1, the EmptyState role),
+    the table holds zero rows, and the summary footer reads em-dashes — an explained state, not a
+    broken-looking app. A subsequent refresh with rows would flip back (index 0)."""
+    table = LapTable(_FakeEmptySession())
+    assert table.table.rowCount() == 0
+    assert table._stack.currentIndex() == 1, "lap table must show the empty state, not the grid"
+    assert table._empty.property("role") == "EmptyState"
+    assert table._empty.text(), "empty-state placeholder must carry a message"
+    # The footer survives (outside the table) and reads em-dashes with no laps.
+    assert _footer_texts(table) == ["—", "—"]
+
+    # And with laps it flips BACK to the table (no sticky empty state).
+    table.session = _FakeFooterSession()
+    table.refresh()
+    assert table._stack.currentIndex() == 0
+    assert table.table.rowCount() == 3
+    print("test_lap_table_shows_empty_state_when_no_laps OK")
+
+
+def test_plots_view_shows_empty_state_when_no_laps():
+    """E1: with no laps to plot, PlotsView.refresh() shows the centred empty-state placeholder
+    (stack index 1) instead of leaving blank axes; with data it shows the charts (index 0)."""
+    from studio.plots_view import PlotsView
+
+    class _Sess:
+        def __init__(self, has_laps):
+            self._has = has_laps
+
+        def has_reference(self):
+            return False
+
+        def best_lap_id(self):
+            return 0 if self._has else None
+
+        def delta(self, ids, x_mode):
+            # Mirror Session.delta: a falsy result (no baseline / no laps) means nothing to plot.
+            if not self._has:
+                return None
+            best, n = 0, 5
+            xs = np.linspace(0, 100, n)
+            return best, {0: (xs, xs)}, {0: (xs, xs * 0.0)}
+
+        def lap_time(self, lid):  # used by the curve legend on the has-laps path
+            return 60.0
+
+        def lap_window(self, lid):
+            return None
+
+    pv = PlotsView(_Sess(has_laps=False))
+    pv.refresh()
+    assert pv._stack.currentIndex() == 1, "plots must show the empty state with no laps"
+    assert pv._empty.property("role") == "EmptyState"
+    assert pv._empty.text(), "empty-state placeholder must carry a message"
+
+    # With data it shows the charts panel (index 0), not the placeholder.
+    pv2 = PlotsView(_Sess(has_laps=True))
+    pv2.refresh()
+    assert pv2._stack.currentIndex() == 0
+    print("test_plots_view_shows_empty_state_when_no_laps OK")
+
+
+# -------------------------------------- D2: a failed RELOAD must not corrupt _paths/title/session
+def test_failed_reload_preserves_paths_title_and_session():
+    """D2: File ▸ Open / Load full recording on a missing/corrupt file while a good session is
+    loaded must leave the previous session untouched — the error dialog promises exactly that.
+    The bug was _load assigning self._paths BEFORE the guarded Session.load, so a failed reload
+    desynced _paths (and every export source / title / sync that reads it) from the still-loaded
+    session. Drive the path logic directly (no pacer / no real load): seed a good session + _paths
+    + title, run the failure handler (the branch _load takes on a caught load error), and assert
+    nothing moved. A separate FIRST-load failure (no session yet) must instead SEED _paths."""
+    from PySide6.QtWidgets import QMainWindow
+
+    from studio.app import StudioWindow
+
+    # Construct the QMainWindow base (so setWindowTitle / QMessageBox parent work) but SKIP the
+    # heavy StudioWindow.__init__ (which would run a real load). __new__ + QMainWindow.__init__.
+    w = StudioWindow.__new__(StudioWindow)
+    QMainWindow.__init__(w)
+    good = ["/Users/x/Desktop/D24/GOOD.MP4"]
+    w._paths = list(good)
+    w.session = object()  # a stand-in "good session" the failed reload must not replace
+    good_session = w.session
+    w.setWindowTitle("pacer studio — GOOD")
+
+    # Avoid the modal dialog blocking the headless test (the dialog itself isn't under test).
+    from PySide6.QtWidgets import QMessageBox
+    orig_critical = QMessageBox.critical
+    QMessageBox.critical = staticmethod(lambda *a, **k: QMessageBox.Ok)
+    try:
+        # The failed RELOAD: _load catches the load error and calls _on_load_failed. A session is
+        # already set, so it must take the "leave the working UI intact" branch.
+        w._on_load_failed(["/nonexistent/bad.MP4"], RuntimeError("Failed to open file"))
+    finally:
+        QMessageBox.critical = orig_critical
+
+    assert w._paths == good, f"_paths corrupted by a failed reload: {w._paths}"
+    assert w.windowTitle() == "pacer studio — GOOD", w.windowTitle()
+    assert w.session is good_session, "the failed reload replaced the good session"
+
+    # FIRST-load failure (no session yet): _on_load_failed must SEED _paths so readers that stay
+    # reachable (the still-enabled "Load full recording" action) always find a value.
+    w2 = StudioWindow.__new__(StudioWindow)
+    QMainWindow.__init__(w2)
+    QMessageBox.critical = staticmethod(lambda *a, **k: QMessageBox.Ok)
+    try:
+        w2._on_load_failed(["/nonexistent/first.MP4"], RuntimeError("boom"))
+    finally:
+        QMessageBox.critical = orig_critical
+    assert w2._paths == ["/nonexistent/first.MP4"], w2._paths
+    assert not hasattr(w2, "session")
+    print("test_failed_reload_preserves_paths_title_and_session OK")
+
+
 # --------------------------------------------------------------------- F3
 def _bare_session_with_lap(lap_id=2):
     """A bare Session (tests/_synthetic factory) carrying ONE lap's cached xy + (times,dists),

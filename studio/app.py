@@ -132,9 +132,6 @@ class StudioWindow(QMainWindow):
         # there is always immediate visual feedback. Full threading of the load is out of scope; a
         # visible loading state is enough. Replaced by the real UI in _build_ui once the load returns.
         self._show_loading_placeholder(paths)
-        # Assign _paths BEFORE the guarded load: readers that stay reachable after a failed FIRST
-        # load (e.g. the still-enabled "Load full recording" action) must always find a value.
-        self._paths = list(paths)
         # Guard the load: a missing / corrupt / no-GPS file must NOT crash the app on launch. On
         # failure show a clear error (the offending path + reason) and leave the window open so the
         # user can act, rather than letting the exception propagate out of __init__ and kill the app.
@@ -144,6 +141,13 @@ class StudioWindow(QMainWindow):
             self._on_load_failed(paths, exc)
             return
         self.session = session
+        # D2: commit _paths ONLY after a successful load. A failed RELOAD leaves self.session (the
+        # still-good session) untouched, so _paths must stay pointing at that good recording too —
+        # otherwise every _paths consumer (window title, the export source/label, "Load full
+        # recording"/Library sync) silently desyncs from the loaded session, contradicting the
+        # error dialog's "the previously loaded session is unchanged." On a successful first load or
+        # reload, this is the correct new value; _on_load_failed seeds a value for a failed FIRST load.
+        self._paths = list(paths)
         n_ch = len(self.session.chapters) if self.session.chapters else 1
         print(f"studio: {self.session.point_count()} points, "
               f"{self.session.lap_count()} laps, {n_ch} chapter(s).", flush=True)
@@ -158,6 +162,10 @@ class StudioWindow(QMainWindow):
         self._sidecar_path = sidecar.sidecar_path(paths[0]) if paths else None
         notice = None
         data = sidecar.load(self._sidecar_path) if self._sidecar_path else None
+        # Apply the sidecar FIRST so the segmentation (and thus the valid-lap count the E1 check
+        # below reads) is final before any notice is decided. A foreign sidecar that segments to
+        # zero valid laps is reverted with its own notice — but the E1 0-lap check below overrides
+        # it, as a 0-lap recording has no lap timing to fix either way.
         if data is not None:
             if session.apply_timing_lines_latlon(data["start"], data["sectors"]):
                 print(f"studio: restored saved timing lines from "
@@ -173,6 +181,16 @@ class StudioWindow(QMainWindow):
             # the track to the registry: studio/dev/print_track_entry.py.
             notice = ("unknown track — start/finish line was auto-fitted; "
                       "drag it into place to fix lap timing")
+
+        # E1: a "successful" load with ZERO valid laps (short clip / no GPS lock / never-completed
+        # lap) renders every panel blank — indistinguishable from a broken app. Surface a clear,
+        # non-fatal notice (the in-panel empty states are added in LapTable/PlotsView). Highest
+        # priority — a 0-lap recording has no lap timing to restore or drag into place, so this
+        # message supersedes the sidecar-revert / unknown-track notices set above. Read AFTER the
+        # sidecar apply so it reflects the FINAL segmentation.
+        if not session.valid_lap_ids():
+            notice = ("no complete laps detected in this recording — the GPS may not have "
+                      "locked, or the recording is too short")
 
         label = chapters.recording_label(paths)
         self.setWindowTitle(f"pacer studio — {label}" if label else "pacer studio")
@@ -230,6 +248,11 @@ class StudioWindow(QMainWindow):
             "The previously loaded session (if any) is unchanged.")
         # First-load failure: no central widget yet — show an empty state so the window stays open.
         if not hasattr(self, "session"):
+            # D2: seed _paths for the FIRST-load-failure path only. _load no longer assigns _paths
+            # before the guarded load, so on a failed first load nothing else has set it — readers
+            # that stay reachable (the still-enabled "Load full recording" action) must find a
+            # value. A failed RELOAD takes the branch below instead and leaves the good _paths intact.
+            self._paths = list(paths)
             self.setWindowTitle("pacer studio — no recording loaded")
             placeholder = QLabel(
                 "No recording loaded.\n\n"
