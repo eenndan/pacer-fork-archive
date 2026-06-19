@@ -717,6 +717,16 @@ QLabel#PaneBadge {{
     font-weight: 600;
     padding: 3px 8px;
 }}
+/* centred dimmed in-panel EMPTY STATE (E1): shown over the lap table / charts when a recording
+   loaded but has zero complete laps, so a blank panel reads as an explained state, not a broken
+   app. Surface bg so it fully covers the panel content it overlays; generous padding centres the
+   wrapped message. Themed via the existing muted-text + surface tokens. */
+QLabel[role="EmptyState"] {{
+    background-color: {C.surface};
+    color: {C.text_muted};
+    font-size: {BODY}px;
+    padding: 24px;
+}}
 """
 
 
