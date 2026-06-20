@@ -1,27 +1,13 @@
 """Session library: a local index of analyzed recordings (F8) with PB progression.
 
-Every successful load UPSERTS the opened recording into one JSON index stored in the macOS
-app-support dir, ``~/Library/Application Support/pacer/library.json``. Re-opening the SAME
-recording updates its entry in place rather than appending a duplicate — the dialog then lists
-every recording you've analyzed (date / track / best lap / theoretical best), re-opens any of
-them, and draws a per-track PB-progression mini-chart (best lap vs date).
+Every successful load upserts the opened recording into one JSON index in the macOS app-support
+dir; the dialog lists every analyzed recording, re-opens any, and draws a per-track PB chart.
+PACER-FREE: pure path resolution, schema validation and atomic JSON I/O (the analyzed values
+arrive as a plain dict from ``Session.library_entry()``).
 
-This module is PACER-FREE BY CONTRACT — like ``studio.sidecar`` it is pure path resolution,
-schema validation and atomic JSON I/O, unit-testable with no telemetry file and no Qt. The
-recording's analyzed values are extracted from the live ``Session`` by the caller
-(``Session.library_entry()``) and handed in as a plain dict; this file never imports pacer.
-
-Identity — the FINGERPRINT. One entry per *recording*, keyed by the recording's CHAPTER-INVARIANT
-identity (e.g. ``"GX0062"`` — the GoPro prefix + 4-digit recording number, shared by every chapter
-of one recording). WHY this key and not the file path or the per-chapter stem: the same recording
-can be opened as a single chapter (GX010062.MP4) or as its full chaptered chain
-(GX010062+GX020062+GX030062), and BOTH the path list AND the total media duration differ between
-those two opens (a single chapter is ~1730 s; the full chain ~4655 s) — so neither can key the
-identity without splitting one recording into two rows. The (prefix, recording number) pair is the
-ONE thing identical across any chapter or chapter-set of a recording, so both opens map to ONE
-entry. (The per-chapter index ``CC`` is deliberately NOT in the key — ``GX010062`` and
-``GX020062`` are the same recording.) For a non-GoPro clip (e.g. the bundled ``hero6.mp4``) the
-caller falls back to the bare stem, keyed on its own so it can never collide with a real recording.
+fingerprint = (GoPro prefix, recording number) so every chapter of a recording maps to one
+entry — neither the path list nor the media duration is stable across a single-chapter vs a full
+chaptered open of the SAME recording.
 
 Schema (version 1) — one JSON object::
 
@@ -37,17 +23,8 @@ Schema (version 1) — one JSON object::
         "paths":       ["/abs/GX010062.MP4", ...]}, # the chapter file path(s) as opened (absolute)
        ...]}
 
-Defensive load (two tiers): FILE-level corruption (missing file, not JSON, not a dict, wrong
-version, non-list ``entries``) → a fresh EMPTY index ``{"version": 1, "entries": []}`` — the
-"self-heal to a safe default" philosophy of the sidecar's revert guard, so a garbage file never
-crashes the library. But a single malformed ENTRY is NOT fatal: ``load`` keeps the valid entries
-and drops only the bad rows (logging the count). Rejecting the whole index over one bad row would
-discard every OTHER recording's history — and since ``save`` rewrites only the survivors, the next
-upsert would PERSIST that loss permanently — so the all-or-nothing contract that suits a 2-line
-sidecar is data-loss for a multi-recording index.
-
-Float round-trip: json writes floats with ``repr`` (the shortest EXACT double string), so a
-save→load round trip of ``best``/``theoretical`` is bit-identical.
+Load self-heals: file-level corruption -> empty index; one bad entry -> dropped (count logged),
+the rest kept (so the next ``save``, which rewrites only the survivors, doesn't lose all history).
 """
 
 from __future__ import annotations
@@ -62,23 +39,16 @@ _log = logging.getLogger(__name__)
 
 VERSION = 1
 
-# A GoPro chaptered stem: prefix (GX/GH/GP/GL) + 2-digit chapter index CC + 4-digit recording
-# number NNNN (e.g. "GX010062"). The recording's identity is (prefix, NNNN) — the chapter index
-# is stripped so every chapter of one recording fingerprints to the same key. Mirrors
-# studio.chapters' GoPro grammar but kept local so library.py stays self-contained + pacer-free.
+# GoPro stem G[XHPL]<CC><NNNN>; the CC chapter index is stripped so every chapter shares one key.
 _GOPRO_STEM_RE = re.compile(r"^(G[XHPL])\d{2}(\d{4})$", re.IGNORECASE)
 
-# The library file's name + its directory under the user's app-support root. Kept as a module
-# constant so a test can monkeypatch `library._app_support_dir` (the seam below) to a temp dir
-# and NEVER touch the user's real ~/Library/Application Support/pacer.
 _FILENAME = "library.json"
 _APP_DIR_NAME = "pacer"
 
 
 def _app_support_dir() -> str:
-    """The macOS per-user app-support directory for pacer
-    (``~/Library/Application Support/pacer``). The single override seam the tests monkeypatch
-    so the suite never reads or writes the user's real library — patch THIS function."""
+    """macOS app-support dir for pacer (~/Library/Application Support/pacer). The single seam
+    tests monkeypatch so the suite never touches the real library."""
     return os.path.join(
         os.path.expanduser("~"), "Library", "Application Support", _APP_DIR_NAME)
 
@@ -98,12 +68,8 @@ def empty_index() -> dict:
 
 
 def fingerprint(stem: str) -> str:
-    """The recording's CHAPTER-INVARIANT identity key derived from a first-chapter `stem` (see the
-    module docstring for the WHY). For a GoPro stem ``G[XHPL]<CC><NNNN>`` the chapter index ``CC``
-    is dropped, leaving ``prefix + recording number`` (e.g. ``"GX010062"`` -> ``"GX0062"``), so any
-    chapter or chapter-set of one recording maps to ONE key — and crucially it does NOT include the
-    media duration, which differs between a single-chapter open and a full chaptered open of the
-    SAME recording. A non-GoPro stem (e.g. the bundled ``hero6`` sample) keys on itself."""
+    """Chapter-invariant identity key from a first-chapter stem: GoPro ``G[XHPL]<CC><NNNN>`` drops
+    ``CC`` -> prefix+NNNN (``"GX010062"`` -> ``"GX0062"``); a non-GoPro stem keys on itself."""
     m = _GOPRO_STEM_RE.match(stem or "")
     if m is None:
         return stem
@@ -111,11 +77,8 @@ def fingerprint(stem: str) -> str:
 
 
 def _valid_entry(e) -> bool:
-    """True iff `e` is a structurally valid library entry. Used by the defensive load to filter
-    the entries list — a malformed entry is DROPPED, not fatal (see ``load``): unlike the
-    sidecar's 2-line all-or-nothing contract, a multi-recording index must not let one bad row
-    discard every OTHER recording's history (which the next upsert would then persist as a
-    permanent loss). Only a non-dict / wrong-top-level-version file resets the whole index."""
+    """True iff `e` is a structurally valid library entry; load() drops invalid rows (keeps the
+    rest)."""
     if not isinstance(e, dict):
         return False
     fp, stem = e.get("fingerprint"), e.get("stem")
@@ -127,8 +90,7 @@ def _valid_entry(e) -> bool:
     if date is not None and not isinstance(date, str):
         return False
     lap_count = e.get("lap_count")
-    # bool is an int subclass — accept it as 0/1 would be wrong here, but lap counts are written
-    # as real ints; reject bool explicitly to keep the schema honest.
+    # bool is an int subclass; lap counts are real ints, so reject bool explicitly.
     if isinstance(lap_count, bool) or not isinstance(lap_count, int) or lap_count < 0:
         return False
     for key in ("best", "theoretical"):
@@ -144,8 +106,7 @@ def _valid_entry(e) -> bool:
 
 
 def _norm_entry(e: dict) -> dict:
-    """Canonicalize a validated entry to the exact stored shape + key order (floats stay floats
-    for repr round-trip; lap_count an int; paths a fresh list)."""
+    """Canonicalize a validated entry to the stored shape + key order."""
     best = e.get("best")
     theo = e.get("theoretical")
     return {
@@ -161,15 +122,10 @@ def _norm_entry(e: dict) -> dict:
 
 
 def load(path: str | None = None) -> dict:
-    """Load + validate the library index. Returns the normalized index dict
-    (``{"version", "entries"}``). FILE-LEVEL corruption — absent, unreadable, not JSON, not a
-    dict, not version-1, or an ``entries`` that isn't a list — returns a fresh ``empty_index()``
-    (the whole file is untrustworthy). But a malformed individual ENTRY is ENTRY-TOLERANT: the
-    valid entries are KEPT and only the bad ones are dropped (count logged). WHY not all-or-
-    nothing like the sidecar: rejecting the whole index over one bad row would discard every
-    OTHER recording's history — and ``save`` rewriting only the survivors makes the next upsert
-    PERSIST that loss permanently. Self-heal without nuking good history. `path` defaults to
-    ``library_path()`` (honours a patched app-support seam)."""
+    """Load + validate the library index, returning the normalized dict. File-level corruption
+    (absent / unreadable / not JSON / not a dict / wrong version / non-list ``entries``) ->
+    ``empty_index()``; a single malformed entry is dropped (count logged), the rest kept. `path`
+    defaults to ``library_path()``."""
     if path is None:
         path = library_path()
     try:
@@ -185,24 +141,20 @@ def load(path: str | None = None) -> dict:
     entries = [e for e in raw if _valid_entry(e)]
     dropped = len(raw) - len(entries)
     if dropped:
-        # Drop only the malformed rows; the surviving recordings' history is preserved. A re-save
-        # then heals the file (the dropped rows simply won't be re-written).
+        # A later save rewrites only the survivors, healing the file.
         _log.warning("library: dropped %d malformed entr%s of %d from %s",
                      dropped, "y" if dropped == 1 else "ies", len(raw), path)
     return {"version": VERSION, "entries": [_norm_entry(e) for e in entries]}
 
 
 def save(index: dict, path: str | None = None) -> None:
-    """Write the index atomically: a same-directory temp file + ``os.replace`` so a crash
-    mid-write can never leave a truncated library. Creates the app-support directory if missing.
-    `path` defaults to ``library_path()``. Raises OSError on an unwritable destination — the
-    caller (the post-load upsert) SWALLOWS that so a read-only app-support dir can never disrupt
-    a load."""
+    """Write the index atomically (temp file + ``os.replace``) so a crash mid-write can't leave a
+    truncated library. Creates the app-support dir if missing. `path` defaults to
+    ``library_path()``. Raises OSError on an unwritable destination."""
     if path is None:
         path = library_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    # Re-normalize on the way out so a hand-built index (or one mutated by upsert) is stored in
-    # the canonical shape/order, and only the schema fields are persisted.
+    # Re-normalize on the way out: store only the schema fields, in canonical shape/order.
     out = {"version": VERSION, "entries": [_norm_entry(e) for e in index.get("entries", [])]}
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:

@@ -1,24 +1,11 @@
-"""Reference track centerline — the FALLBACK gap-fill source.
+"""Reference track centerline — the fallback gap-fill source.
 
-Used only where NO measured lap covers a gap section (rare with ~18 laps). The Daytona
-Milton Keynes reference centerline is a measured best-lap loop (stored normalized, no
-absolute geo-coordinates) aligned to the session's local frame by a similarity transform
-fit against the session's own best-lap loop. See `dev/build_reference.py` for how the
-stored polyline was produced (and for the history of the discarded image hand trace).
+Used only where no measured lap covers a gap section. The stored normalized best-lap loop is
+aligned to the session's own best-lap loop; both are closed loops, so alignment is a closed-loop
+cyclic-arc-length similarity fit (details in fit_loop_to_loop).
 
-Both curves are CLOSED LOOPS, so the alignment is solved by cyclic arc-length
-correspondence: resample both loops uniformly by normalized arc length, brute-force the
-cyclic start offset and traversal direction, and solve the similarity transform (Umeyama,
-reflection allowed — a stored loop may be mirrored vs the local frame) from the matched
-pairs in closed form. A short nearest-point ICP polish then absorbs local parameterization
-distortion. The previous free-scale ICP against the UNORDERED aggregate point cloud
-collapsed onto an inner sub-loop (~30 % footprint coverage); the cyclic correspondence is
-global, so it cannot.
-
-This module is PURE PYTHON + numpy + a stored polyline; it has no `pacer` dependency for the
-fill itself. `centerline_local` takes the session's best-lap loop (ordered local-metre
-points) and returns the centerline in LOCAL metres, aligned to the data, as an (M,2) array
-(or empty).
+Pure python + numpy + a stored polyline (no pacer). `centerline_local` takes the session's
+best-lap loop and returns the centerline in LOCAL metres as an (M,2) array (or empty).
 """
 
 from __future__ import annotations
@@ -105,28 +92,21 @@ def _close_ring(xy):
 
 
 def fit_loop_to_loop(ref_xy, loop_xy, n=_N_FIT, icp_iters=8):
-    """Fit the closed reference loop `ref_xy` onto the closed measured loop `loop_xy`
-    (both (K,2), any scale/frame) by a similarity transform.
+    """Fit the closed reference loop `ref_xy` onto the closed measured loop `loop_xy` (both
+    (K,2), any scale/frame) by a similarity transform.
 
-    Global search: both loops resampled to n points uniformly by normalized arc length;
-    every cyclic start offset × both traversal directions is scored by the closed-form
-    similarity residual under that correspondence; the winner seeds a few nearest-point ICP
-    iterations (against a densified copy of the measured loop) to absorb local arc-length
-    distortion. Each candidate is accepted by the REPORTED metric — RMS distance from the
-    measured points to the fitted polyline — so the polish can never trade footprint
-    coverage for nearest-point comfort (the old unordered-cloud ICP's collapse mode).
+    Global search over cyclic offset × direction (scored by the closed-form similarity residual),
+    then a nearest-point ICP polish — but every candidate is accepted only by the reported
+    lap->ref RMS, so the polish can't trade footprint coverage for nearest-point comfort.
 
-    Returns `(fitted, info)`: `fitted` is the reference resampled to a closed ring in the
-    measured frame; `info` has the winning `rms` (m), `coverage` (fraction of measured
-    points within COVERAGE_TOL_M of the fitted polyline), `scale`, `R` (2×2, det ±1), `t`,
-    `offset_frac` (winning cyclic offset, fraction of a loop) and `reversed`.
+    Returns `(fitted, info)`: `fitted` is the reference as a closed ring in the measured frame;
+    `info` has `rms` (m), `coverage`, `scale`, `R`, `t`, `offset_frac`, `reversed`.
     """
     ref_xy = np.asarray(ref_xy, float)
     loop_xy = np.asarray(loop_xy, float)
     ref_n = _resample_closed(ref_xy, n)
     lap_n = _resample_closed(loop_xy, n)
 
-    # --- global search: direction × cyclic offset, scored by correspondence residual ---
     best = None  # (residual_rms, scale, R, t, offset, reversed)
     for rev in (False, True):
         cand = ref_n[::-1] if rev else ref_n

@@ -1,29 +1,9 @@
 """The auto coaching "Opportunities" dialog (F10): where to find time vs your own best lap.
 
-A self-contained, READ-ONLY QDialog over a ``studio.coaching.Opportunities`` value (already
-computed by the caller from the Session — the dialog does no analysis of its own). PACER-FREE:
-it consumes only the plain ``coaching`` dataclasses + the pure ``coaching.reason_sentence``
-helper, so it never imports the app or the pacer bindings (the studio architecture rule).
-
-Layout — the top-3 ranked corners, biggest realistic gain first::
-
-    ┌──────────────────────────────────────────────────────────────────┐
-    │  Opportunities — biggest gains vs your best lap (median of N laps) │
-    ├──────┬───────────┬─────────────────────────────────────┬──────────┤
-    │ C7 ⟳ │  +0.42 s  │ carry more apex speed (−6.1 km/h)    │ [Go →]   │  ← jump-to
-    │ C3 ⟲ │  +0.31 s  │ brake later / shorter (+0.18 s …)    │ [Go →]   │
-    │ C11 ⟳│  +0.22 s  │ be consistent here (σ 0.14 s)        │ [Go →]   │
-    └──────┴───────────┴─────────────────────────────────────┴──────────┘
-
-Each row's "Go →" button calls the injected ``jump_to(cid, entry_dist)`` (the app selects that
-corner — map highlight + the Corners view — and seeks the video to the BEST lap's entry to the
-corner). The dialog stays open so the user can step through all three. Read-only otherwise.
-
-EXCLUDED STATE: when ``opportunities.enough`` is False (fewer than ``coaching.MIN_LAPS`` valid,
-dropout-free laps) the table is replaced by a friendly "need more laps" message — no crash.
-
-Refreshed by the app only on load / re-segmentation (the dialog is rebuilt each time it is
-opened from the freshly-computed Opportunities), so there is zero per-tick cost.
+A read-only QDialog over a precomputed ``coaching.Opportunities`` (no analysis here). PACER-FREE:
+only the ``coaching`` dataclasses + ``coaching.reason_sentence``. Each row's Jump button calls the
+injected ``jump_to(cid, entry_dist)`` (the app selects the corner + seeks the best lap to its
+entry). When ``opportunities.enough`` is False the table is a friendly "need more laps" message.
 """
 
 from __future__ import annotations
@@ -49,7 +29,7 @@ from . import coaching, theme
 from .lap_table import CORNER_DIR_GLYPH
 from .theme import C
 
-# Column layout. Corner / Time lost / Reason sentence / the jump-to button (a cell widget).
+# column indices
 _COL_CORNER, _COL_LOST, _COL_REASON, _COL_GO = range(4)
 _HEADERS = ["Corner", "Time lost", "How to find it", ""]
 
@@ -69,10 +49,9 @@ _REASON_TIP = {
 
 
 class OpportunitiesDialog(QDialog):
-    """The Coaching ▸ Opportunities… dialog. `opportunities` is a freshly-computed
-    ``coaching.Opportunities``; `jump_to(cid, entry_dist)` is called when a row's Go button is
-    clicked (the app selects the corner + seeks the best lap to its entry). `jump_to` may be
-    None (the buttons are then disabled — used in headless tests of the layout)."""
+    """Coaching ▸ Opportunities dialog over a freshly-computed ``coaching.Opportunities``.
+    jump_to(cid, entry_dist) fires on a row's Jump button; None disables them (headless layout
+    tests)."""
 
     def __init__(self, opportunities: coaching.Opportunities,
                  jump_to: Callable[[int, float], None] | None = None,
@@ -112,9 +91,8 @@ class OpportunitiesDialog(QDialog):
 
     # ------------------------------------------------------------------ states
     def _empty_state(self, opps: coaching.Opportunities) -> QWidget:
-        """The friendly excluded / nothing-to-show panel. Two cases: too few clean laps to
-        analyse (the documented <MIN_LAPS gate), or enough laps but no corner is losing time on
-        the typical lap (the driver is already at their best everywhere — a nice problem)."""
+        """Friendly message for the two no-table cases: too few clean laps, or no corner losing
+        time."""
         if not opps.enough:
             msg = (f"Need at least {coaching.MIN_LAPS} clean (valid, GPS-dropout-free) laps to "
                    f"find coaching opportunities.\nThis session has {opps.n_laps}. "
@@ -132,7 +110,7 @@ class OpportunitiesDialog(QDialog):
         table = QTableWidget(len(opps.rows), len(_HEADERS))
         table.setHorizontalHeaderLabels(_HEADERS)
         table.verticalHeader().setVisible(False)
-        table.setSelectionMode(QAbstractItemView.NoSelection)  # read-only; Go is the only action
+        table.setSelectionMode(QAbstractItemView.NoSelection)  # read-only; Jump is the only action
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setFocusPolicy(Qt.NoFocus)
         table.setAlternatingRowColors(True)
@@ -148,7 +126,7 @@ class OpportunitiesDialog(QDialog):
             corner_item = QTableWidgetItem(f"C{opp.cid} {glyph}")
             corner_item.setFlags(corner_item.flags() & ~Qt.ItemIsEditable)
 
-            # Time lost: a positive gain (red — it's time you're giving away), tabular.
+            # red: time given away
             lost_item = QTableWidgetItem(f"+{opp.time_lost:.2f} s")
             lost_item.setFlags(lost_item.flags() & ~Qt.ItemIsEditable)
             lost_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -167,15 +145,12 @@ class OpportunitiesDialog(QDialog):
         return table
 
     def _go_button(self, opp: coaching.Opportunity) -> QPushButton:
-        """The per-row jump-to button. Captures the row's (cid, entry_dist) and calls the
-        injected `jump_to` — the app selects the corner (map + Corners view) and seeks the best
-        lap to its entry. Disabled when no callback was injected (headless layout tests)."""
-        # "Jump" + a Phosphor arrow icon, NOT a literal "Go →": the Unicode arrow doesn't render in
-        # the UI font (it came out as a garbled glyph), so use the bundled icon font. variant=primary
-        # (QSS) makes it read as the row's call-to-action; a min width keeps the label from clipping.
+        """Per-row jump-to button; captures (cid, entry_dist) and calls the injected `jump_to`.
+        Disabled when no callback was injected (headless layout tests)."""
+        # Phosphor arrow icon + "Jump" (the Unicode arrow didn't render); primary CTA styling.
         btn = QPushButton(theme.icon("ph.arrow-right", color=C.on_accent), "Jump")
         btn.setProperty("variant", "primary")
-        btn.setMinimumWidth(88)  # room for the arrow icon + "Jump" so neither clips
+        btn.setMinimumWidth(88)
         btn.setToolTip(f"Select C{opp.cid} on the map and jump the video to your best lap's "
                        "entry to this corner")
         if self._jump_to is None:

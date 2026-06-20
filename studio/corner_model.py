@@ -1,24 +1,11 @@
-"""CornerModel — the per-segmentation CORNER analysis cluster, extracted from Session.
+"""CornerModel — the per-segmentation corner analysis extracted from Session: the detected
+corner list + reference total, the per-lap projected corner stats (incl. the cross-recording
+reference's under reference_id), and the per-corner session-best times. All derive from the
+current segmentation, so Session composes this service + delegates.
 
-What lives here (and ONLY here): the detected corner list + its reference total (the
-`corners.py`-backed basis), the per-lap projected corner stats (incl. the cross-recording
-reference's own projected stats under REFERENCE_ID), and the per-corner session-best times.
-All three are derived from the current segmentation, so all three live behind ONE service
-that Session composes + delegates to — the same template as render_cache.LapRenderCache.
-
-PACER-FREE by design (PLAN.md: only ingest/load/session/tracks may import pacer). Every
-input arrives through Session-bound callables over Session's own cached per-lap primitives
-(`_lap_columns` / `_lap_arrays`) and its memoized lap sets (`best_lap_id` / `valid_lap_ids`),
-so this module never touches the bound core — exactly like LapRenderCache.
-
-Cache lifetime — the invalidation invariant (see Session.set_timing_lines): the corner set is
-detected on the best lap's grid and projected per lap, so it goes stale on re-segmentation
-(lap ids / times / the best lap all shift when a timing line moves). Session calls
-`invalidate()` from set_timing_lines, which drops all three caches together — exactly the
-hand-clearing block this replaces. A SEPARATE, narrower drop, `invalidate_stats()`, clears
-only the per-lap stats (NOT the corner detection): the per-corner Δ baseline changes when a
-cross-recording reference is set/cleared, so Session calls it from set_reference_session /
-clear_reference (the detection windows are unchanged there, only the deltas-vs-baseline).
+PACER-FREE (numpy on Session's cached per-lap primitives). `invalidate()` (from
+set_timing_lines) drops all three caches on re-segment; `invalidate_stats()` drops only the
+per-lap stats when a cross-recording reference changes (the detection windows are unchanged).
 """
 
 from __future__ import annotations
@@ -27,10 +14,8 @@ import numpy as np
 
 from . import corners
 
-# Local "cache not yet computed" sentinel (None is a legal cached value for basis/bests) — the
-# SAME idiom Session uses; kept module-local so corner_model never imports back from session
-# (PLAN's no-cycle rule). The per-lap stats cache parks the cross-recording reference's OWN
-# projected stats under the reference sentinel KEY Session passes in (its REFERENCE_ID).
+# "not yet computed" sentinel (None is a legal cached value); module-local to avoid importing
+# Session.
 _UNSET = object()
 
 
@@ -47,15 +32,9 @@ class CornerModel:
     def __init__(self, session, reference_id: int):
         self._s = session
         self._reference_id = reference_id
-        # The detected corner list + its reference total ((corners, total_ref) tuple). _UNSET
-        # sentinel: None is a legal "no usable best lap" result, distinct from "not yet computed".
-        self._basis_cache: object = _UNSET
-        # Per-lap projected corner stats (+ the reference's own under reference_id). Cleared on
-        # re-segment (invalidate) AND on a reference change (invalidate_stats — only the baseline
-        # moved, not the windows).
-        self._stats_cache: dict[int, list[corners.CornerStat]] = {}
-        # Per-corner session-best time-in-corner. _UNSET sentinel ([] is a legal "no corners").
-        self._bests_cache: object = _UNSET
+        self._basis_cache: object = _UNSET  # (corners, total_ref) or None
+        self._stats_cache: dict[int, list[corners.CornerStat]] = {}  # per-lap stats + the reference's own under reference_id
+        self._bests_cache: object = _UNSET  # per-corner session-best time
 
     def invalidate(self) -> None:
         """Drop EVERY corner cache — called from Session.set_timing_lines (the single
@@ -125,7 +104,7 @@ class CornerModel:
         dist, speed_kmh, elapsed = ref.arrays()
         if len(dist) < 2 or float(dist[-1]) <= 0:
             return None
-        # ref=None on the reference itself -> its own deltas are 0 (it IS the baseline).
+        # ref=None: the reference IS the baseline (self-deltas 0).
         stats = corners.lap_corner_stats(corner_list, total_ref, dist, speed_kmh, elapsed,
                                          ref=None)
         self._stats_cache[self._reference_id] = stats
@@ -150,9 +129,6 @@ class CornerModel:
         dist, speed_kmh, elapsed = s._lap_arrays(lap_id)
         if len(dist) < 2 or float(dist[-1]) <= 0:
             return []
-        # The reference stats are the baseline lap's own (deltas measured against them): the
-        # cross-recording reference when loaded, else the local best lap (whose self-deltas are
-        # 0). Computed first, then this lap's deltas are measured against them.
         ref_stats = self.reference_corner_stats()
         if ref_stats is not None:
             ref = ref_stats
@@ -196,11 +172,9 @@ class CornerModel:
                 for i, c in enumerate(corner_list)]
 
     def corner_entry_media_time(self, lap_id: int, cid: int) -> float | None:
-        """The media-clock time (s) at which `lap_id` ENTERS corner `cid` — the jump-to seek
-        target for an opportunity. The corner's reference-odometer enter point is projected
-        onto this lap by normalized distance (the SAME projection lap_corner_stats uses), then
-        the lap's elapsed→media time is read at that distance. None when the corner/lap is
-        unknown or degenerate. Returned as an ABSOLUTE media time (lap start + elapsed)."""
+        """Media-clock time (s) `lap_id` enters corner `cid` — the jump-to seek target. Projects
+        the corner's enter point onto this lap's odometer and reads elapsed->media there. None if
+        unknown/degenerate. Absolute (lap start + elapsed)."""
         s = self._s
         basis = self.basis()
         if basis is None or not basis[0]:
