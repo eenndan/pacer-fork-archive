@@ -1,43 +1,19 @@
-"""Corner model: curvature-based corner detection + per-corner lap analysis (F-corner).
+"""Corner model: curvature-based corner detection + per-corner lap analysis.
 
-PACER-FREE BY CONTRACT (numpy only). Fed by Session's per-lap arrays; Session owns the
-caching/invalidations and the views consume the results through it, so neither this module
-nor the views ever import the compiled `pacer` bindings (the studio architecture rule).
+PACER-FREE BY CONTRACT (numpy only); fed by Session's per-lap arrays, so neither this module
+nor the views import the compiled `pacer` bindings. NOT MAP-MATCHING: everything runs on our own
+smoothed GPS trace (curvature from its own heading, threshold from its own distribution) — no
+external centerline.
 
-NOT MAP-MATCHING. Everything here runs on OUR OWN measured (cleaned + smoothed) GPS trace:
-curvature is differentiated from the trace's own heading, the threshold is derived from the
-trace's own curvature distribution, and corner windows live in the session's own best-lap
-normalized-distance space. The rejected 2026-06 experiment was fitting our trace to an
-EXTERNAL reference centerline — no external geometry is involved anywhere in this model.
+Pipeline: per-lap curvature kappa(s) → median profile on the best-lap grid (averages out line
+choice + GPS noise) → log-domain Otsu threshold (no magic constant) → hysteresis spans split at
+sign changes, merged across jitter, filtered by arc length + turn angle → enter/exit/apex
+(|kappa|-weighted centroid, stable on flat-topped sweepers) + direction, in best-lap odometer.
 
-The model, in order:
-  1. Per lap: heading = unwrap(atan2(dy, dx)) on the local-frame trace, differentiated vs
-     arc length -> curvature kappa(s) (1/m, signed: + = left), boxcar-smoothed over
-     KAPPA_SMOOTH_M of arc (reusing _signal._smooth).
-  2. The track profile = the MEDIAN kappa over the session's clean laps, sampled on the
-     best lap's normalized-distance grid. The median averages out line choice + GPS noise:
-     measured on the two D24 validation recordings, best-lap-only detection put the same
-     corner apexes up to 29.5 m apart across recordings (the driver drives a different line
-     through flat-radius arcs each lap); the median profile brings that to <= 3.5 m.
-  3. Threshold from the track's OWN |kappa| distribution (no magic constant): Otsu's
-     between-class-variance split in LOG10 space — see derive_threshold for the measured
-     distributions that motivate the log domain.
-  4. Corner spans = contiguous |kappa| >= threshold with hysteresis, split at sign changes
-     (S-complexes are separate corners with opposite directions), merged across sub-gap
-     jitter, and filtered by minimum arc length and minimum integrated turn angle.
-  5. Each corner: enter/exit/apex odometer distances on the best lap + direction
-     (sign of kappa). Apex = the |kappa|-weighted centroid of the span (== the |kappa| max
-     for a peaked corner, but stable on flat-topped sweepers where the max position is
-     line-noise: measured cross-recording apex agreement improved from 13.3 m worst-case
-     with the raw argmax to 3.5 m with the centroid).
-
-Projection (lap_corner_stats / segment_times): corner windows are FRACTIONS of the
-reference (best) lap's odometer and are projected onto every lap by normalized distance —
-exactly how Session.lap_sector_splits projects sector boundaries (same s = same track
-position). Corners + the complementary straights PARTITION each lap: the per-segment times
-come from one interpolation of the lap's elapsed time at the shared window edges, so the
-telescoping sum of all segment times equals the lap time EXACTLY (asserted), and the sum
-of all per-segment deltas vs another lap equals the lap-time delta exactly.
+Projection (lap_corner_stats / segment_times): corner windows are fractions of the best lap's
+odometer, projected onto every lap by normalized distance (same as lap_sector_splits). Corners +
+straights partition each lap, so the telescoping sum of segment times equals the lap time exactly
+(asserted).
 """
 
 from __future__ import annotations
@@ -49,36 +25,14 @@ import numpy as np
 from ._signal import _smooth
 
 # --- model constants -------------------------------------------------------------------
-# Curvature smoothing length (metres of arc). The GPS trace is already boxcar-smoothed at
-# load (SMOOTH_WINDOW=13 samples); differentiating heading twice still leaves sample-level
-# jitter. 8 m ≈ 5 samples at the ~1.5 m spacing of a 10 Hz kart lap — wide enough that the
-# straight-line noise floor measures |kappa| ~1e-3 (two decades below the 0.03–0.24 corner
-# apexes on the validation track), narrow enough to resolve the shortest real corner arcs
-# (>= ~15 m on the validation track).
-KAPPA_SMOOTH_M = 8.0
-# Median-profile grid step (metres along the reference lap). ~2x finer than the GPS sample
-# spacing so the grid never undersamples a lap; finer adds nothing (the data is 10 Hz).
-GRID_STEP_M = 0.75
-# |kappa| floor before log10 (radius 10 km — far straighter than any steering input; only
-# guards log10(0) on exactly-straight samples, it cannot affect the threshold split).
-LOG_KAPPA_FLOOR = 1e-4
-# Hysteresis: a span EXTENDS while |kappa| >= ratio x threshold — a Schmitt trigger against
-# jitter right at the threshold, not a reach into sub-threshold arcs. Measured: the detected
-# corner set on both validation recordings is unchanged for any ratio in [0.6, 1.0]
-# (12 corners, directions stable, apexes within 6.2/3.5 m worst-case).
-HYSTERESIS_RATIO = 0.8
-# Adjacent same-direction spans closer than this re-merge (one corner fragmented by jitter,
-# not two corners). Below the shortest real inter-corner straight measured on the validation
-# track (~16 m between the C8/C9 lefts); the set is unchanged for any gap in [6, 15] m.
-MERGE_GAP_M = 10.0
-# Minimum corner arc length = the kappa smoothing support: a shorter span is unresolvable
-# by construction (the boxcar spread it there). Set is unchanged for [5, 12] m.
-MIN_SPAN_M = KAPPA_SMOOTH_M
-# Minimum integrated heading change for a real corner. Measured on the validation track:
-# every true corner subtends >= 43.7 deg; the sub-corner kinks that must NOT count (e.g. the
-# 0060-only ~17 deg flick at 680 m) subtend <= 17 deg. 30 sits mid-gap; the set is unchanged
-# for any minimum in [20, 40] deg.
-MIN_TURN_DEG = 30.0
+# Constants tuned on the D24 recordings; the detected set is insensitive within the noted bands.
+KAPPA_SMOOTH_M = 8.0      # m of arc; curvature boxcar (~5 samples), resolves the shortest corners
+GRID_STEP_M = 0.75        # m; median-profile grid step, ~2x finer than GPS spacing
+LOG_KAPPA_FLOOR = 1e-4    # |kappa| floor before log10; only guards log10(0), can't affect the split
+HYSTERESIS_RATIO = 0.8    # span extends while |kappa| >= ratio×threshold; Schmitt trigger; band [0.6,1.0]
+MERGE_GAP_M = 10.0        # m; re-merge adjacent same-direction jitter fragments; band [6,15]
+MIN_SPAN_M = KAPPA_SMOOTH_M  # shorter than the smoothing support is unresolvable; band [5,12]
+MIN_TURN_DEG = 30.0       # min integrated turn for a real corner (kinks <=17°, corners >=44°); band [20,40]
 
 
 @dataclass(frozen=True)
@@ -155,20 +109,11 @@ def pooled_curvature(traces, total_ref: float):
 
 
 def derive_threshold(kappa) -> float:
-    """The corner/straight |kappa| split, derived from THIS track's own distribution — no
-    magic constant: Otsu's threshold (maximum between-class variance) on log10 |kappa|.
-
-    WHY the log domain: |kappa| along a real lap is the union of two log-separated modes —
-    a straight-line noise floor and a cornering mode. Measured on the two D24 validation
-    recordings (median profile over the clean laps): the floor sits at ~1e-3..3e-3 1/m, the
-    corner apexes at 0.03..0.24 1/m, with a sparse valley between. In LINEAR space the
-    corner mode's long tail dominates Otsu's variance and the split lands unstably inside
-    the corner mode itself (measured 0.063 vs 0.050 1/m across the two recordings — a 26%
-    swing that cuts gentle sweepers in or out per session). In log space both modes are
-    compact, and the split lands mid-valley and stable: measured 0.0068 vs 0.00625 1/m
-    (=R~150 m, 9% apart), where real corner entries cross steeply — so span edges barely
-    move. Detection is insensitive to the exact value (the corner set on both recordings is
-    unchanged when this threshold is scaled by 0.8x..1.25x)."""
+    """Corner/straight |kappa| split via Otsu (max between-class variance) on log10|kappa| — no
+    magic constant. Log domain because |kappa| has two log-separated modes (straight noise floor
+    vs corners); in linear space the corner mode's long tail destabilises Otsu inside the corner
+    mode itself, while log space lands the split mid-valley and stable. Detection is insensitive to
+    the exact value (corner set unchanged for a 0.8×..1.25× scaling)."""
     a = np.log10(np.maximum(np.abs(np.asarray(kappa, float)), LOG_KAPPA_FLOOR))
     hist, edges = np.histogram(a, bins=128)
     p = hist.astype(float) / max(hist.sum(), 1)
@@ -277,18 +222,13 @@ def _window_edges(corner_list: list[Corner], total_ref: float, total_lap: float)
 
 
 def segment_times(corner_list: list[Corner], total_ref: float, dists, elapsed) -> np.ndarray:
-    """Per-segment times (s) of the corner/straight PARTITION of one lap: 2N+1 entries
-    [straight0, corner1, straight1, …, cornerN, straightN] (a boundary corner just makes
-    its neighbouring straight zero-length). One np.interp of the lap's elapsed time at the
-    shared window edges -> the telescoping sum of the segments equals the lap's elapsed
-    span EXACTLY (asserted here; the basis of the "sum of segment deltas == lap delta"
-    identity the per-corner table is trusted on)."""
+    """Per-segment times of the corner/straight partition: 2N+1 entries [straight0, corner1, ...].
+    One np.interp at the shared edges, so segments sum to the lap time exactly (asserted)."""
     dists = np.asarray(dists, float)
     elapsed = np.asarray(elapsed, float)
     edges = _window_edges(corner_list, total_ref, float(dists[-1]))
     t_at = np.interp(edges, dists, elapsed)
     seg = np.diff(t_at)
-    # Partition identity (debug): telescoping — exact up to one float rounding per segment.
     assert abs(float(seg.sum()) - float(elapsed[-1] - elapsed[0])) < 1e-9, \
         "corner/straight partition does not sum to the lap time"
     return seg

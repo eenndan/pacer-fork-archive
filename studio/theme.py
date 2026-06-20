@@ -1,22 +1,8 @@
-"""Pacer Studio design system — the SINGLE source of truth for the dark "Refined Minimal" theme.
+"""Pacer Studio design system — single source of truth for the dark theme.
 
-This module is deliberately pacer-free (no telemetry imports) and LLM-editable: the design
-tokens live as plain hex strings on `class C`, the QSS is assembled from those tokens in clearly
-labelled sections, and the font handling degrades gracefully when the bundled Inter TTFs or the
-network are unavailable.
-
-Public surface:
-    C                 — the colour/scale tokens (use these; do NOT invent new colours).
-    register_fonts()  — bundle/register Inter; call once, before apply_theme.
-    apply_theme(app)  — set the app font + dark QPalette + global QSS, and the pyqtgraph
-                        background/foreground (so charts adopt the dark surface in Phase 1).
-    ui_font(size, weight)   — the UI sans face (Inter / system fallback).
-    mono_font(size, weight) — a tabular-figures face for numerics (tnum on Inter when Qt ≥ 6.7,
-                              else a mono numeric stack).
-    delta_colour(d)   — the shared three-way Δ-readout colour (ahead/behind/neutral, with the
-                        ±DELTA_EVEN_EPS_S dead band) used by the Δ box and the compare badges.
-    LAP_SEEK_NUDGE_S  — the shared seek-into-a-lap nudge (an interaction constant, hosted here
-                        because this is the one pacer-free module every control layer imports).
+Pacer-free (no telemetry imports); font handling degrades gracefully when the
+bundled Inter TTFs or the network are unavailable. Public surface: C (colour/scale
+tokens), register_fonts, apply_theme, ui_font, mono_font, delta_colour, LAP_SEEK_NUDGE_S.
 """
 
 from __future__ import annotations
@@ -59,11 +45,8 @@ class C:
     best = "#B794F6"            # best-sector purple
 
 
-# --- chart series palette (Phase 2) ---------------------------------------------------------
-# A refined categorical list for lap curves on the dark surface — each is a bright, opaque hex
-# from the token philosophy (amber accent first, then a cyan/blue/purple/coral spread) so that
-# 2–6 compared laps stay distinguishable without muddying. Solid + width-2 + AA-off keeps the
-# fast segmented-line path (see plots_view), so these read crisp.
+# Categorical lap-curve palette (amber accent first); best lap uses SERIES_BEST green to match
+# the lap table.
 CHART_SERIES = [
     C.accent,    # amber  — primary / first lap (also the app accent)
     "#5BC8E0",   # cyan
@@ -73,22 +56,12 @@ CHART_SERIES = [
     "#9FD66B",   # lime-leaning green (distinct from the best-lap C.ahead green)
 ]
 
-# Semantic mapping used by the plots (documented so it stays consistent with the lap table):
-#   BEST lap curve     -> C.ahead  (the same green the lap table marks the best lap with)
-#   additional laps    -> CHART_SERIES in order (the amber accent is the first categorical entry)
-SERIES_BEST = C.ahead              # green — matches the lap table's best-lap colour
+SERIES_BEST = C.ahead
 
 
-# --- track-map rainbow colormap (F3) ---------------------------------------------------------
-# The rainbow track map paints the current lap's line by a channel (speed / Δ-vs-best),
-# quantized into MAP_RAINBOW_N buckets. The ramp is anchored on the theme's own SEMANTIC
-# tokens — C.behind (red, "slow / losing") → C.accent (amber, mid) → C.ahead (green,
-# "fast / gaining") — so the map's colour language matches the Δ readout/badges exactly and
-# every colour already reads on the dark surface. The three anchors sit at comparable
-# lightness, so the red→amber→green hue sweep stays perceptually ORDERED (no bucket pops
-# brighter than its neighbours) without needing a heavyweight Lab-space colormap.
-MAP_RAINBOW_N = 16  # quantization levels — enough for a smooth-looking gradient, few enough
-                    # that one PlotCurveItem per bucket stays trivially cheap (≤16 items)
+# Track-map current lap coloured by a channel (speed / Δ-vs-best), quantized into MAP_RAINBOW_N
+# buckets through the C.behind → C.accent → C.ahead ramp so it matches the Δ readout.
+MAP_RAINBOW_N = 16  # rainbow buckets (one PlotCurveItem each); smooth enough, cheap enough
 
 
 def _hex_rgb(h: str) -> tuple[int, int, int]:
@@ -97,13 +70,12 @@ def _hex_rgb(h: str) -> tuple[int, int, int]:
 
 
 def rainbow_colors(n: int = MAP_RAINBOW_N) -> list[str]:
-    """`n` (≥ 2) hex colours, low→high, piecewise-linearly interpolated through the
-    C.behind → C.accent → C.ahead semantic anchors (see the WHY block above). Index 0 is the
-    'slow / losing' red end; index n-1 the 'fast / gaining' green end."""
+    """`n` hex colours low→high along the C.behind → C.accent → C.ahead ramp (index 0 = red/slow,
+    n-1 = green/fast)."""
     anchors = [_hex_rgb(C.behind), _hex_rgb(C.accent), _hex_rgb(C.ahead)]
     out = []
     for i in range(n):
-        t = i / (n - 1) * (len(anchors) - 1)  # position along the anchor chain [0, 2]
+        t = i / (n - 1) * (len(anchors) - 1)
         k = min(int(t), len(anchors) - 2)
         f = t - k
         a, b = anchors[k], anchors[k + 1]
@@ -112,33 +84,19 @@ def rainbow_colors(n: int = MAP_RAINBOW_N) -> list[str]:
     return out
 
 
-# --- shared Δ-readout semantics -------------------------------------------------------------
-# A Δ readout is displayed to 0.01 s, so a |Δ| at/below half a displayed centisecond is "even" —
-# neither ahead nor behind. Without the dead band an exact 0.00 coloured GREEN (the old `d <= 0`
-# branch), which misread "dead even with best" as "ahead".
+# Dead band: |Δ| <= half a displayed centisecond reads as 'even', not ahead/behind.
 DELTA_EVEN_EPS_S = 0.005
 
 
 def delta_colour(d: float | None) -> str | None:
-    """The ONE three-way Δ colour rule, shared by the always-on Δ box (app._update_diff_box)
-    and the compare panes' Δ badges (CompareController._set_pane_badge): C.ahead (green) when
-    meaningfully ahead (d < -DELTA_EVEN_EPS_S), C.behind (red) when behind (d > +eps), and
-    None — "no semantic colour, use the widget's neutral foreground" — for no delta at all or
-    a dead-even |d| <= eps."""
+    """Three-way Δ colour: C.ahead if ahead, C.behind if behind, None (neutral) for no/even delta."""
     if d is None or abs(d) <= DELTA_EVEN_EPS_S:
         return None
     return C.ahead if d < 0 else C.behind
 
 
-# --- shared Δ/speed readout TEXT (single source of truth) ------------------------------------
-# The hero Δ/speed readout is shown in TWO substrates that must never drift: the live #DiffBox
-# QLabel (app._update_diff_box) and the burned-in export readout (export_video._paint_readout,
-# raw QPainter). These tiny Qt-free formatters are the ONE place the readout's number/units/
-# no-lap rules live, so the live label and the shareable MP4 always say the same thing. They are
-# composable FRAGMENTS — a delta value, a delta run, a speed run — plus `format_delta_speed`,
-# which assembles them into the exact one-line live string. The export, which paints the speed
-# number and its unit as SEPARATE runs (different fonts/colours; a layout this string-level helper
-# can't express), composes from the same fragments rather than the combined string.
+# Δ/speed text formatters: single source for the live #DiffBox and the burned-in export.
+# Composable fragments so the two readouts can't drift.
 
 
 # --- brake-glyph size ramp (shared by the map + speed-chart brake markers, so the two glyphs
@@ -156,16 +114,12 @@ def brake_glyph_size(peak_decel: float) -> float:
 
 
 def format_delta_value(d: float | None) -> str:
-    """The Δ NUMBER alone, no leading glyph/units: an em dash for no delta, else a signed
-    2-decimal seconds value (e.g. "+0.00", "-0.31"). The atomic source both readouts format Δ
-    from — the live box wraps it as "Δ <v> s", the export as "Δ <v>"."""
+    """Δ number alone, no glyph/units: em dash for None, else signed 2dp (e.g. -0.31)."""
     return "—" if d is None else f"{d:+.2f}"
 
 
 def format_delta_run(d: float | None, *, units: bool = True) -> str:
-    """The Δ run as drawn: "Δ —" / "Δ +0.00 s" with `units` (the live #DiffBox form), or
-    "Δ —" / "Δ +0.00" without (the export readout form, which omits the trailing " s" to keep its
-    hero layout tight). Both share `format_delta_value`, so the number itself can't drift."""
+    """Δ <v> with optional trailing ' s' (units=True live box, False export)."""
     v = format_delta_value(d)
     if d is None:
         return f"Δ {v}"
@@ -173,40 +127,24 @@ def format_delta_run(d: float | None, *, units: bool = True) -> str:
 
 
 def format_speed_run(speed_kmh: float | None, lap: int | None) -> str:
-    """The live speed run: "{n} km/h" while a lap is current, else the HONEST "— km/h" (the Phase-0
-    no-lap rule — outside a valid lap we show no misleading lead-in speed). Used by the live
-    #DiffBox; the export paints the number and unit as separate runs but applies the SAME
-    speed-known gate via `speed_number`."""
+    """<n> km/h while a lap is current, else '— km/h' (no misleading speed outside a lap)."""
     return f"{speed_kmh:.0f} km/h" if (speed_kmh is not None and lap is not None) else "— km/h"
 
 
 def speed_number(speed_kmh: float | None, lap: int | None) -> str:
-    """The speed NUMBER alone (no unit) under the SAME no-lap gate as `format_speed_run`: the
-    rounded km/h while a lap is current, else an em dash. The export's hero readout draws this
-    number and a small "km/h" unit separately, but shares this one gate so the two readouts agree on
-    when a speed is honestly known."""
+    """Speed number alone (no unit), same no-lap gate as format_speed_run: rounded km/h or em dash."""
     return "—" if (speed_kmh is None or lap is None) else f"{speed_kmh:.0f}"
 
 
 def format_delta_speed(d: float | None, speed_kmh: float | None,
                        lap: int | None) -> tuple[str, str | None]:
-    """The COMBINED hero Δ/speed readout, single-sourced for the live #DiffBox and the export:
-    returns (text, colour) where `text` is the exact live one-line string
-    ("Δ +0.00 s     73 km/h" — five spaces between the runs, the honest "— km/h" with no lap) and
-    `colour` is `delta_colour(d)` (None = "no semantic colour; use the widget's neutral
-    foreground"). The live box renders this verbatim; the export reuses the colour + the fragment
-    helpers (it paints the runs separately) so neither can drift from the other."""
+    """Combined live readout: (text, colour). text = 'Δ <v> s<5 spaces><n> km/h'; colour = delta_colour(d)."""
     text = f"{format_delta_run(d)}     {format_speed_run(speed_kmh, lap)}"
     return text, delta_colour(d)
 
 
-# --- shared interaction constants ------------------------------------------------------------
-# Seek a few ms INTO a lap rather than onto its exact start: laps are contiguous (lap N's finish
-# == lap N+1's start) and the player quantizes seeks to whole ms, so a seek to the exact boundary
-# can land a few tenths of a ms BELOW it and resolve to the PREVIOUS lap. Far smaller than a
-# frame; invisible in a ~70 s lap. Shared by the lap-table seek (app) and the compare panes'
-# seek-to-lap-start (compare_controller) — hosted here, the neutral pacer-free module both
-# already import, to avoid an app<->controller import cycle.
+# Seek a few ms INTO a lap: an exact-boundary seek rounds down to the previous lap. Shared by the
+# lap-table and compare seeks.
 LAP_SEEK_NUDGE_S = 0.010
 
 
@@ -248,9 +186,8 @@ def _qt_supports_feature() -> bool:
 
 
 def _try_download_inter() -> bool:
-    """Best-effort: download the Inter release zip and extract the three static TTFs into
-    _FONTS_DIR. Returns True if the files are present afterwards. Network failures are swallowed
-    (caller falls back to the system stack)."""
+    """Best-effort download+extract of the Inter TTFs into _FONTS_DIR. Returns True if present;
+    network/IO failures are swallowed."""
     import urllib.request
     import zipfile
 
@@ -274,10 +211,8 @@ def _try_download_inter() -> bool:
 
 
 def register_fonts() -> None:
-    """Register the bundled Inter TTFs with the Qt font database so the UI looks identical across
-    machines. If the TTFs aren't bundled, try a one-time download; if that fails (offline), skip
-    and rely on the system fallback stack. Logs which path was taken. Also records whether the
-    installed Qt supports OpenType feature tags (for tabular figures)."""
+    """Register bundled Inter (download once if missing; skip on failure → system fallback). Also
+    records Qt tnum support. Call once before apply_theme."""
     global _inter_available, _supports_feature
     _supports_feature = _qt_supports_feature()
 
@@ -318,9 +253,7 @@ def ui_font(size: int = BODY, weight: QFont.Weight = W_REGULAR) -> QFont:
 
 
 def mono_font(size: int = TABLE, weight: QFont.Weight = W_REGULAR) -> QFont:
-    """A tabular-figures face for numerics so digits column-align. On Qt ≥ 6.7 we keep the Inter/UI
-    face and enable the 'tnum' OpenType feature; otherwise we fall back to a monospaced numeric
-    stack (SF Mono / JetBrains Mono / Menlo)."""
+    """Tabular-figures face for column-aligning digits: Inter+tnum on Qt≥6.7, else the mono stack."""
     if _supports_feature:
         f = ui_font(size, weight)
         try:
@@ -337,14 +270,9 @@ def mono_font(size: int = TABLE, weight: QFont.Weight = W_REGULAR) -> QFont:
 
 # ====================================================================== icons
 def icon(name: str, color: str | None = None) -> QIcon:
-    """A themed QIcon from an icon font (qtawesome bundles Phosphor under the `ph` prefix, e.g.
-    "ph.play-fill"). The glyph is tinted to `color` (default C.text), and to C.accent for its
-    active/on state, so e.g. a checkable toolbar button lights up amber.
-
-    qtawesome is imported LAZILY here so a missing dependency degrades gracefully — we log a clear
-    message and return an empty QIcon (the button still works, just without a glyph) rather than
-    crashing the whole app at import time.
-    """
+    """Themed QIcon from qtawesome's Phosphor set (e.g. 'ph.play-fill'), tinted to color
+    (default C.text) and C.accent when active. Lazy import: returns a blank QIcon if qtawesome
+    is missing."""
     try:
         import qtawesome as qta
     except Exception as exc:  # missing dep / font load failure — degrade, don't crash
@@ -360,15 +288,9 @@ _caret_asset_path: str | None = None
 
 
 def _caret_down_asset() -> str | None:
-    """Render the Phosphor `ph.caret-down` glyph (tinted to C.text_dim) to a small PNG under
-    studio/assets/ and return its path — the bundled image QComboBox::down-arrow references via
-    `image: url(...)`. We use a real glyph instead of the old QSS border hack: Qt QSS has no
-    `transform`, so a "rotated border square" actually renders as an L-shaped corner bracket on
-    every combo. A bundled PNG renders identically across machines (no per-machine font metrics).
-
-    Generated once per process and cached; returns None if qtawesome is missing or rendering
-    fails, in which case _build_qss() simply omits the rule (Qt falls back to its native arrow —
-    plain, but never the broken L)."""
+    """Render ph.caret-down tinted to C.text_dim to a cached PNG for QComboBox::down-arrow,
+    because QSS has no transform so the old border arrow renders as an L-bracket. Returns None →
+    native arrow (qtawesome missing / render fails)."""
     global _caret_asset_path
     if _caret_asset_path is not None:
         return _caret_asset_path
@@ -424,7 +346,7 @@ def _palette() -> QPalette:
 
 # ====================================================================== QSS
 def _build_qss() -> str:
-    """Assemble the global stylesheet from tokens. Organised in sections so it stays editable.
+    """Assemble the global stylesheet from tokens, in editable sections.
 
     GOTCHA: a QPushButton/QToolButton custom `background` only renders if `border` is ALSO set —
     every button rule below sets border explicitly.
@@ -432,14 +354,9 @@ def _build_qss() -> str:
     NOTE: QVideoWidget is intentionally NOT styled here. A global opaque background on its native
     video surface can blank the frame on macOS; we leave it to the palette.
     """
-    # Real down-chevron asset for QComboBox::down-arrow (see _caret_down_asset). When it can't be
-    # generated (no qtawesome) we omit the override so Qt draws its native arrow — never the old
-    # broken L-bracket. QSS url() wants forward slashes even on Windows.
+    # Down-chevron rule for QComboBox (see _caret_down_asset); falls back to native arrow when the
+    # PNG is unavailable.
     caret = _caret_down_asset()
-    # caret_arrow_rule is an f-string, so its literal CSS braces are DOUBLED ({{ }} → { }); the
-    # resulting VALUE has single braces and is substituted into the outer QSS f-string via a plain
-    # {caret_arrow_rule} placeholder (inserted verbatim, not re-parsed). When the asset can't be
-    # generated we emit only a comment, so Qt keeps its native arrow — never the old broken L.
     if caret:
         caret_url = caret.replace(os.sep, "/")  # QSS url() wants forward slashes on every OS
         caret_arrow_rule = f"""QComboBox::down-arrow {{
@@ -577,9 +494,7 @@ QPushButton:disabled {{
 QPushButton:focus {{
     border: 1px solid {C.accent};
 }}
-/* checked state — the icon transport toggles (g-meter overlay + the compare toggle): a subtle
-   amber tint + accent border so an active toggle reads clearly without breaking the icon-button
-   vocabulary (the glyph itself is also recoloured to the accent in code). */
+/* checked toggle: amber tint + accent border (glyph also recoloured in code) */
 QPushButton:checked {{
     background-color: {C.accent_tint};
     border: 1px solid {C.accent};
@@ -628,11 +543,7 @@ QComboBox QAbstractItemView {{
     outline: none;
 }}
 
-/* ---------------------------------------------------------------- slider
-   The transport scrub bar is the primary seek target, so the groove is a substantial 8px (was a
-   thin 4px hairline that read accidental and was fiddly to grab) and the handle a 18px grippable
-   dot. The taller groove also gives the lap-ruler tick marks (drawn in _LapRulerSlider) room to
-   read. radius = height/2 keeps both groove and handle fully rounded. */
+/* scrub bar = primary seek target: 8px groove + 18px handle for grabbability and lap-ruler tick room. */
 QSlider::groove:horizontal {{
     height: 8px;
     background: {C.border};
@@ -780,10 +691,7 @@ QLabel#PaneBadge {{
     font-weight: 600;
     padding: 3px 8px;
 }}
-/* centred dimmed in-panel EMPTY STATE (E1): shown over the lap table / charts when a recording
-   loaded but has zero complete laps, so a blank panel reads as an explained state, not a broken
-   app. Surface bg so it fully covers the panel content it overlays; generous padding centres the
-   wrapped message. Themed via the existing muted-text + surface tokens. */
+/* in-panel empty state: shown when a recording has zero complete laps. Surface bg covers the panel; muted text. */
 QLabel[role="EmptyState"] {{
     background-color: {C.surface};
     color: {C.text_muted};
