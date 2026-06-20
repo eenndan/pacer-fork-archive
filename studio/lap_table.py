@@ -1,26 +1,9 @@
 """LapTable: lap times / distances / entry speed. Multi-select rows to compare laps.
 
-Columns are click-to-sort by the UNDERLYING numeric value (F1): each cell carries its
-numeric key in Qt.UserRole and a `_NumItem` sorts on that, so "1:08.408" sorts as 68.408 s
-and "23.10" as 23.1 — not lexically. Clicking a header toggles asc/desc; the default order
-(by lap number) holds until the user clicks.
-
-Row/cell highlights are keyed by LAP ID, not row index, and re-applied after every sort so
-they always follow the right lap: the ▶ playing marker + bold (current lap), the green best
-lap (F-existing), the blue Qt selection, the PURPLE per-sector session-best cells (F5 —
-the fastest split in each S-column across all valid laps, motorsport convention), and a
-trailing ⚠ low-confidence marker (+ row tooltip) on laps with a GPS dropout. Colours,
-alignment and the tabular numeric font come from the design tokens in `theme`; base row text
-is the primary off-white on the dark table surface.
-
-Under the table sits a designed SESSION-BESTS footer block (F1-roadmap; C10 redesign) — a
-"SESSION BESTS" section divider over two stat tiles, "Theoretical" (sum of the purple
-session-best splits) and "Best rolling" (fastest start-anywhere full loop) — plain labels
-OUTSIDE the QTableWidget, so they can never participate in sorting/selection and survive any
-sort by construction; refresh() rewrites their values (session is the single source:
-`theoretical_best` / `best_rolling_lap`). Their values read in the NEUTRAL primary text, NOT
-the C.best purple, which is reserved strictly for the per-sector best cells (a former
-semantic-colour collision).
+Cells sort by their numeric Qt.UserRole key, not text (so "1:08.408" sorts as 68.408 s).
+Row/cell highlights are keyed by lap id so they survive sorts: ▶ playing marker, green best
+lap, blue Qt selection, purple per-sector session-best cells, ⚠ GPS-dropout flag. The
+SESSION-BESTS footer is plain labels below the table, immune to sort/selection.
 """
 
 from __future__ import annotations
@@ -48,11 +31,11 @@ from ._signal import fmt_time
 if TYPE_CHECKING:  # the injected session — typed for readers, not imported at runtime
     from .session import Session
 
-BASE_COLOR = QColor(theme.C.text)             # primary off-white: default row text (dark surface)
-BEST_COLOR = QColor(theme.C.ahead)            # green: the overall best lap (foreground every cell)
-BEST_SECTOR_COLOR = QColor(theme.C.best)      # purple: per-column session-best split (F5)
-CURRENT_PREFIX = "▶ "  # "▶ " marks the lap currently playing on the video
-DROPOUT_SUFFIX = " ⚠"  # low-confidence: this lap has a GPS dropout (time/distance less reliable)
+BASE_COLOR = QColor(theme.C.text)             # default row text
+BEST_COLOR = QColor(theme.C.ahead)            # overall best lap
+BEST_SECTOR_COLOR = QColor(theme.C.best)      # per-column session-best split
+CURRENT_PREFIX = "▶ "  # current (playing) lap marker
+DROPOUT_SUFFIX = " ⚠"  # GPS-dropout lap (low-confidence)
 DROPOUT_TOOLTIP = "GPS dropout in this lap — its time, distance and map are less reliable."
 COLUMNS = ["Lap", "Time", "Dist (m)", "Entry (km/h)"]
 # Columns 1.. (everything but the Lap column) hold numerics: right-align + tabular font so the
@@ -61,20 +44,10 @@ NUMERIC_COL_START = 1
 NUM_ROLE = Qt.UserRole  # the numeric sort key stored on every cell
 LAP_ROLE = Qt.UserRole + 1  # the lap id (stable across sorts), stored on the Lap cell
 
-# The SESSION-BESTS summary block under the table: (title, session accessor CALLABLE, tooltip).
-# Both values are composed FROM the per-sector bests / start-anywhere windows and read from
-# Session so the table cells and the footer can never disagree (the per-column session-best
-# itself is `Session.session_best_splits` — hoisted there so both consumers share one
-# computation). C10: the values are NO LONGER painted in the C.best purple — that purple is now
-# reserved strictly for the per-sector best CELLS so the footer can't read as "more purple
-# cells". Each stat sits in its own labelled tile (dim caption + hero tabular value) under a
-# "SESSION BESTS" section divider, so the block reads as a deliberate designed footer.
-#
-# F8a: the accessor is a CALLABLE `s -> value | None` (was a method-NAME string resolved via
-# getattr(session, name)()). The string form silently broke the footer at runtime if a Session
-# method was renamed — invisible to grep-for-callers and rename refactors. A direct call through
-# the lambda makes the dependency a real, checkable reference (a renamed/removed method is now a
-# load-time/lint error, not a silent runtime miss). Behaviour + displayed values are unchanged.
+# (title, accessor s->value|None, tooltip) for the SESSION-BESTS footer tiles. Values come from
+# Session (theoretical_best / best_rolling_lap) so the footer and the purple per-sector cells share
+# one computation and can't disagree. The callable accessor (vs a method-name string) makes a
+# renamed Session method a load-time error, not a silent footer miss.
 FOOTER_ROWS = (
     ("Theoretical", lambda s: s.theoretical_best(),
      "Theoretical best — sum of the session-best sector splits (the purple cells): the lap "
@@ -93,15 +66,9 @@ def _is_blank(v) -> bool:
 
 
 class _NumItem(QTableWidgetItem):
-    """A table cell that sorts by a numeric key (Qt.UserRole) rather than its display text, so
-    e.g. lap times "1:08.408" sort as 68.408 s, and blank cells (partial laps) sort LAST in BOTH
-    directions — never above a real value.
-
-    Qt's view sort reverses the `<` result for a descending column, so a fixed `__lt__` that puts
-    blanks last ascending would float them to the TOP descending. To keep blanks last either way,
-    the blank ordering is flipped to match the active direction: LapTable sets `_descending` to the
-    column's sort order right before each sort (header click or programmatic), so `__lt__` makes
-    blanks compare as the extreme that lands them at the bottom after Qt's reversal."""
+    """A table cell that sorts by a numeric key (Qt.UserRole), not its text. Blank/NaN keys sort
+    LAST in BOTH directions: LapTable sets `_descending` before each sort so blanks survive Qt's
+    descending reversal."""
 
     _descending = False  # active sort direction, set by LapTable before each sort
 
@@ -113,10 +80,7 @@ class _NumItem(QTableWidgetItem):
         if a_blank or b_blank:
             if a_blank and b_blank:
                 return False  # two blanks: equal, stable order
-            # Exactly one is blank. Blanks must end up LAST after Qt's optional descending reversal:
-            #   ascending  -> blank is "greatest" (blank < x is False, x < blank is True);
-            #   descending -> Qt reverses the result, so blank must be "smallest" here (blank < x is
-            #                 True, x < blank is False) to STILL land at the bottom after reversal.
+            # Flip the blank ordering by direction so blanks land LAST after Qt's descending reversal.
             if a_blank:        # self is the blank
                 return self._descending
             return not self._descending  # other is the blank, self is real
@@ -129,10 +93,8 @@ class LapTable(QWidget):
     def __init__(self, session: Session):
         super().__init__()
         self.session = session
-        self._current_lap = None  # F3: the lap on the video (independent of selection)
-        # Highlight caches, populated by refresh(): the per-column session-best split values
-        # (F5 purple target) and the set of lap ids with a GPS dropout (⚠). Initialised here so
-        # _apply_highlights()/_lap_cell_text() can read them directly (no getattr defaults).
+        self._current_lap = None  # the lap on the video (independent of selection)
+        # Highlight caches filled by refresh(): per-column best splits + dropout lap ids.
         self._best_split: list = []
         self._dropout_ids: set = set()
 
@@ -143,16 +105,10 @@ class LapTable(QWidget):
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
-        # Dark theme: zebra striping (alternate row colour comes from the global QSS) + a
-        # comfortable row height so the table reads as a clean dark surface, not a cramped grid.
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setDefaultSectionSize(28)
-        # Tabular/mono numeric face shared by every numeric cell (digits column-align).
         self._num_font = theme.mono_font(theme.TABLE)
-        # F1: click any header to sort by the column's numeric key (asc/desc toggles). The
-        # highlights are re-applied after each sort (sortIndicatorChanged) so they follow laps.
-        # Default = lap number ascending (column 0) until the user clicks a different header;
-        # the chosen sort is remembered and re-applied across refreshes (sector edits etc.).
+        # Default sort = lap# ascending; remembered across refreshes, re-applied after each sort.
         self._sort_col = 0
         self._sort_order = Qt.AscendingOrder
         self.table.setSortingEnabled(True)
@@ -162,10 +118,8 @@ class LapTable(QWidget):
         hdr.sortIndicatorChanged.connect(self._on_sorted)
         self.table.itemSelectionChanged.connect(self._on_selection)
 
-        # E1 in-panel EMPTY STATE: a recording with zero valid laps yields an empty table — a blank
-        # grid reads as a broken app. Stack a centred, dimmed placeholder over the table and swap to
-        # it (refresh() flips the stack) when there are no rows, so the panel always explains itself.
-        # The footer (theoretical best / best rolling) still sits below — it simply shows em-dashes.
+        # Empty state: zero valid laps would show a blank grid, so stack a placeholder and flip to
+        # it in refresh().
         self._empty = QLabel(
             "No complete laps in this recording.\n\n"
             "The GPS may not have locked, or the recording is too short to "
@@ -186,22 +140,12 @@ class LapTable(QWidget):
 
     # ------------------------------------------------------------------ build
     def _build_footer(self) -> QWidget:
-        """The SESSION-BESTS summary block below the table (C10): a "SESSION BESTS" section
-        divider over a row of stat TILES (one per FOOTER_ROWS entry), each a dim caption above a
-        hero-sized tabular value. Deliberately a separate widget BELOW the QTableWidget, not table
-        rows: footer values must never participate in sorting or selection, so plain labels make
-        that structural (they survive any sort/refresh by construction).
-
-        DESIGN (C10): the old footer was two un-separated label rows whose values reused the
-        C.best purple — the SAME purple as the per-sector best cells, a semantic-colour collision
-        that made the block read as "more purple cells". Here the values use the neutral primary
-        text (the purple is reserved strictly for the sector-best cells); hierarchy comes from the
-        section header + caption-over-value tile, not colour. Each tile carries its defining
-        tooltip on both caption and value. `_refresh_footer` rewrites the values on refresh()."""
+        """Build the SESSION-BESTS footer: a section divider over one stat tile per FOOTER_ROWS
+        entry (dim caption + hero value). Plain labels below the table so values can never
+        sort/select. Values use neutral text (purple is reserved for the sector-best cells)."""
         footer = QWidget()
         footer.setObjectName("LapTableFooter")
-        # A hairline above the block separates it from the table body (theme border token); the
-        # surface bg lifts it off the canvas so it reads as a designed footer, not a stray strip.
+        # hairline + surface bg so it reads as a designed footer
         footer.setStyleSheet(
             f"QWidget#LapTableFooter {{ border-top: 1px solid {theme.C.border}; "
             f"background-color: {theme.C.surface}; }}")
@@ -216,8 +160,6 @@ class LapTable(QWidget):
                           "— not lap times you actually drove.")
         outer.addWidget(header)
 
-        # The stat tiles, laid side by side. Each is a dim caption stacked over a hero tabular
-        # value, so the magnitude reads at a glance and the labels stay a quiet secondary cue.
         tiles = QHBoxLayout()
         tiles.setContentsMargins(0, 0, 0, 0)
         tiles.setSpacing(20)
@@ -231,33 +173,27 @@ class LapTable(QWidget):
             caption.setStyleSheet(
                 f"color: {theme.C.text_dim}; font-size: {theme.CAPTION}px;")
             caption.setToolTip(tip)
-            value = QLabel(fmt_time(float("nan")))  # "—" until refresh() fills it
+            value = QLabel(fmt_time(float("nan")))
             value.setFont(hero_num)
-            value.setStyleSheet(f"color: {theme.C.text};")  # neutral — NOT the sector-best purple
+            value.setStyleSheet(f"color: {theme.C.text};")  # neutral, not the sector-best purple
             value.setToolTip(tip)
             tile.addWidget(caption)
             tile.addWidget(value)
             tiles.addLayout(tile)
             self._footer_values.append(value)
-        tiles.addStretch(1)  # tiles hug the left; the slack sits to their right
+        tiles.addStretch(1)
         outer.addLayout(tiles)
         return footer
 
     def _refresh_footer(self):
-        """Rewrite the footer values from Session (the accessor CALLABLE per row in FOOTER_ROWS).
-        None (no valid laps / a sector column with no data) renders as the em-dash. F8a: the
-        accessor is now a direct `s -> value` callable (was a getattr-by-name on a method string),
-        so a renamed Session method is a real reference error here, not a silent footer miss."""
+        """Rewrite footer values from Session; None → em-dash."""
         for (_title, accessor, _tip), label in zip(FOOTER_ROWS, self._footer_values,
                                                    strict=True):
             v = accessor(self.session)
             label.setText(fmt_time(v if v is not None else float("nan")))
 
     def _n_split_cols(self) -> int:
-        """How many S-split columns to show: N sector lines split a lap into N+1 sub-sectors,
-        so N+1 columns when there are any sector lines, else 0 (no default split columns).
-        Single-sourced (used by refresh() for the headers and _apply_highlights() for the
-        purple per-column best span)."""
+        """Number of S-split columns: sector_count()+1 if any sector lines, else 0."""
         n = self.session.sector_count()
         return n + 1 if n else 0
 
@@ -275,11 +211,7 @@ class LapTable(QWidget):
         n_splits = self._n_split_cols()
         headers = COLUMNS + [f"S{i + 1}" for i in range(n_splits)]
 
-        # Per-lap splits (F5 input) and the per-column session-best split value (purple target).
-        # The session-best is computed in Session (session_best_splits) — the same accessor the
-        # theoretical-best footer sums — so the purple cells and the footer can never disagree.
-        # (It always returns sector_count()+1 entries; with no sectors the table shows 0 split
-        # columns, so the lone entry is simply unused here.)
+        # Per-lap splits + per-column session-best (same accessor the footer sums, so cells/footer agree).
         splits_by_lap = {row["idx"]: self.session.lap_sector_splits(row["idx"]) for row in rows}
         best_split = self.session.session_best_splits()
 
@@ -308,8 +240,6 @@ class LapTable(QWidget):
             for c, (text, key) in enumerate(cells):
                 item = _NumItem(text)
                 item.setData(NUM_ROLE, key)
-                # Numeric columns (everything but Lap): right-align + tabular/mono font so the
-                # digits line up; the Lap column keeps the default left alignment.
                 if c >= NUMERIC_COL_START:
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                     item.setFont(self._num_font)
@@ -323,8 +253,7 @@ class LapTable(QWidget):
         self.table.setSortingEnabled(True)
         self.table.sortByColumn(self._sort_col, self._sort_order)
         self._best_split = best_split  # cached so re-highlight after a sort needn't recompute
-        # Laps with a GPS dropout (low-confidence). Keyed by lap id so the ⚠ flag + tooltip
-        # follow the lap across any sort, exactly like the green/purple/▶ highlights.
+        # dropout lap ids, keyed by lap id so the ⚠ flag follows the lap across sorts
         self._dropout_ids = self.session.dropout_lap_ids()
         self._apply_highlights()
         # The summary footer (theoretical best / best rolling) follows every refresh — i.e.
@@ -333,8 +262,6 @@ class LapTable(QWidget):
 
     # ------------------------------------------------------------- highlights
     def _lap_id(self, r: int) -> int:
-        # The lap id is stored in LAP_ROLE on the Lap cell — stable across sorts and the
-        # "▶ " current-lap prefix.
         return int(self.table.item(r, 0).data(LAP_ROLE))
 
     def _row_for_lap(self, lap_id) -> int:
@@ -369,15 +296,11 @@ class LapTable(QWidget):
                 item = self.table.item(r, c)
                 if item is None:
                     continue
-                # Base text is the theme's primary off-white (theme.C.text, dark table surface);
-                # the green best-lap / purple best-sector foregrounds override it per cell below.
+                # base off-white; green/purple override below
                 item.setForeground(BEST_COLOR if is_best else BASE_COLOR)
-                # Low-confidence GPS-dropout laps carry a row-wide tooltip explaining the flag
-                # (the visible ⚠ marker on the Lap cell is set in _apply_current_lap).
+                # dropout row tooltip
                 item.setToolTip(DROPOUT_TOOLTIP if is_dropout else "")
-            # Purple per-sector session-best: a sector cell whose value equals that column's min
-            # reads purple+bold, overriding the green-best-lap foreground for THAT cell (F5 must
-            # coexist with green/blue/▶).
+            # per-sector best → purple+bold (outranks green for this cell)
             for i in range(n_splits):
                 c = len(COLUMNS) + i
                 item = self.table.item(r, c)
@@ -417,12 +340,9 @@ class LapTable(QWidget):
         item.setFont(font)
 
     def _apply_current_lap(self):
-        """Compose every Lap-cell's text/bold: a '▶ ' prefix + bold for the current (playing) lap
-        (F3), and a trailing ' ⚠' low-confidence marker for any lap with a GPS dropout. Lap-column
-        only — no row background, so the BLUE Qt selection stays the sole row-background cue. Both
-        cues are keyed by lap id, so they survive sorting and coexist with the green/purple
-        highlights. FULL-REBUILD path: used after refresh()/sort (every row's identity may have
-        changed). The per-tick lap CHANGE uses set_current_lap's fast two-row path instead."""
+        """Full-rebuild path: rewrite every Lap cell's ▶ prefix/bold for the current lap (after
+        refresh/sort, where row identities may have changed). set_current_lap has the per-tick
+        two-row fast path."""
         target = self._row_for_lap(self._current_lap)
         self.table.blockSignals(True)
         for r in range(self.table.rowCount()):
@@ -446,12 +366,8 @@ class LapTable(QWidget):
         self._apply_highlights()
 
     def set_current_lap(self, lap_id):
-        """Mark the lap currently playing on the video; no effect on user selection.
-
-        Per-tick fast path: only the OLD current-lap row (clear ▶/unbold) and the NEW one (add
-        ▶/bold) are touched — not every row's text+font rewritten each lap change. The full-row
-        path (_apply_current_lap) is reserved for the refresh()/sort case where row identities
-        shift. Identical on-screen result; far less per-change work."""
+        """Mark the lap playing on the video (no effect on selection). Fast path: only the old and
+        new current-lap rows are touched."""
         if lap_id == self._current_lap:
             return
         old_row = self._row_for_lap(self._current_lap)
@@ -481,19 +397,13 @@ class LapTable(QWidget):
         self.laps_selected.emit(self.selected_lap_ids())
 
 
-# ===================================================================== Corners mode (F-corner)
-# The lap-table panel's SECOND mode: rows = the detected corners (C1… in track order), columns
-# = the selected lap's per-corner metrics vs the best lap (session.lap_corner_stats). A separate
-# widget stacked with LapTable (the header toggle in app.py flips between them) so Laps mode
-# stays byte-identical — this class shares only the module's display constants.
-# Headers are abbreviated so all 8 columns fit the (narrow) left-stack panel WITHOUT a horizontal
-# scrollbar — units that used to ride in the header ("(s)", "(km/h)", "%") move to per-column header
-# tooltips (CORNER_COL_TIPS) so nothing is lost. The two Δ columns are already compact and keep
-# their labels. With ResizeToContents on the numerics (below), short labels = narrow columns, so the
-# Corner name column can stretch to take the slack instead of the table overflowing.
+# ===================================================================== Corners mode
+# Rows = detected corners (track order), cols = the selected lap's per-corner metrics vs the best
+# lap (session.lap_corner_stats). A separate widget stacked with LapTable; shares only the module
+# display constants. Headers are abbreviated so all 8 columns fit the narrow panel — dropped units
+# move to per-column header tooltips (CORNER_COL_TIPS).
 CORNER_COLUMNS = ["Corner", "Time", "Δ best", "Apex", "Δ apex", "Entry", "Exit", "Grip"]
-# Full meaning + units for each header, shown on hover (the abbreviation's source of truth). Aligned
-# 1:1 with CORNER_COLUMNS; "" = self-explanatory (no tooltip needed).
+# Full meaning + units per header, shown on hover (1:1 with CORNER_COLUMNS).
 CORNER_COL_TIPS = [
     "Detected corner in track order (⟲ left / ⟳ right)",
     "Time spent in the corner (seconds)",
@@ -508,14 +418,10 @@ CORNER_DIR_GLYPH = {1: "⟲", -1: "⟳"}  # left / right (turn sense), shown aft
 
 
 class CornerTable(QWidget):
-    """Corners-mode table: one row per detected corner for the SELECTED lap.
+    """Corners-mode table: one row per detected corner for the selected lap.
 
-    Time-in-corner, Δ vs the best lap's same corner, apex (min) speed + Δ, entry/exit
-    speeds — all from session.lap_corner_stats (pacer-free numpy in studio/corners.py).
-    The per-corner SESSION-best time is highlighted purple+bold exactly like the lap
-    table's per-sector session bests; the Δ columns use the shared three-way Δ colour
-    (green = better than best, red = worse; apex-speed Δ sign-flipped, faster = green).
-    Read-only and unsorted — track order IS the meaning of the rows."""
+    Session-best corner time is purple+bold; Δ columns use the shared delta colour.
+    Read-only/unsorted — track order is the meaning."""
 
     def __init__(self, session: Session):
         super().__init__()
@@ -523,19 +429,13 @@ class CornerTable(QWidget):
         self._lap_id: int | None = None
         self.table = QTableWidget(0, len(CORNER_COLUMNS))
         self.table.setHorizontalHeaderLabels(CORNER_COLUMNS)
-        # Full label + units on hover for each (abbreviated) header — the only place the dropped
-        # units now live, so nothing is lost by the compaction.
         for c, tip in enumerate(CORNER_COL_TIPS):
             if tip:
                 self.table.horizontalHeaderItem(c).setToolTip(tip)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        # Column fit (the panel is narrow): the seven numeric columns size to their (short) content
-        # via ResizeToContents, and the Corner NAME column Stretches to absorb the leftover width —
-        # so all 8 columns fit with NO horizontal scrollbar at the default panel size. The old
-        # setStretchLastSection only widened Grip while the rest stayed at Qt's 100px default and
-        # overflowed; it's dropped in favour of this per-column policy.
+        # Corner name stretches; numeric columns size to content so all 8 fit with no scrollbar.
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.Stretch)
         for c in range(1, len(CORNER_COLUMNS)):
@@ -564,9 +464,7 @@ class CornerTable(QWidget):
         stats = self.session.lap_corner_stats(self._lap_id) if ok else []
         corner_list = self.session.corners() if stats else []
         bests = self.session.corner_session_bests() if stats else []
-        # F5: per-corner friction-circle grip utilization (median |g| / lap-envelope max, as a
-        # %), aligned 1:1 with the corner rows. [] when there's no g signal (no IMU / GPS
-        # fallback) — the column then shows a neutral dash, so the view still works without g.
+        # Per-corner grip utilisation (%); [] when there's no g signal → the column shows a dash.
         grip = self.session.lap_corner_grip(self._lap_id) if stats else []
         self.table.setRowCount(len(stats))
         for r, st in enumerate(stats):
@@ -591,8 +489,7 @@ class CornerTable(QWidget):
                 if col >= NUMERIC_COL_START:
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                     item.setFont(self._num_font)
-                # Session-best corner time: purple + bold (the lap table's purple-cell
-                # convention) on the Time cell; it outranks the Δ colour for that cell.
+                # session-best corner time: purple+bold, outranks the Δ colour
                 if col == 1 and is_best:
                     item.setForeground(BEST_SECTOR_COLOR)
                     font = item.font()

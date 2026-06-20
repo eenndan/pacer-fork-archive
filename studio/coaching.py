@@ -1,66 +1,15 @@
-"""Auto coaching summary (F10): the post-load "opportunities" model.
+"""Auto coaching summary: the post-load "opportunities" model.
 
-PACER-FREE BY CONTRACT (numpy only, no Qt). The capstone of the analysis stack — it does
-NOT recompute any corner / driving / consistency math. It COMPOSES the values Session already
-caches (the corner model F2, the driving channels F5, the consistency stats F6) into a ranked,
-explainable shortlist of "where to find time vs your own best lap" — the Garmin-Catalyst /
-APEX-Pro style coaching cue, but every number is measured and deterministic (no ML, no
-randomness, no vibes).
+PACER-FREE BY CONTRACT (numpy only, no Qt). Does NOT recompute corner / driving / consistency
+math; it COMPOSES the values Session already caches into a ranked, explainable shortlist of
+"where to find time vs your own best lap" — every number measured and deterministic (no ML).
 
-THE MODEL, in order
--------------------
-1. Candidate laps = the CONSISTENCY laps (valid, GPS-dropout-free — Session.consistency_lap_ids,
-   the same ⚠ rule the corner-detection profile and the σ stats use). The "typical" lap is the
-   one whose lap TIME is the median of that set (ties -> the lower lap id, so it is fully
-   deterministic). All the per-corner reasons below are read off THIS one median lap, so the
-   advice describes the driver's representative lap, not a one-off mistake.
-
-2. Per corner, the TIME LOST is the MEDIAN over the candidate laps of (that lap's time in the
-   corner − the best lap's time in the same corner). The per-lap per-corner delta-vs-best is
-   exactly CornerStat.delta (Session.lap_corner_stats already measures it against the best lap),
-   so the median of those deltas is the realistic, repeatable time available in that corner —
-   robust to a single bad lap. Corners are RANKED by this median loss, biggest first; only
-   corners with a positive median loss are opportunities (a corner the driver already does as
-   well as their best on a typical lap has nothing to gain).
-
-3. For the TOP-N corners (default 3) the DOMINANT measured reason is chosen deterministically
-   from four candidate signals, EACH converted to an estimated seconds-of-loss contribution so
-   they are directly comparable, then the largest wins (ties broken by a fixed reason priority):
-
-     * APEX  — apex (min) speed deficit: the median lap's apex speed in the corner is below the
-       best lap's apex there (CornerStat.apex_speed_delta < 0). Contribution = the corner's
-       time loss scaled by how much of the speed gap is "explained" deficit (see _apex_signal):
-       carrying more apex speed is the lever.  => "carry more apex speed (−X km/h)".
-     * BRAKING — the median lap brakes EARLIER and/or LONGER than the best lap in the corner's
-       approach. Projecting both laps' brake events (Session.lap_brake_events) onto the corner
-       window [enter − approach, exit], an earlier onset and/or a longer duration than the best
-       lap's matched event is wasted time. Contribution = the time-on-brakes difference (s).
-       => "brake later / shorter".
-     * COASTING — a coasting span (Session.lap_coasting_spans) that lies INSIDE the corner on
-       the median lap but NOT on the best lap: time spent neither braking nor accelerating that
-       the best lap doesn't give up. Contribution = the extra coasting duration in the window (s).
-       => "back to throttle sooner".
-     * LINE  — high cross-lap σ of time-in-corner (CornerSpread.sigma from
-       Session.corner_consistency): the loss is mostly INCONSISTENCY, not a single fixable
-       input. Contribution = the σ (s), the spread the driver could remove by repeating the
-       same line.  => "be consistent here".
-
-   Every reason carries the supporting numbers that produced it, so the UI sentence is "numbers
-   only". When no signal has a positive contribution (e.g. no g channel and the loss is small),
-   the reason falls back to LINE if there is real spread, else a neutral "find time here".
-
-EXCLUDED STATE
---------------
-`summarize` returns an Opportunities with `enough=False` (and an empty list) when there are
-fewer than MIN_LAPS consistency laps — coaching off two laps would be noise. The UI shows a
-friendly "need more laps" message; nothing crashes.
-
-DETERMINISM
------------
-Pure functions of the passed-in arrays + dataclasses (themselves deterministic Session outputs).
-No RNG, no time, no dict-ordering dependence (corners are processed in cid order, candidate laps
-in ascending id). `summarize` called twice on the same Session yields byte-identical results
-(asserted in the tests and on the real recordings).
+What it does: per corner, the median time lost vs your own best over the consistency laps
+(valid, dropout-free); corners ranked by that loss, biggest first. For the top-N corners a
+dominant reason (apex / braking / coasting / line) is picked from four signals, each mapped to a
+comparable strength; the strongest wins (ties → a fixed reason priority). summarize returns
+enough=False under MIN_LAPS consistency laps. Pure + deterministic (corners in cid order,
+candidate laps ascending).
 """
 
 from __future__ import annotations
@@ -69,27 +18,18 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-# Minimum number of consistency laps (valid, dropout-free) before any coaching is offered.
-# WHY 3: the per-corner time loss is a MEDIAN over the candidate laps; with only two laps the
-# "median" is just their mean and a single off lap dominates, and the median-lap selection is
-# ill-defined. Three is the smallest set where the median is a real central value and a typical
-# lap can differ from the best. (Rental-kart sessions routinely have 5-20 valid laps.)
+# Min clean laps before coaching; the per-corner loss is a MEDIAN, ill-defined/unstable below 3.
 MIN_LAPS = 3
 
 # How many ranked corners get a dominant-reason attached (the panel's row count).
 TOP_N = 3
 
-# Approach margin (metres) prepended to a corner's window when matching brake events: the
-# decisive braking for a corner begins on the straight BEFORE turn-in, so the brake-onset
-# comparison must look a little upstream of the geometric corner entry. 30 m ~ the brake zone
-# length of a medium kart corner; the corner model's own enter point is where sustained
-# CORNERING starts, which is already past the brake point.
+# m prepended to a corner window when matching brake events — braking starts on the straight
+# before turn-in (~1 medium-kart brake zone), upstream of the model's cornering-start enter point.
 BRAKE_APPROACH_M = 30.0
 
-# Reasons, as stable string ids (the UI maps them to sentences + picks an icon/colour). Ordered
-# by the tie-break PRIORITY used when two signals produce an equal contribution: a concrete,
-# directly-actionable input (apex speed) is preferred over a process cue (braking, coasting),
-# and raw inconsistency (line) is the last resort. Deterministic and documented.
+# Reason ids, ordered by the tie-break PRIORITY when two signals tie: a directly-actionable input
+# (apex) over a process cue (braking, coasting); raw inconsistency (line) last.
 REASON_APEX = "apex"
 REASON_BRAKING = "braking"
 REASON_COASTING = "coasting"
@@ -100,12 +40,8 @@ _REASON_PRIORITY = (REASON_APEX, REASON_BRAKING, REASON_COASTING, REASON_LINE, R
 
 @dataclass(frozen=True)
 class Reason:
-    """The dominant measured reason a corner is losing time, with the supporting numbers.
-
-    `kind` is one of the REASON_* ids; `contribution` is the estimated seconds-of-loss the
-    reason accounts for (the score the dominant reason won on); the remaining fields are the
-    measured numbers behind the sentence (only the ones relevant to `kind` are non-zero, but
-    all are carried so the UI/tests can read them uniformly)."""
+    """The dominant measured reason a corner is losing time, with the supporting numbers (only the
+    kind-relevant fields are non-zero; all carried so UI/tests read them uniformly)."""
 
     kind: str
     contribution: float          # estimated s of loss attributed to this reason (the score)
@@ -151,31 +87,16 @@ def median_lap_id(lap_ids: list[int], lap_times: list[float]) -> int | None:
 
 
 # ---------------------------------------------------------------------- reason signals
-# Each reason's RAW evidence (apex-speed deficit in km/h, extra brake/coast seconds, σ in s) is
-# on its OWN scale, so they cannot be compared directly — a 1.6 s "extra time on the brakes" is
-# NOT a 1.6 s time loss (braking longer doesn't cost a second). So each evidence value is mapped
-# to a unitless STRENGTH in [0, 1) by a saturating curve evidence/(evidence + half), where `half`
-# is the evidence level at which that reason is "half-credited". The four strengths ARE
-# comparable; the dominant reason is the strongest, and its CONTRIBUTION (for display) is the
-# corner's own time_lost × strength — so no reason can ever claim more than the corner actually
-# gives up (the bug a raw extra-seconds score caused: a long brake-zone difference swamping a
-# clear apex deficit on a 0.2 s corner). The `half` constants are documented below.
+# Each reason's raw evidence is on its own scale, so each maps to a unitless strength in [0,1) via
+# evidence/(evidence + half). The strengths are comparable; the contribution is time_lost ×
+# strength, so no reason overclaims the corner's own loss.
 
-# Evidence levels at which each reason reaches HALF strength (the cross-over points that set
-# which signal wins a mixed corner). Tuned against the D24 validation recordings:
-#   * apex 3 km/h: a typical lap 3 km/h down at the apex is unambiguously an apex-speed problem;
-#     < ~1 km/h is within line/GPS noise (the corner model's apex is a min over the window).
-#   * brake 0.30 s: a brake zone that runs ~0.3 s longer/earlier than the best lap's is a clear,
-#     decisive braking difference; a sub-0.1 s difference is threshold ripple, not a real cause.
-#   * coast 0.30 s: == MIN_COAST_S in driving.py — the shortest coast the channel even reports, so
-#     any reported extra coast is already "real" and reaches half strength at one such span.
-#   * sigma 0.15 s: a corner whose lap-to-lap time σ is ~0.15 s is genuinely inconsistent (the
-#     F6 panel flags these); below ~0.05 s the line is repeatable. The ranking is insensitive to
-#     each within a wide band (these only set ties between two co-present causes).
-_APEX_HALF_KMH = 3.0
-_BRAKE_HALF_S = 0.30
-_COAST_HALF_S = 0.30
-_SIGMA_HALF_S = 0.15
+# Evidence level at which each reason hits half strength (_saturate); only sets ties between
+# co-present causes — ranking insensitive within a wide band. Tuned on the D24 recordings.
+_APEX_HALF_KMH = 3.0   # km/h apex deficit; below ~1 is line/GPS noise
+_BRAKE_HALF_S = 0.30   # s longer/earlier than best; sub-0.1 is threshold ripple
+_COAST_HALF_S = 0.30   # ~ the shortest coast the channel reports
+_SIGMA_HALF_S = 0.15   # s lap-to-lap σ; below ~0.05 the line is repeatable
 
 
 def _saturate(evidence: float, half: float) -> float:
@@ -196,23 +117,16 @@ def _window_brake_time(events, d_enter: float, d_exit: float) -> float:
 
 def _brake_extra(med_events, best_events, med_win: tuple[float, float],
                  best_win: tuple[float, float]) -> float:
-    """Extra seconds on the brakes vs best in the corner's approach: the median lap's total
-    time-on-brakes in the window minus the best lap's, floored at 0 (braking LESS than best is
-    not a loss this reason claims). An earlier onset shows up as more time on the brakes, so the
-    single time-on-brakes difference captures both 'earlier' and 'longer'.
-
-    Each lap's events live in its OWN odometer (Session reads them off each lap's own distance
-    axis), so the SAME corner is a different metre window on each: `med_win`/`best_win` are the
-    corner window already projected onto the median / best lap's own odometer (D13). With no
-    projection both equal the corner edges, so this is unchanged."""
+    """Extra s on the brakes vs best in the corner approach, floored at 0. An earlier onset shows
+    up as more time on the brakes, so this one difference captures both 'earlier' and 'longer'.
+    med_win/best_win are the corner window projected onto each lap's own odometer (see _win)."""
     return max(_window_brake_time(med_events, *med_win)
                - _window_brake_time(best_events, *best_win), 0.0)
 
 
 def _coast_in_window(spans, d_enter: float, d_exit: float) -> float:
-    """Total coasting DURATION (s) whose span overlaps the corner window [d_enter, d_exit].
-    `spans` is a list with .start_dist / .end_dist / .duration (driving.CoastSpan). A span is
-    counted (in full) when any part of it lies inside the corner — a coast 'inside the corner'."""
+    """Total coasting DURATION (s) of the spans (driving.CoastSpan) whose span overlaps
+    [d_enter, d_exit] (counted in full)."""
     total = 0.0
     for s in spans:
         if s.end_dist >= d_enter and s.start_dist <= d_exit:
@@ -222,9 +136,8 @@ def _coast_in_window(spans, d_enter: float, d_exit: float) -> float:
 
 def _coast_extra(med_spans, best_spans, med_win: tuple[float, float],
                  best_win: tuple[float, float]) -> float:
-    """Extra coasting seconds inside the corner vs best: the median lap's coasting duration in
-    the window minus the best lap's, floored at 0. `med_win`/`best_win` are the corner window
-    projected onto each lap's OWN odometer (its spans live there) — see _brake_extra (D13)."""
+    """Extra coasting seconds inside the corner vs best, floored at 0. med_win/best_win projected
+    onto each lap's own odometer (see _win)."""
     return max(_coast_in_window(med_spans, *med_win)
                - _coast_in_window(best_spans, *best_win), 0.0)
 
@@ -233,17 +146,11 @@ def _pick_reason(time_lost: float, apex_speed_delta: float, sigma: float,
                  med_events, best_events, med_spans, best_spans,
                  med_win: tuple[float, float], best_win: tuple[float, float]) -> Reason:
     """Choose the dominant reason for one corner: the strongest of the four comparable strengths
-    (largest wins, ties -> _REASON_PRIORITY order). The raw evidence behind each strength is
-    carried on the Reason regardless of which won, so the UI/tests read them uniformly, and the
+    (largest wins, ties → _REASON_PRIORITY order). All raw evidence is carried on the Reason; the
     contribution is time_lost × the winning strength (≤ time_lost — never overclaims).
 
-    `med_win`/`best_win` are the corner window projected onto the median / best lap's OWN
-    odometer (the frame their brake/coast events live in — D13). With no projection both equal
-    the corner edges, so this is unchanged.
-
-    LINE is the fallback: when no concrete input signal (apex/brake/coast) fires but there IS
-    real cross-lap spread, σ carries the row. When nothing fires the reason is REASON_NONE (the
-    row still shows the time lost)."""
+    LINE is the fallback (real spread but no concrete input fires); REASON_NONE when nothing fires
+    (the row still shows the time lost)."""
     apex_deficit = max(-float(apex_speed_delta), 0.0)   # km/h slower than best at the apex
     brake_extra = _brake_extra(med_events, best_events, med_win, best_win)
     coast_extra = _coast_extra(med_spans, best_spans, med_win, best_win)
@@ -298,33 +205,13 @@ def summarize(
     min_laps: int = MIN_LAPS,
 ) -> Opportunities:
     """Assemble the ranked opportunities from pre-extracted, pacer-free inputs (Session owns the
-    extraction; this stays numpy-only and fully unit-testable on synthetic inputs).
+    extraction; numpy-only, unit-testable on synthetic inputs).
 
-    Arguments (all aligned, all already restricted to the consistency laps / the best lap):
-      corners                 list[Corner] (cid/enter/exit/apex/direction), track order.
-      candidate_lap_ids       the consistency lap ids (ascending), len == rows of the matrices.
-      lap_times               each candidate lap's total time (s), aligned to candidate_lap_ids.
-      corner_times_by_lap     per candidate lap, the per-corner time-in-corner aligned to
-                              `corners` (one inner list per lap).
-      best_corner_times       the best lap's per-corner time-in-corner, aligned to `corners`.
-      sigmas_by_cid           cid -> cross-lap σ of time-in-corner (from corner_consistency).
-      median_brake_events     the MEDIAN lap's brake events (driving.BrakeEvent list).
-      best_brake_events       the BEST lap's brake events.
-      median_coast_spans      the MEDIAN lap's coasting spans (driving.CoastSpan list).
-      best_coast_spans        the BEST lap's coasting spans.
-      median_apex_deltas      the median lap's per-corner apex-speed delta vs the LOCAL best lap
-                              (km/h; negative = slower than best), aligned to `corners`. MUST use
-                              the SAME baseline as the losses (the local best) — see D13.
-      corner_dist_total       the corner edges' (`c.enter`/`c.exit`) odometer reference total (m);
-      median_lap_total        the MEDIAN lap's own odometer total (m);
-      best_lap_total          the BEST lap's own odometer total (m).
-                              These three project each corner window onto each lap's OWN odometer
-                              (d = c.enter / corner_dist_total × lap_total) before matching that
-                              lap's brake/coast events, which live in its own odometer (D13).
-                              When any is None the projection is the identity (the corner edges are
-                              used as-is) — the dormant path, byte-identical to before.
-
-    Returns an Opportunities. `enough=False` (empty rows) when < `min_laps` candidate laps."""
+    All arrays are aligned to candidate_lap_ids / corners and pre-restricted to the consistency
+    laps + best lap. median_apex_deltas MUST use the SAME local-best baseline as the losses.
+    corner_dist_total / median_lap_total / best_lap_total project each corner window onto each
+    lap's own odometer before matching its brake/coast events; any None → identity projection.
+    Returns Opportunities; enough=False (empty rows) when < min_laps candidate laps."""
     n_laps = len(candidate_lap_ids)
     med_id = median_lap_id(candidate_lap_ids, lap_times)
     if n_laps < min_laps or not corners:
@@ -340,12 +227,8 @@ def summarize(
         return Opportunities(enough=False, n_laps=n_laps, median_lap_id=med_id, rows=[])
     losses = np.median(times - best[None, :], axis=0)  # (n_corners,)
 
-    # Project a corner's [enter, exit] (in the corner-edge odometer reference) onto one lap's OWN
-    # odometer (d = c.enter / corner_dist_total × lap_total — the SAME normalized-distance
-    # projection lap_corner_grip / lap_corner_stats use). A lap's brake/coast events are measured
-    # in its own odometer, so this puts the corner window in the SAME frame before matching (D13).
-    # If any total is missing/degenerate the corner edges are returned as-is (the dormant path,
-    # identical to before this fix).
+    # Project [enter,exit] onto one lap's own odometer (scale lap_total/corner_dist_total); identity
+    # if a total is missing. A lap's brake/coast events live in its own odometer, so this matches frames.
     def _win(c, lap_total: float | None) -> tuple[float, float]:
         if (corner_dist_total and lap_total and corner_dist_total > 0
                 and lap_total != corner_dist_total):
