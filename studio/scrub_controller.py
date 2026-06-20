@@ -1,21 +1,10 @@
-"""ScrubController: the plot-cursor scrub behavioural cluster, extracted from StudioWindow.
+"""ScrubController: the plot-cursor scrub cluster (fine, lap-scoped scrub over speed/Δ charts;
+the full-video slider is separate). In compare mode the drag is distance-locked and parks BOTH
+panes on the same track position.
 
-A *fine, lap-scoped scrubber* over the speed/Δ charts (the full-video slider is separate and
-unaffected). Dragging either plot cursor seeks the video WITHIN the current lap; in compare mode
-the same drag is distance-locked and parks BOTH panes on the same track position. To keep the
-30 Hz tick cheap and to break the drag↔positionChanged feedback loop, every drag move only stashes
-the latest target + a dirty flag and returns; the actual seek(s) AND the cursor/marker/readout
-view refresh are COALESCED to ≤1 each per tick (`apply_tick`, called from StudioWindow's `_tick`).
-
-This object OWNS the scrub-private working state (the coalescing targets/flags) and is a plain
-control-layer collaborator: it talks to Session's public API and the view widgets it is handed,
-never to `pacer` directly (the views-stay-pacer-free boundary). It is Qt-free itself — StudioWindow
-forwards the plots' scrub signals and the per-tick scrub branch into it, injecting its collaborators
-+ the SHARED PlaybackState (it reads + seeds `applied_t` there, replacing the old get/set callbacks).
-
-Behaviour is byte-identical to the pre-extraction StudioWindow methods (`_on_scrub_started`,
-`_on_scrub_moved`, `_on_scrub_ended`, the `take_marker_seek` drain, and the `_scrub_target`-gated
-branch of `_tick`); this is a move + dependency-injection, not a redesign.
+Coalesce contract: a drag move only stashes the latest target + a dirty flag; the seek(s) AND the
+cursor/marker/readout refresh are coalesced to <=1 each per tick (`apply_tick`, from `_tick`) —
+this keeps the tick cheap and breaks the drag<->positionChanged feedback loop. Pacer-free, Qt-free.
 """
 
 from __future__ import annotations
@@ -46,15 +35,10 @@ class ScrubController:
         self.video = video
         self.plots = plots
         self.map = map_view
-        # StudioWindow's shared single-driver readout: the scrub path drives the readout for the
-        # dragged time. (The readout itself lives on StudioWindow; it's a view-side callback, not
-        # playback-cursor state, so it stays injected as a callable.)
+        # view-side readout callback (lives on StudioWindow); the scrub drives it for the dragged time.
         self._apply_readout = apply_readout
-        # F5: the SHARED PlaybackState (the SAME object StudioWindow + the compare controller hold).
-        # The scrub reads `playback.applied_t` (the lap the grab scopes to) and, on release, seeds it
-        # to the final target so the current-lap/readout stay consistent until the seek lands. This
-        # replaced the injected get_applied_t / set_applied_t callbacks — same field, now shared, not
-        # tunneled through getters/setters.
+        # shared PlaybackState: reads applied_t (the grabbed lap) and seeds it to the final target
+        # on release.
         self.playback = playback
         # Wired after construction (the two controllers are mutually referential): compare mode
         # turns the scrub distance-locked (fan the coalesced seek to the secondary pane).
@@ -67,10 +51,8 @@ class ScrubController:
         self._scrub_view_t: float | None = None    # latest dragged time for the view refresh (coalesced)
         self._scrub_view_pending = False           # a view refresh (cursor/marker/readout) awaits the tick
         self._scrub_was_playing = False            # restore playback on release iff it was playing
-        # Compare-mode scrub: the drag is distance-locked, so it parks BOTH panes on the SAME
-        # track position. The same plot-x converts to each lap's own global media time; each
-        # pane's seek is coalesced to <=1/tick reusing the gate (the fields above are the PRIMARY
-        # pane's; these add the SECONDARY pane's). Only used while compare is on.
+        # SECONDARY pane coalesced seek target+dirty (compare distance-lock; mirrors the primary
+        # fields above).
         self._scrub_target_b: float | None = None
         self._scrub_pending_b = False
 
@@ -81,19 +63,17 @@ class ScrubController:
     # --- read-only state the tick loop + compare controller observe ---
     @property
     def is_active(self) -> bool:
-        """True while a scrub drag is the source of truth (a target has been set this drag).
-        The tick loop branches on this; the compare controller bypasses its (t_a,t_b) early-out
-        while it's True so the badges/g track the drag, not the lagging pane times."""
+        """True while a scrub drag owns the truth (a target was set this drag)."""
         return self._scrub_target is not None
 
     @property
     def target(self) -> float | None:
-        """The PRIMARY pane's latest coalesced scrub target (the drag's truth for the badges/g)."""
+        """Primary pane latest coalesced scrub target."""
         return self._scrub_target
 
     @property
     def target_b(self) -> float | None:
-        """The SECONDARY pane's latest coalesced scrub target (compare distance-lock)."""
+        """Secondary pane latest coalesced target (compare distance-lock)."""
         return self._scrub_target_b
 
     # --- map marker-drag coalescing drain (called first in the tick) ---
@@ -107,25 +87,17 @@ class ScrubController:
 
     # --- per-tick scrub apply (the `_scrub_target is not None` branch of `_tick`) ---
     def apply_tick(self) -> None:
-        """While the user is scrubbing a plot cursor, the source of truth is the drag, not playback:
-        issue at most ONE coalesced seek per tick to the latest dragged target, and DON'T apply the
-        (stale / seek-driven) playback position — that gating is what prevents the
-        drag↔positionChanged feedback loop from oscillating.
-
-        Caller (`_tick`) gates this on `is_active` and, after it, calls `compare.tick()` to keep the
-        secondary g + Δ badges live while scrubbing."""
+        """One coalesced seek/tick to the latest dragged target; do NOT apply seek-driven playback
+        while dragging — that gating breaks the feedback loop. Caller gates on `is_active`."""
         if self._scrub_pending:
             self._scrub_pending = False
-            self.video.seek(self._scrub_target)  # PRIMARY pane
-        # Compare mode: the same drag is distance-locked across both panes — fan the coalesced
-        # seek out to the SECONDARY pane too (its own lap's global time, computed in on_moved).
+            self.video.seek(self._scrub_target)
+        # fan the coalesced seek to the secondary pane (compare distance-lock)
         if self._is_comparing and self._scrub_pending_b:
             self._scrub_pending_b = False
             if self._scrub_target_b is not None:
                 self.video.seek_pane(1, self._scrub_target_b)
-        # Apply the cursor/marker/readout ONCE per tick to the latest dragged time (coalesced
-        # in on_moved) instead of on every mouse-move — the views are driven by the one
-        # clamped truth `t`, and playback ticks are ignored mid-drag.
+        # views: one refresh/tick to the latest dragged time
         if self._scrub_view_pending and self._scrub_view_t is not None:
             self._scrub_view_pending = False
             t = self._scrub_view_t
@@ -138,8 +110,7 @@ class ScrubController:
         """Grab: scope the scrub to the lap the playhead is currently in (compare mode: to the
         pinned pair A/B); pause playback, remembering whether it was playing so we can resume on
         release."""
-        # In compare mode the scrub is distance-locked to the pinned pair (the drag parks BOTH
-        # panes on the same track position), not to a single playhead lap.
+        # compare mode: scope to the pinned pair (distance-lock), not a single playhead lap.
         self._scrub_lap = (self._compare_a if self._is_comparing
                            else self.session.lap_at_time(self.playback.applied_t or 0.0))
         self._scrub_was_playing = self.video.is_playing()
@@ -153,31 +124,25 @@ class ScrubController:
         self._scrub_pending_b = False
 
     def on_moved(self, x: float, mode: str) -> None:
-        """Drag: convert the raw plot-x (in `mode`'s axis) to a media time within the captured
-        current lap, clamped to that lap. Store it as the latest target + a dirty flag and return
-        immediately — the seek AND the cursor/marker/readout view refresh are both COALESCED to the
-        next tick (≤1 of each per tick), so a fast drag does one conversion+view pass per tick
-        instead of one per mouse-move."""
+        """Drag: convert plot-x (in mode axis) to a media time in the captured lap, clamped; stash
+        as latest target + dirty flag (seek + view refresh coalesced to the next tick)."""
         lap = self._scrub_lap
         if lap is None:  # not inside a valid lap (lead-in / between laps) — no-op
             return
-        # The distance-mode plot-x is scaled by the ACTIVE baseline total (the cross-recording
-        # reference's total when one is loaded, else the local best) — the same basis delta()
-        # scaled the x-grid with — so the dragged x maps back to the right track position.
+        # distance-mode x is scaled by the active baseline total (reference when loaded, else local
+        # best) — the same basis delta() scaled the x-grid with.
         best_d = self.session.active_baseline_total_distance()
         t = self.session.media_time_at_plot_x(lap, x, mode, best_distance=best_d)
         if t is None:
             return
         self._scrub_target = t
         self._scrub_pending = True
-        # The PRIMARY pane's lap position drives the cursor/marker/readout; apply it in the tick.
+        # The primary pane's lap position drives the cursor/marker/readout; apply it in the tick.
         self._scrub_view_t = t
         self._scrub_view_pending = True
         compare_b = self._compare_b
         if self._is_comparing and compare_b is not None:
-            # Distance-locked: the SAME dragged plot-x is a track position; convert it to the
-            # SECONDARY lap's own global media time so both panes park on the same spot. Coalesced
-            # to <=1 seek/tick via _scrub_pending_b (the secondary's gate), exactly like the primary.
+            # distance-lock: convert the same plot-x to the secondary lap's global media time.
             t_b = self.session.media_time_at_plot_x(compare_b, x, mode, best_distance=best_d)
             if t_b is not None:
                 self._scrub_target_b = t_b
@@ -196,27 +161,23 @@ class ScrubController:
         self._scrub_view_pending = False
         self._scrub_target_b = None
         self._scrub_pending_b = False
-        # Flush a final coalesced view refresh if the last drag move never reached a tick, so the
-        # cursor/marker/readout end exactly on the released position (matches the pre-coalesce
-        # behaviour where every move applied the views synchronously).
+        # flush a final view refresh if the last drag move never reached a tick
         if view_t is not None:
             self.plots.set_playhead_time(view_t, force=True)
             self.map.set_playhead_time(view_t)
             self._apply_readout(view_t)
         if target is not None:
-            self.video.seek(target)  # PRIMARY pane
+            self.video.seek(target)
             self.playback.applied_t = target  # keep current-lap/readout consistent until the seek lands
         if self._is_comparing and target_b is not None:
-            self.video.seek_pane(1, target_b)  # SECONDARY pane (final distance-locked park)
+            self.video.seek_pane(1, target_b)  # secondary pane (final distance-locked park)
         if self._scrub_was_playing:
             self.video.play()  # fans out to both panes in compare mode
         self._scrub_was_playing = False
         self._scrub_lap = None
 
     # ----------------------------------------------------------- compare-state helpers
-    # The scrub path reads three things off the compare controller (whether compare is on + the
-    # pinned A/B lap ids); funnel them through these so the distance-lock logic above reads cleanly
-    # and tolerates the controller not being wired yet (defensive — mirrors the old getattr guards).
+    # compare-state accessors: tolerate the controller not being wired yet.
     @property
     def _is_comparing(self) -> bool:
         return self.compare is not None and self.compare.active
