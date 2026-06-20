@@ -1,12 +1,5 @@
-"""StudioWindow: assembles the panels and wires the cross-panel sync.
-
-Layout (resizable splitters):
-    ┌──────────────┬───────────────────────────┐
-    │  VideoView   │   MapView (track + lines) │
-    ├──────────────┼───────────────────────────┤
-    │  LapTable    │   PlotsView (speed/delta) │
-    └──────────────┴───────────────────────────┘
-"""
+"""StudioWindow: the persistent chrome that loads sessions and swaps in a fresh CentralView per
+load; the panel layout lives in CentralView."""
 
 from __future__ import annotations
 
@@ -39,21 +32,9 @@ from .session import DEFAULT_SAMPLE, Session, fmt_time
 
 
 class _VideoExportWorker(QThread):
-    """Runs an export_video.Renderer to completion on a worker thread, reporting frame progress
-    and a final ok/message back to the GUI thread via queued signals (F9). Keeps the heavy
-    decode/composite/mux loop OFF the UI thread so the progress dialog stays responsive and
-    cancellable. The renderer is pacer-free + event-loop-free; this thin QThread is the only Qt
-    threading glue, and it lives in app.py (not the renderer) so export_video stays GUI-agnostic.
-
-    Cancellation: `cancel()` (called from the GUI thread when the dialog's Cancel is hit) flips a
-    flag the render loop + its supervisor poll — a cooperative stop that tears the ffmpeg pipes
-    down cleanly even if the loop is blocked mid-write (the supervisor kills the pipes to unblock
-    it). The partial output file is removed so a cancel leaves nothing half-written.
-
-    Never hangs: the renderer runs a no-progress WATCHDOG (see export_video.Renderer) — if a stage
-    wedges (a stuck VideoToolbox session / pipe) and no frame is written for ~30 s, the export is
-    aborted and surfaced as an error here, then retried once on the software encoder, rather than
-    hanging the dialog forever."""
+    """QThread wrapper running export_video.Renderer off the UI thread, forwarding frame progress
+    and a final ok/message via queued signals. cancel() cooperatively stops the render; a
+    failed/cancelled run drops the partial output."""
 
     progress = Signal(int, int)              # (frames_done, frames_total)
     finished_export = Signal(bool, str)      # (ok, message)  message="cancelled" / an error text
@@ -81,7 +62,7 @@ class _VideoExportWorker(QThread):
             self.finished_export.emit(False, str(exc))
 
     def _cleanup_partial(self):
-        """Best-effort: drop a partially-written output so a cancel/error leaves no broken MP4."""
+        """Drop a partially-written output so cancel/error leaves no broken MP4."""
         try:
             if os.path.exists(self._spec.out_path):
                 os.remove(self._spec.out_path)
@@ -93,74 +74,49 @@ class StudioWindow(QMainWindow):
     def __init__(self, paths: list[str], full: bool = False):
         super().__init__()
         self.resize(1440, 900)
-        # F7: the ONE session-scoped central view (a fresh CentralView per load, swapped in
-        # atomically by _build_ui). None until the first successful load — the persistent chrome
-        # (shortcuts / tick / menus) all guard on it being present and reach session-scoped widgets
-        # THROUGH it (self.view.video / self.view.session / …), the single swap point.
+        # The one session-scoped central view, swapped in fresh per load; None until first load.
         self.view = None
         self._tick_timer = None  # created on the first _build_ui; reused across reloads (window-owned)
-        # F6: the consistency panel is HIDDEN by default; the View menu toggle (built below) flips
-        # this. Held on the WINDOW (not the swapped-in central view) so the user's choice survives a
-        # reload; it is passed into each fresh CentralView, which applies it to the new panel.
+        # Persisted on the window so the View-menu choice survives a reload (passed into each view).
         self._consistency_visible = False
         self._build_menu()
         self._build_shortcuts()
-        # If opt-in full-recording was requested on the CLI, discover the sibling chapters of the
-        # FIRST opened file up front. With explicit multiple paths the user already chose the
-        # chain, so don't auto-discover; without the flag the DEFAULT is unchanged (just `paths`).
+        # --full on the CLI auto-discovers the first file's sibling chapters; explicit multiple
+        # paths are used as-is.
         if full and len(paths) == 1:
             paths = chapters.discover_siblings(paths[0])
         self._load(paths)
 
     # ------------------------------------------------------------------ loading
     def _load(self, paths: list[str]):
-        """Load (or reload) the session for `paths`, then (F7) build a FRESH CentralView and swap it
-        in atomically (_build_ui). Used at startup and by the "Load full recording" action (which
-        reloads with the discovered sibling chapters). The window keeps the load orchestration +
-        `session`/`_paths`; each panel captures `session` at construction, so building a brand-new
-        view per load keeps them simple and free of stale references."""
+        """Load (or reload) the session for `paths`, then build a fresh CentralView and swap it in
+        (_build_ui). The window keeps the load orchestration + `session`/`_paths`; each panel
+        captures `session` at construction."""
         print("studio: loading telemetry…", flush=True)
-        # Kill the "black-void launch": Session.load is a ~4 s SYNCHRONOUS call, and on the first
-        # launch it runs before the window is ever shown — so the user stares at nothing for seconds
-        # (and every "Load full recording" reload hard-freezes the window). Before blocking, show the
-        # window with a lightweight centered "Loading telemetry…" placeholder and force ONE paint, so
-        # there is always immediate visual feedback. Full threading of the load is out of scope; a
-        # visible loading state is enough. Replaced by the real UI in _build_ui once the load returns.
+        # Session.load is a ~4 s synchronous call; show a placeholder + force one paint first so the
+        # window isn't a black void / frozen during it (see _show_loading_placeholder).
         self._show_loading_placeholder(paths)
-        # Guard the load: a missing / corrupt / no-GPS file must NOT crash the app on launch. On
-        # failure show a clear error (the offending path + reason) and leave the window open so the
-        # user can act, rather than letting the exception propagate out of __init__ and kill the app.
+        # A missing / corrupt / no-GPS file must not crash the app: show an error and leave the
+        # window open rather than letting it propagate out of __init__.
         try:
             session = Session.load(paths)
         except Exception as exc:  # noqa: BLE001 - surface ANY load failure as a user-facing error
             self._on_load_failed(paths, exc)
             return
         self.session = session
-        # D2: commit _paths ONLY after a successful load. A failed RELOAD leaves self.session (the
-        # still-good session) untouched, so _paths must stay pointing at that good recording too —
-        # otherwise every _paths consumer (window title, the export source/label, "Load full
-        # recording"/Library sync) silently desyncs from the loaded session, contradicting the
-        # error dialog's "the previously loaded session is unchanged." On a successful first load or
-        # reload, this is the correct new value; _on_load_failed seeds a value for a failed FIRST load.
+        # Commit _paths only after a successful load, so a failed reload leaves both self.session
+        # and _paths pointing at the still-good recording (every _paths consumer stays in sync).
         self._paths = list(paths)
         n_ch = len(self.session.chapters) if self.session.chapters else 1
         print(f"studio: {self.session.point_count()} points, "
               f"{self.session.lap_count()} laps, {n_ch} chapter(s).", flush=True)
 
-        # Timing-line sidecar: restore the user's previously-saved start/sector lines (absolute
-        # lat/lon, written ONLY on a user edit — see _save_sidecar) before the UI is built, so
-        # every panel is constructed against the restored segmentation. A plain load never
-        # WRITES the sidecar. A corrupt/foreign sidecar (its lines segment to zero valid laps)
-        # is reverted to the auto-fitted lines with a non-fatal notice. The path is assigned
-        # only after a SUCCESSFUL load, so a failed reload leaves the old session writing to
-        # its own (old) sidecar.
+        # Restore the user's saved start/sector lines (written only on a user edit) before the UI
+        # is built, so every panel is constructed against the restored segmentation. Applied first
+        # so the segmentation is final before any notice below is decided.
         self._sidecar_path = sidecar.sidecar_path(paths[0]) if paths else None
         notice = None
         data = sidecar.load(self._sidecar_path) if self._sidecar_path else None
-        # Apply the sidecar FIRST so the segmentation (and thus the valid-lap count the E1 check
-        # below reads) is final before any notice is decided. A foreign sidecar that segments to
-        # zero valid laps is reverted with its own notice — but the E1 0-lap check below overrides
-        # it, as a 0-lap recording has no lap timing to fix either way.
         if data is not None:
             if session.apply_timing_lines_latlon(data["start"], data["sectors"]):
                 print(f"studio: restored saved timing lines from "
@@ -169,20 +125,13 @@ class StudioWindow(QMainWindow):
                 notice = ("saved timing lines don't match this recording — "
                           "reverted to the auto-fitted start line")
         elif session.track_name is None and session.lap_count() > 0:
-            # Unknown track (no registry match): the start line was auto-fitted (the
-            # pick_random_start fallback in Session.load), not the real start/finish, so
-            # lap times are arbitrary until the user drags it into place. One line, non-
-            # fatal; suppressed when a sidecar restored the user's own lines above. To add
-            # the track to the registry: studio/dev/print_track_entry.py.
+            # Unknown track: the start line was auto-fitted, so lap times are arbitrary until the
+            # user drags it into place. To register the track: studio/dev/print_track_entry.py.
             notice = ("unknown track — start/finish line was auto-fitted; "
                       "drag it into place to fix lap timing")
 
-        # E1: a "successful" load with ZERO valid laps (short clip / no GPS lock / never-completed
-        # lap) renders every panel blank — indistinguishable from a broken app. Surface a clear,
-        # non-fatal notice (the in-panel empty states are added in LapTable/PlotsView). Highest
-        # priority — a 0-lap recording has no lap timing to restore or drag into place, so this
-        # message supersedes the sidecar-revert / unknown-track notices set above. Read AFTER the
-        # sidecar apply so it reflects the FINAL segmentation.
+        # A zero-valid-lap load renders every panel blank; surface a notice. Highest priority —
+        # supersedes the notices above (a 0-lap recording has no lap timing to fix either way).
         if not session.valid_lap_ids():
             notice = ("no complete laps detected in this recording — the GPS may not have "
                       "locked, or the recording is too short")
@@ -197,23 +146,13 @@ class StudioWindow(QMainWindow):
         else:
             self.statusBar().clearMessage()
 
-        # F8 session library: record this recording in the local index (date / track / lap
-        # count / best / theoretical / paths) for the Library… dialog + PB progression. Done
-        # LAST — after the UI is built and shown — so it can never slow or risk the load; and
-        # fully guarded so a failure to write the index (read-only app-support dir, disk full,
-        # …) only logs a warning and never disrupts the app. A missing/empty index just starts
-        # one; a corrupt index self-heals (library.load returns an empty index).
+        # Record this recording in the local session library (see _update_library).
         self._update_library(paths)
 
     def _show_loading_placeholder(self, paths: list[str]):
-        """Immediate visual feedback for the ~4 s blocking Session.load (the worst first impression
-        was a black void / a frozen window during it). Install a centered "Loading telemetry…" card
-        as the central widget, SHOW the window if it isn't visible yet, and force a single synchronous
-        paint so it actually appears BEFORE the load blocks the event loop. Cheap and robust — no
-        thread; the placeholder is replaced by the real UI in _build_ui when the load returns.
-
-        Defensive: a unit-test StudioWindow.__new__'d without a QApplication has no app to paint —
-        QApplication.instance() is then None, so the processEvents nudge is simply skipped."""
+        """Immediate visual feedback for the ~4 s blocking Session.load: install a centered
+        "Loading telemetry…" card, show the window, and force one synchronous paint so it appears
+        before the load blocks the event loop. Replaced by the real UI in _build_ui."""
         label = chapters.recording_label(paths)
         placeholder = QLabel(f"Loading telemetry…\n\n{label}" if label else "Loading telemetry…")
         placeholder.setAlignment(Qt.AlignCenter)
@@ -221,8 +160,6 @@ class StudioWindow(QMainWindow):
         self.setCentralWidget(placeholder)
         if not self.isVisible():
             self.show()
-        # Force one paint so the placeholder is on screen before Session.load blocks the loop. Without
-        # this the setCentralWidget/show only schedule a paint that never runs until after the load.
         app = QApplication.instance()
         if app is not None:
             app.processEvents()
@@ -243,10 +180,8 @@ class StudioWindow(QMainWindow):
             "The previously loaded session (if any) is unchanged.")
         # First-load failure: no central widget yet — show an empty state so the window stays open.
         if not hasattr(self, "session"):
-            # D2: seed _paths for the FIRST-load-failure path only. _load no longer assigns _paths
-            # before the guarded load, so on a failed first load nothing else has set it — readers
-            # that stay reachable (the still-enabled "Load full recording" action) must find a
-            # value. A failed RELOAD takes the branch below instead and leaves the good _paths intact.
+            # Seed _paths for the failed-first-load case (nothing else has set it, yet readers like
+            # "Load full recording" stay reachable). A failed reload keeps the good _paths instead.
             self._paths = list(paths)
             self.setWindowTitle("pacer studio — no recording loaded")
             placeholder = QLabel(
@@ -257,36 +192,22 @@ class StudioWindow(QMainWindow):
             self.setCentralWidget(placeholder)
 
     def _build_ui(self):
-        """F7 atomic swap: build a FRESH CentralView for the just-loaded session and install it as
-        the central widget in one move. This replaced the old ~230-line in-place teardown/rebuild
-        (`_construct_panels`/`_layout_panels`/`_wire_signals`/`_build_controllers` + the maximize
-        machinery) — all of that session-scoped construction now lives atomically inside
-        CentralView.__init__, so there is no longer a window-side rebuild that can leave a reference
-        stale mid-flight. The window keeps ONLY the persistent chrome work here (the tick timer, the
-        statusbar ref-chip, the "Load full recording" enablement) which lives on the QMainWindow and
-        survives the swap.
+        """Atomic swap: dispose the outgoing view, build a fresh CentralView for the just-loaded
+        session (all session-scoped construction lives in its __init__), and setCentralWidget it.
+        The window keeps only the persistent chrome below (tick timer, ref-chip, the "Load full
+        recording" enablement), which survives the swap.
 
-        Reload ordering preserved EXACTLY: dispose the OUTGOING view FIRST (its VideoView.stop_all
-        stops the decoder + closes the g-meter overlay window) BEFORE the new view is constructed and
-        swapped in — the same "old video stop_all + g-meter overlay close before the central widget
-        is replaced" the old reload did. CentralView.__init__ then runs the identical seed sequence
-        (rebuild_derived_views(reselect=True) → poster seek → consistency-visible re-sync); the
-        chrome-side seed (ref-chip + _sync_full_recording_action + _update_reference_status) runs
-        below, after the swap, just as before."""
+        Disposing the outgoing view first stops its decoder + closes the g-meter overlay before the
+        central widget is replaced."""
         old_view = getattr(self, "view", None)
         if old_view is not None:
             old_view.dispose()  # stop the old decoder + close its g-meter overlay before the swap
-        # Build the new session-scoped view atomically (panels + controllers + PlaybackState + the
-        # derived-views seed + poster seek all happen in its __init__), then swap it in as ONE unit.
-        # The window keeps the canonical session / _paths; the view holds a read alias + the paths
-        # (banner) + the sidecar path (timing-line save), per the documented session/_paths split.
+        # The view holds a read alias of session + the paths (banner) + the sidecar path.
         self.view = CentralView(self.session, self._paths, self._sidecar_path,
                                 self._consistency_visible, parent=self)
         self.setCentralWidget(self.view)
-        # One ~30 Hz tick timer for the WINDOW's lifetime; created once and REUSED across reloads (a
-        # second timer would double the tick rate). It delegates to the current view's tick() — the
-        # swap above just re-points which view that is. Kept on the persistent window (not the view)
-        # so it is never torn down by a reload.
+        # One ~30 Hz tick timer for the window's lifetime, created once and reused across reloads (a
+        # second would double the tick rate); the swap just re-points which view tick() drives.
         if self._tick_timer is None:
             self._tick_timer = QTimer(self)
             self._tick_timer.setInterval(33)  # ~30 Hz
@@ -294,10 +215,8 @@ class StudioWindow(QMainWindow):
             self._tick_timer.start()
 
         self._sync_full_recording_action()
-        # F7: the permanent status-bar chip showing which cross-recording reference is active.
-        # Created ONCE (it lives on the persistent QMainWindow status bar, which the central-widget
-        # swap doesn't touch) and hidden until a reference is loaded. A primary reload builds a fresh
-        # Session with no reference, so re-sync (hide) it here.
+        # The permanent status-bar chip naming the active cross-recording reference, created once
+        # and hidden until a reference is loaded.
         if getattr(self, "_ref_chip", None) is None:
             self._ref_chip = QLabel("")
             self._ref_chip.setProperty("role", "BarLabel")
@@ -305,36 +224,20 @@ class StudioWindow(QMainWindow):
         self._update_reference_status()
 
     def _tick(self):
-        """The persistent ~30 Hz timer's slot — delegates the per-frame drain/scrub/apply/compare
-        work to the CURRENT session-scoped view (CentralView.tick). The timer lives on the window
-        and is reused across reloads; only `self.view` changes on a swap, so this always drives the
-        live view. Defensive no-op before the first successful load (no view yet — a failed first
-        load leaves none)."""
+        """The ~30 Hz timer slot, delegating to the current view's tick(); no-op before first load."""
         view = getattr(self, "view", None)
         if view is not None:
             view.tick()
 
     # ----------------------------------------------------- menu bar / information architecture
     def _build_menu(self):
-        """Build the menu bar: File / Analyse / View / Help. The IA splits the menus by INTENT —
-        File owns getting recordings in and data out (Open, Open Recent, Load full recording,
-        Export ▸, Export overlay video, Library), while Analyse gathers the comparison/coaching
-        surface (reference recording load/clear, cross-recording compare, the Opportunities
-        summary). View + Help are unchanged. Every action keeps its original handler + disabled-
-        state sync — this method only regroups them and adds the Open Recent submenu.
-
-        Also the opt-in multi-chapter action: File ▸ "Load full recording" discovers the sibling
-        chapters of the currently-opened file and reloads the whole session as one chaptered
-        recording (disabled when there's nothing more to load — already multi-chapter, no siblings
-        on disk, or a non-GoPro clip)."""
+        """Build the File / Analyse / View / Help menus on the persistent menu bar (survives the
+        central-widget swap)."""
         menu = self.menuBar().addMenu("&File")
         self._open_action = menu.addAction("Open…")
         self._open_action.setShortcut(QKeySequence.Open)
         self._open_action.triggered.connect(self._open_file)
-        # Open Recent ▸ — re-open any recently analyzed recording straight from the menu, without a
-        # trip through the Library dialog. Populated lazily from the session-library index on
-        # aboutToShow (so it always reflects the latest loads + on-disk state); each entry re-opens
-        # through the SAME guarded _load path the Library dialog uses. See _sync_recent_menu.
+        # Re-open recent recordings (see _sync_recent_menu).
         self._recent_menu = menu.addMenu("Open Recent")
         self._recent_menu.aboutToShow.connect(self._sync_recent_menu)
         self._sync_recent_menu()  # seed it once so it's populated before its first open
@@ -342,11 +245,8 @@ class StudioWindow(QMainWindow):
         self._full_action.setToolTip(
             "Discover this recording's sibling chapters and load them as one continuous session")
         self._full_action.triggered.connect(self._load_full_recording)
-        # F11: File ▸ Export — the three data-export actions (writers in studio/export_data.py,
-        # pacer-free; this menu owns the save dialogs + the report's widget grabs). Greyed out
-        # until a session is loaded — the enabled state is synced when the File menu opens, so
-        # the load path needn't know the menu exists. Nothing is EVER written without one of
-        # these actions plus a confirmed save dialog (a plain load writes no export files).
+        # File ▸ Export: the data-export actions (writers in export_data.py); greyed until a
+        # session is loaded (synced on aboutToShow).
         self._export_menu = menu.addMenu("Export")
         self._export_laps_action = self._export_menu.addAction("Lap times (CSV)…")
         self._export_laps_action.setToolTip(
@@ -362,20 +262,14 @@ class StudioWindow(QMainWindow):
         self._export_report_action.triggered.connect(self._export_report)
         self._export_menu.setEnabled(False)  # no session yet at construction time
         menu.aboutToShow.connect(self._sync_export_menu)
-        # F9 video-overlay export: a SEPARATE File-menu entry (not inside the data-export submenu)
-        # that burns the telemetry overlays onto the footage → a shareable MP4. Deliberately a
-        # dormant, additive menu entry — the whole renderer lives in studio/export_video.py and is
-        # only reached through this action, so the feature can't touch the live app path. Greyed
-        # out (and re-synced on aboutToShow) until a session is loaded.
+        # F9 video export: burns the overlays onto the footage (renderer in export_video.py).
         self._export_video_action = menu.addAction("Export overlay video…")
         self._export_video_action.setToolTip(
             "Render the selected lap with the on-screen overlays burned in (g-meter, Δ/speed, "
             "map inset, lap strip) to a shareable MP4")
         self._export_video_action.triggered.connect(self._export_overlay_video)
         self._export_video_action.setEnabled(False)
-        # F8 session library: a local index of every analyzed recording (date / track / best /
-        # theoretical) with per-track PB progression + quick re-open. The Open Recent submenu above
-        # is the one-click fast path into this same index; the dialog is the full browse + chart.
+        # File ▸ Library: the full browse + per-track PB chart over the session-library index.
         menu.addSeparator()
         self._library_action = menu.addAction("Library…")
         self._library_action.setToolTip(
@@ -383,14 +277,8 @@ class StudioWindow(QMainWindow):
             "re-open any of them, and see per-track PB progression")
         self._library_action.triggered.connect(self._open_library)
 
-        # ----- Analyse menu: the comparison / coaching surface, grouped by INTENT (rather than
-        # scattered through File). It collects the F7 cross-recording reference cluster (load /
-        # clear / compare) and the F10 Opportunities summary. Built once on the persistent menu
-        # bar; the actions keep their original handlers + disabled-state syncs (_update_reference_
-        # status drives Clear / Compare enablement exactly as before — only the parent menu changed).
+        # Analyse menu: the comparison / coaching surface (reference load/clear/compare + Opportunities).
         analyse_menu = self.menuBar().addMenu("&Analyse")
-        # F7 cross-recording reference: load ANOTHER recording and overlay/compare against its
-        # best lap (race a friend's GoPro file).
         self._ref_action = analyse_menu.addAction("Load reference recording…")
         self._ref_action.setToolTip(
             "Pick another recording of the SAME track; its best lap becomes the Δ / map / table "
@@ -401,21 +289,15 @@ class StudioWindow(QMainWindow):
                                           "session's own best lap")
         self._clear_ref_action.triggered.connect(self._clear_reference)
         self._clear_ref_action.setEnabled(False)
-        # F7 Phase B: cross-recording VIDEO compare — pane A = this recording's lap, pane B = the
-        # reference recording's lap playing its OWN footage + telemetry. DISTINCT from the existing
-        # same-recording "Compare videos" toggle (which compares two laps of THIS recording); that
-        # toggle stays intact. Enabled only when a reference is loaded (synced in
-        # _update_reference_status).
+        # Cross-recording video compare (pane A = this lap, pane B = the reference's lap); distinct
+        # from the same-recording "Compare videos" toggle. Enabled only when a reference is loaded.
         self._cross_compare_action = analyse_menu.addAction("Compare vs reference recording")
         self._cross_compare_action.setToolTip(
             "Side-by-side: this recording's lap (left) vs the loaded reference recording's lap "
             "(right), each playing its own footage. Load a reference recording first.")
         self._cross_compare_action.triggered.connect(self._enter_cross_compare)
         self._cross_compare_action.setEnabled(False)
-        # F10 auto coaching summary: the post-load "Opportunities" dialog — the top-3 corners by
-        # realistic time lost vs your own best lap, each with the dominant measured reason + a
-        # jump-to. Read-only; recomputed from the session each time it's opened. (Folded in from the
-        # former single-item Coaching menu — it's an analysis surface, so it belongs here.)
+        # F10 Opportunities: top-3 corners by time lost vs your own best lap (recomputed per open).
         analyse_menu.addSeparator()
         self._opportunities_action = analyse_menu.addAction("Opportunities…")
         self._opportunities_action.setToolTip(
@@ -423,11 +305,7 @@ class StudioWindow(QMainWindow):
             "(median of your clean laps), each with the measured reason and a jump-to.")
         self._opportunities_action.triggered.connect(self._open_opportunities)
 
-        # F6: a View menu with the "Show consistency panel" check item (UNCHECKED by default — the
-        # panel is hidden on launch). Toggling it shows/hides the consistency strip under the lap
-        # table and refreshes its stats when shown. Lives on the persistent menu bar (untouched by
-        # the central-widget rebuild), so the user's choice survives a reload; _build_ui re-syncs the
-        # live panel's visibility to this item's state.
+        # F6 View ▸ Show consistency panel (unchecked by default; choice persists across reloads).
         view_menu = self.menuBar().addMenu("&View")
         self._consistency_action = view_menu.addAction("Show consistency panel")
         self._consistency_action.setCheckable(True)
@@ -437,12 +315,7 @@ class StudioWindow(QMainWindow):
             "top-5 most inconsistent corners.")
         self._consistency_action.toggled.connect(self._on_consistency_toggled)
 
-        # Help menu (rightmost): the discoverable surface for an otherwise-invisible interaction
-        # model — the playback toggles, ±-stepping, chart-cursor scrub and the draggable map
-        # start/finish line have no on-screen hint. Two read-only dialogs (studio/help_dialog.py):
-        # the keyboard-shortcut reference (also bound to F1 / ? in _build_shortcuts) and an About
-        # card. Additive — like the other menus it's built once on the persistent QMainWindow menu
-        # bar, so it survives the central-widget rebuild and needs no per-load wiring.
+        # Help menu: the shortcut reference (also F1 / ?) and an About card (help_dialog.py).
         help_menu = self.menuBar().addMenu("&Help")
         self._shortcuts_action = help_menu.addAction("Keyboard shortcuts")
         self._shortcuts_action.setShortcut(QKeySequence(Qt.Key_F1))
@@ -455,8 +328,7 @@ class StudioWindow(QMainWindow):
         self._about_action.triggered.connect(self._show_about)
 
     def _show_shortcuts(self):
-        """Help ▸ Keyboard shortcuts (also F1 / ?): the themed, read-only shortcut reference.
-        Built fresh + modal each time — it carries no app state, so there's nothing to refresh."""
+        """Help ▸ Keyboard shortcuts (also F1 / ?): the read-only shortcut reference."""
         ShortcutsDialog(self).exec()
 
     def _show_about(self):
@@ -466,23 +338,10 @@ class StudioWindow(QMainWindow):
     # ----------------------------------------------------- keyboard shortcuts
     def _build_shortcuts(self):
         """Window-level playback shortcuts: Space (play/pause), M (mute), G (g-meter overlay),
-        C (compare mode). Created ONCE in __init__ and parented to the WINDOW, so they survive
-        every central-view swap.
-
-        Handlers dereference the CURRENT video DYNAMICALLY (via _video_do → self.view.video) —
-        _build_ui swaps in a fresh CentralView (with a fresh VideoView) on every reload (File ▸
-        Open… / Load full recording), so capturing the widget at shortcut-creation time would leave
-        the shortcuts driving a disposed player.
-
-        The checkable toggles (G / C) go through their QPushButton's click() so the button's
-        checked state, icon and QSS stay in sync with the keyboard path, and a DISABLED button
-        (no IMU data / <2 valid laps) makes its shortcut a no-op for free (click() respects
-        the enabled state). Space / M call the same VideoView methods the buttons are wired to.
-
-        ←/→ stepping is deliberately NOT a QShortcut: a window-level shortcut CONSUMES the key
-        before the focus widget sees it (verified offscreen), which would break lap-table row
-        navigation. Arrows are handled in keyPressEvent instead, which only receives keys the
-        focus widget did not use."""
+        C (compare mode). Parented to the window so they survive every view swap; handlers resolve
+        the current video dynamically (via _video_do). G / C go through the button's click() so a
+        disabled button makes its shortcut a no-op. ←/→ stepping is handled in keyPressEvent, not
+        here, so the lap table keeps its arrow navigation."""
         def shortcut(key, handler):
             sc = QShortcut(QKeySequence(key), self)
             sc.setContext(Qt.WindowShortcut)
@@ -492,31 +351,19 @@ class StudioWindow(QMainWindow):
         shortcut(Qt.Key_M, lambda: self._video_do(lambda v: v.toggle_mute()))
         shortcut(Qt.Key_G, lambda: self._video_do(lambda v: v.gmeter_btn.click()))
         shortcut(Qt.Key_C, lambda: self._video_do(lambda v: v.compare_btn.click()))
-        # ? opens the shortcut reference (F1 is set on the Help-menu action itself). The shortcut
-        # text in that dialog (studio/help_dialog.py SHORTCUT_GROUPS) is the documented twin of
-        # these bindings + the ←/→ stepping in keyPressEvent — keep them in sync.
+        # ? → shortcut reference (keep in sync with help_dialog.SHORTCUT_GROUPS).
         shortcut(Qt.Key_Question, self._show_shortcuts)
 
     def _video_do(self, fn):
-        """Run `fn` against the CURRENT VideoView, resolved at ACTIVATION time (not capture time)
-        THROUGH the live central view: _build_ui swaps in a fresh CentralView (and thus a fresh
-        self.view.video) on reload. This is the generalised dynamic-resolution idiom — it now
-        resolves `self.view.video` (the single swap point) instead of a window-held `self.video`.
-        No-op before the first successful load (a failed first load leaves no `view` — the shortcuts
-        must not crash)."""
+        """Run `fn` against the current VideoView, resolved at call time (since _build_ui swaps it);
+        no-op before the first load."""
         view = getattr(self, "view", None)
         if view is not None:
             fn(view.video)
 
     def keyPressEvent(self, event):
-        """←/→ step the video ±1 s (Shift: ±5 s), clamped + compare-aware via VideoView.step.
-
-        Handled HERE rather than as QShortcuts: a window-level shortcut would consume the
-        arrows before the focus widget sees them, breaking lap-table navigation. A key event
-        reaches the main window only when the focus widget did NOT handle it — exactly the
-        wanted policy: the lap table (and any combo box) keeps its own arrow navigation;
-        everywhere else the arrows step the video. (The transport buttons + slider are
-        Qt.NoFocus, so clicking them can't capture the arrows either.)"""
+        """←/→ step the video ±1 s (Shift ±5 s). Handled here, not as a QShortcut, so the lap table
+        keeps arrow nav; keyPressEvent only fires when the focus widget didn't use the key."""
         if event.key() in (Qt.Key_Left, Qt.Key_Right):
             step = 5.0 if event.modifiers() & Qt.ShiftModifier else 1.0
             sign = 1.0 if event.key() == Qt.Key_Right else -1.0
@@ -553,14 +400,9 @@ class StudioWindow(QMainWindow):
 
     # ----------------------------------------------------------- session library (F8)
     def _update_library(self, paths: list[str]):
-        """Upsert the just-loaded recording into the local session-library index. FULLY GUARDED:
-        any failure (entry build, or an unwritable app-support dir) is swallowed with a warning
-        — a library write must NEVER disrupt a load. Called post-UI from _load (see there).
-
-        SKIP non-recordings: the bundled ``DEFAULT_SAMPLE`` (launched with no file) and any
-        recording with no valid laps would otherwise persist a junk row (0 laps, null track) that
-        the library dialog then surfaces forever. A library of *analyzed* sessions only wants rows
-        with at least one real lap, so an empty/unsegmented open is not indexed."""
+        """Upsert the just-loaded recording into the local session-library index. Fully guarded: a
+        library write must never disrupt a load. Skips the bundled DEFAULT_SAMPLE and any recording
+        with no valid laps (a junk row the library would surface forever)."""
         if any(os.path.abspath(p) == os.path.abspath(DEFAULT_SAMPLE) for p in paths):
             return
         if not self.session.valid_lap_ids():
@@ -578,20 +420,13 @@ class StudioWindow(QMainWindow):
         dlg = LibraryDialog(library.load(), open_recording=self._load, parent=self)
         dlg.exec()
 
-    # Open Recent: a handful of recently analyzed recordings (most-recent-first), each re-opening
-    # through the SAME guarded `_load` path the Library dialog uses. The "recents" source is the
-    # session-library index — re-using its single source of truth rather than tracking a second
-    # MRU list — so a recording shows up the moment it's indexed (post-load) and disappears if its
-    # file is later moved/deleted.
+    # Open Recent: recently analyzed recordings (most-recent-first), each re-opened via the guarded
+    # `_load`. Sourced from the session-library index rather than a separate MRU list.
     _RECENT_LIMIT = 8
 
     def _recent_entries(self) -> list[dict]:
-        """The Open Recent candidates: USABLE library entries (file present, real track + laps —
-        the same "openable row" test the Library dialog applies), ordered most-recent-first by the
-        recording date, capped at _RECENT_LIMIT. Junk rows (no track / no laps — e.g. the legacy
-        bundled-sample row) and entries whose every chapter path is gone are skipped, since neither
-        is openable. Fully guarded: any failure reading the index yields an empty list (the menu
-        then shows its disabled "(none)" item) — Open Recent must never break the menu bar."""
+        """Open Recent candidates: openable library entries (real track + laps, file present),
+        most-recent-first by date, capped at _RECENT_LIMIT. Guarded: any failure yields []."""
         try:
             entries = library.load().get("entries", [])
         except Exception as exc:  # noqa: BLE001 — the recents list is additive; never break the menu
@@ -599,13 +434,10 @@ class StudioWindow(QMainWindow):
             return []
         usable = [
             e for e in entries
-            # openable == has a real track + at least one lap (not a junk row) AND at least one
-            # chapter path still on disk (any one is enough; _load discovers the siblings).
             if e.get("track") and e.get("lap_count")
             and any(os.path.exists(p) for p in (e.get("paths") or []))
         ]
-        # Most-recent-first by recording date ("YYYY-MM-DD" sorts chronologically as text); a
-        # missing date sorts last. Mirrors the Library dialog's default date-descending order.
+        # Newest first; missing date sorts last.
         usable.sort(key=lambda e: e.get("date") or "", reverse=True)
         return usable[:self._RECENT_LIMIT]
 
@@ -658,56 +490,36 @@ class StudioWindow(QMainWindow):
         dlg.exec()
 
     def _jump_to_opportunity(self, cid: int, _entry_dist: float):
-        """Jump-to for an opportunity row: select corner `cid` (map apex ring + the Corners view
-        on the BEST lap) and seek the video to the BEST lap's ENTRY to that corner.
-
-        Reuses the existing corner-select + seek paths: the best lap is selected in the lap
-        table (so the Corners view + charts describe it, exactly like a user lap-click), the
-        Corners view is shown, the map rings the apex (MapView.highlight_corner, the consistency
-        panel's cue), and the video seeks to corner_entry_media_time(best, cid) — an absolute
-        media time, fed straight to video.seek like the lap-select seek. No-op if there's no best
-        lap or the corner/entry can't be resolved (a degenerate session). The session-scoped panels
-        (table / corners button / map / video / the shared cursor) are reached through self.view —
-        the single swap point."""
+        """Jump-to for an opportunity row: select corner `cid` on the best lap (map apex ring +
+        Corners view) and seek the video to the best lap's entry to that corner. No-op if there's
+        no best lap or the corner/entry can't be resolved."""
         best = self.session.best_lap_id()
         if best is None:
             return
         view = self.view
-        # Select the best lap (programmatic select, NOT a user-select, so it doesn't re-enter the
-        # seek-on-select path — we own the seek below, to the corner entry rather than the lap
-        # start). This repoints the Corners view + charts onto the best lap.
+        # Programmatic select (not a user-select) so it doesn't re-enter the seek-on-select path —
+        # we own the seek below, to the corner entry rather than the lap start.
         view.table.select([best])
         view._on_laps_selected([best])
-        # Show the Corners view so the selected corner's per-corner row is visible (the toggle
-        # also updates the table header). Idempotent if already in Corners mode.
         if not view.corners_btn.isChecked():
             view.corners_btn.setChecked(True)
-        # Ring the corner's apex on the map (display-only cue, same as the consistency panel).
         view.map.highlight_corner(cid)
-        # Seek the video to the best lap's entry to this corner.
         target = self.session.corner_entry_media_time(best, cid)
         if target is not None:
             view.video.seek(target)
-            # Seed auto-follow to the lap the seek lands in, so the immediate post-seek tick
-            # isn't treated as a lap-change edge (mirrors the lap-select seek's handling).
+            # Seed auto-follow to the seek's lap so the post-seek tick isn't a lap-change edge.
             view._playback.followed_lap = self.session.lap_at_time(target)
 
     def _on_consistency_toggled(self, on: bool):
-        """View ▸ "Show consistency panel": show/hide the consistency strip under the lap table.
-        The choice is remembered on the WINDOW (self._consistency_visible) so it survives a reload —
-        a fresh CentralView is seeded with it at construction. The actual show/hide + stats refresh
-        is the view's job (set_consistency_visible). No-op before the first successful load (no view
-        yet)."""
+        """View ▸ Show consistency panel: remember the choice on the window (survives a reload) and
+        delegate the show/hide to the view. No-op before the first load."""
         self._consistency_visible = bool(on)
         view = getattr(self, "view", None)
         if view is not None:
             view.set_consistency_visible(self._consistency_visible)
 
     # ----------------------------------------------------------- data export (F11)
-    # File ▸ Export: the writers live in studio/export_data.py (pacer-free, Qt-free); this
-    # cluster owns the Qt side — enabled-state sync, the QFileDialog save prompts (cancel ⇒
-    # nothing written), and the widget→PNG grabs for the report. Scoped to the File-menu
-    # region: no other part of the app knows exports exist.
+    # File ▸ Export Qt side (the writers are Qt-free in export_data.py).
     def _sync_export_menu(self):
         """Grey the Export submenu + the video-export action out until a session is loaded.
         Connected to the File menu's aboutToShow (synced as the menu opens), so neither _load nor
@@ -780,12 +592,8 @@ class StudioWindow(QMainWindow):
             self.statusBar().showMessage(f"exported {os.path.basename(path)}")
 
     def _run_export(self, write, path: str) -> bool:
-        """Run a data-export writer (`write()` — a 0-arg closure over the chosen path) under an
-        OSError guard, mirroring the video-export error path: a read-only folder / full disk /
-        removed volume must surface a user dialog, NOT throw a raw exception out of the triggered()
-        slot (silent abort, or a crash on some Qt builds). Returns True on success so the caller
-        shows its "exported …" status; on OSError shows a warning dialog + a statusbar note and
-        returns False. The writers in studio/export_data.py stay Qt-free — the guard lives here."""
+        """Run a writer (`write()`) under an OSError guard; on failure show a warning dialog +
+        statusbar note. Returns True on success."""
         try:
             write()
         except OSError as exc:
@@ -806,64 +614,46 @@ class StudioWindow(QMainWindow):
         return bytes(buf.data())
 
     # ------------------------------------------------- video-overlay export (F9)
-    # File ▸ "Export overlay video…": render the selected lap with the overlays burned onto the
-    # footage. The renderer (studio/export_video.py) is pacer-free and event-loop-free; this
-    # cluster owns the Qt side only — the quality picker, the save dialog, a QThread so the render
-    # runs OFF the UI thread, and a cancellable QProgressDialog. Nothing is written without the save
-    # dialog.
+    # File ▸ Export overlay video Qt side (renderer is event-loop-free in export_video.py).
 
-    # Export-quality picker options. RESOLUTION maps to OverlayConfig.out_height (output_size never
-    # upscales past the source, and clamps "Source" — a huge sentinel — back to the source height);
-    # QUALITY maps to OverlayConfig.quality (the encoder bitrate/CRF knob). "Source" resolution +
-    # "High" quality is the default (== the prior fixed behaviour at 1080p, but source-res aware).
+    # Resolution maps to OverlayConfig.out_height (never upscales past source; "Source" is a huge
+    # sentinel clamped back to source height); quality maps to OverlayConfig.quality.
+    # "1080p" resolution + "High" quality is the default.
     _EXPORT_RES_OPTIONS = [
         ("720p", 720), ("1080p", 1080), ("1440p", 1440), ("Source (no downscale)", 99999),
     ]
-    # Quality combo labels spell out the trade-off (bitrate ⇒ file size) so the picker isn't a
-    # bare "High / Standard" guess; the second tuple element is still the OverlayConfig.quality key.
     _EXPORT_QUALITY_OPTIONS = [
         ("High — larger file", "high"), ("Standard — smaller file", "standard"),
     ]
 
     def _ask_export_options(self, lap: int):
-        """A small modal picker (resolution + quality) shown before the save dialog; returns an
-        `export_video.OverlayConfig`, or None if the user cancels. The last choice is remembered on
-        the window (`self._export_res_idx` / `self._export_quality_idx`) so a repeat export defaults
-        to it. Two combos in a QDialog — lighter than a custom widget, and the only export-specific
-        UI this feature adds. The chrome around the two combos — a flush PanelHeader, a one-line
-        description of what gets burned in, the lap + its duration, and a live "what you'll get"
-        resolution hint — exists so a flagship shareable-MP4 export doesn't read as a debug prompt;
-        none of it touches the return contract."""
+        """Modal resolution + quality picker returning an export_video.OverlayConfig, or None on
+        cancel. The last choice is remembered on the window."""
         dlg = QDialog(self)
         dlg.setWindowTitle(f"Export overlay video — lap {lap}")
         dlg.setMinimumWidth(400)
 
         root = QVBoxLayout(dlg)
-        root.setContentsMargins(0, 0, 0, 0)          # the header strip runs flush to the edges …
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Flush PanelHeader strip naming the lap — same surface bg + hairline as every panel/dialog
-        # header, so the modal sits inside the app's visual language rather than as a bare OS dialog.
         header = QLabel(f"Export overlay video — lap {lap}")
         header.setProperty("role", "PanelHeader")
         root.addWidget(header)
 
-        # Body wrapper carries the comfortable padding (the header is full-bleed above it).
         body = QWidget(dlg)
         col = QVBoxLayout(body)
         col.setContentsMargins(16, 14, 16, 14)
         col.setSpacing(10)
         root.addWidget(body)
 
-        # One-line description of what's burned into the footage (the overlays the renderer paints).
         desc = QLabel("Burns the overlays into your footage: g-meter, Δ / speed, map inset and the "
                       "lap strip.")
         desc.setWordWrap(True)
         desc.setStyleSheet(f"color: {theme.C.text_dim};")
         col.addWidget(desc)
 
-        # Which lap + its length, so the export's scope is unambiguous. lap_time is a cheap pacer-free
-        # accessor (no ffprobe), so the duration is free here; fall back gracefully if it's missing.
+        # lap_time is a cheap pacer-free accessor (no ffprobe).
         dur = self.session.lap_time(lap) if hasattr(self, "session") else float("nan")
         lap_line = QLabel(f"Lap {lap}  ·  {fmt_time(dur)}")
         lap_line.setStyleSheet(f"color: {theme.C.text_dim};")
@@ -885,10 +675,7 @@ class StudioWindow(QMainWindow):
         form.addRow("Quality", q_combo)
         col.addLayout(form)
 
-        # Live "what you'll get" hint. We don't ffprobe the source here (too heavy for a picker), so
-        # the hint states the TARGET height and the never-upscale rule rather than exact pixels —
-        # the same contract output_size() enforces ("Source" / a target above the source keeps the
-        # native resolution; nothing is ever upscaled).
+        # States the target height + never-upscale rule (no ffprobe here); matches output_size().
         hint = QLabel("")
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color: {theme.C.text_muted};")
@@ -942,13 +729,8 @@ class StudioWindow(QMainWindow):
                                      f"_lap{lap}_overlay.mp4", "MP4 video (*.mp4)")
         if not out:
             return
-        # Build the spec with the VIDEO SOURCE resolved from the session's chapters: a lap's GLOBAL
-        # window is mapped to the correct chapter file (or a concat over the chapters a seam-crossing
-        # lap spans) + the file-LOCAL seek, the SAME global<->local mapping the player seeks with. A
-        # bad/empty/past-end window is refused here with a clear message rather than launching a
-        # doomed ffmpeg (the chaptered-export 'empty bar' fix). The worker owns the spec's source
-        # lifecycle (it cleans up any temp concat list when the render ends). The picked
-        # `config` carries the chosen out_height + quality.
+        # Resolve the lap window to its chapter file(s) + local seek; refuses a bad window with a
+        # ValueError rather than launching a doomed ffmpeg.
         try:
             spec = export_video.build_lap_spec(self.session, out, lap, config=config)
         except ValueError as exc:
@@ -958,14 +740,8 @@ class StudioWindow(QMainWindow):
         self._run_video_export(spec, lap)
 
     def _run_video_export(self, spec, lap: int):
-        """Run the render on a worker QThread behind a cancellable modal progress dialog. The
-        dialog's Cancel sets the worker's flag (polled by the render loop's `cancel` callback);
-        the worker reports (done, total) frames back to the dialog over a queued signal.
-
-        The dialog starts in a "Preparing…" BUSY state (an indeterminate 0/0 bar + a label) so the
-        setup phase — ffprobe, the encoder probe, ffmpeg launch, the first decoded frame — never
-        reads as a silent, stuck empty bar; it flips to a real 0→total determinate bar the moment
-        the first frame's progress arrives."""
+        """Run the render on a worker QThread behind a cancellable modal dialog. Starts indeterminate
+        ("Preparing…"), flips to a determinate bar on the first frame's progress."""
         dlg = QProgressDialog(f"Preparing lap {lap} overlay video…", "Cancel", 0, 0, self)
         dlg.setWindowTitle("Export overlay video")
         dlg.setWindowModality(Qt.WindowModal)
@@ -1008,11 +784,9 @@ class StudioWindow(QMainWindow):
 
     # ----------------------------------------------- cross-recording reference (F7)
     def _load_reference_file(self):
-        """File ▸ "Load reference recording…": pick another recording (same track) whose best lap
-        becomes the Δ / map / table reference. The chapters of the picked file are chained (like
-        "Load full recording") so the reference is the whole recording, then handed to
-        Session.load_reference. On a guard refusal (different track / no valid laps) the local best
-        lap is kept and the reason is shown — non-fatal."""
+        """Analyse ▸ "Load reference recording…": pick another recording (same track) whose best lap
+        becomes the Δ / map / table reference. The picked file's chapters are chained, then handed to
+        Session.load_reference. On a guard refusal the local best lap is kept and the reason shown."""
         if not hasattr(self, "session"):
             return
         start_dir = os.path.dirname(self._paths[0]) if getattr(self, "_paths", None) else ""
@@ -1030,25 +804,22 @@ class StudioWindow(QMainWindow):
         self._apply_reference_change()
 
     def _clear_reference(self):
-        """File ▸ "Clear reference": drop the cross-recording reference; everything reverts to the
-        session's own best lap (the dormant state)."""
+        """Analyse ▸ "Clear reference": drop the cross-recording reference; everything reverts to the
+        session's own best lap."""
         if not hasattr(self, "session") or not self.session.has_reference():
             return
         self.session.clear_reference()
-        # D5: the reference is gone — drop the sticky "prefer cross-recording compare" preference so
-        # a later compare toggle enters SAME-recording compare (there's no reference to compare to).
-        # The compare controller lives on the live central view.
+        # Drop the sticky "prefer cross-recording compare" preference so a later compare toggle
+        # enters same-recording compare (there's no reference left).
         view = getattr(self, "view", None)
         if view is not None:
             view.compare.clear_prefer_cross()
         self._apply_reference_change()
 
     def _enter_cross_compare(self):
-        """File ▸ "Compare vs reference recording" (F7 Phase B): enter the cross-recording video
-        compare — pane A = this recording's current/selected lap, pane B = the reference
-        recording's lap, each playing its own footage. No-op (with a notice) if no reference
-        recording is loaded. The existing same-recording "Compare videos" toggle is unaffected; the
-        compare button reflects the two-pane stage either way."""
+        """Analyse ▸ "Compare vs reference recording": enter the cross-recording video compare —
+        pane A = this recording's current/selected lap, pane B = the reference recording's lap, each
+        playing its own footage. No-op (with a notice) if no reference is loaded."""
         if not hasattr(self, "session") or self.session.reference_session() is None:
             QMessageBox.information(
                 self, "pacer studio — no reference recording",
@@ -1062,21 +833,10 @@ class StudioWindow(QMainWindow):
                 "The reference recording's lap could not be set up for compare.")
 
     def _apply_reference_change(self):
-        """Refresh every "vs best" surface after the reference was loaded OR cleared, and update
-        the menu + status chip. The reference replaces the local best lap as the Δ / map-overlay /
-        sector-guide / per-corner-Δ baseline, so the same panels a re-segment refreshes are
-        rebuilt here (minus the actual re-segmentation — the PRIMARY laps are unchanged).
-
-        Stays on the WINDOW: it is triggered by the persistent Analyse-menu actions (load / clear
-        reference) and ends in _update_reference_status, which drives the menu enablement + the
-        persistent status-bar chip. The session-derived refresh itself is the view's shared seam
-        (self.view.rebuild_derived_views), gated on the view's compare state."""
-        # Routed through the shared rebuild seam so a reference change refreshes the IDENTICAL union
-        # a re-segmentation does. This FIXES a real latent drift: the old hand-maintained sequence
-        # here omitted map.set_corners() and _refresh_driving_channels(), so loading/clearing a
-        # reference (which DOES change the per-corner Δ baseline) left the corner-map markers and
-        # the brake/coast glyphs stale — they now refresh too. reselect mirrors the old branch:
-        # _select_default() in single mode, plots.refresh() (keep the pinned pair) while comparing.
+        """Refresh every "vs best" surface after the reference was loaded or cleared, and update the
+        menu + status chip. The reference replaces the local best lap as the Δ / map / sector /
+        per-corner baseline, so it refreshes the same panels a re-segment does (via the shared seam)."""
+        # reselect: default-select in single mode, keep the pinned pair while comparing.
         self.view.rebuild_derived_views(reselect=not self.view._comparing())
         self._update_reference_status()
 
@@ -1106,9 +866,7 @@ class StudioWindow(QMainWindow):
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    # Opt-in full-recording: discover & chain ALL sibling chapters of the single opened file.
-    # DEFAULT (no flag) is unchanged — only the passed file(s) load. Explicit multiple paths
-    # still chain exactly those, in order, regardless of the flag.
+    # --full/--chaptered chain a single file's sibling chapters (see StudioWindow).
     full = "--full" in argv or "--chaptered" in argv
     paths = [a for a in argv if not a.startswith("-")] or [DEFAULT_SAMPLE]
     app = QApplication(sys.argv)
