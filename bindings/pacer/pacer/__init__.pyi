@@ -5,18 +5,24 @@ from typing import overload, Callable, Tuple, List, Any
 ####################    <generated_from:datatypes.hpp>    ####################
 
 class GPSSample:
+    """A single GPS fix. lat/lon are degrees, altitude is metres, and the two speeds
+    are m/s — GPS9 reports both a 2D "ground" speed and a 3D "full" speed.
+    timestamp_ms is the fix time as whole milliseconds on the recording clock.
+    """
+
     lat: float
     lon: float
     altitude: float
     full_speed: float
     ground_speed: float
     timestamp_ms: int
-    # GPS9 quality fields (GoPro): dilution-of-precision and fix type (0=none,
-    # 2=2D, 3=3D). Sources without these (the legacy GPS5 stream) leave the
-    # sentinels below, which downstream treats as "quality unknown -> keep". DOP
-    # is always positive in real fixes, so a negative sentinel is unambiguous
-    # (and -- unlike NaN -- renders as a plain literal in the generated python
-    # stub). Defaulted so existing aggregate inits stay valid.
+    # Fix-quality fields, present on GPS9 but not on the legacy GPS5 stream. `dop`
+    # is the dilution of precision (strictly positive on a genuine fix) and `fix`
+    # the solution type (0 = none, 2 = 2D, 3 = 3D). The negative sentinels stand
+    # for "unknown", which downstream reads as "do not quality-filter" — so GPS5
+    # data is kept. A negative literal (unlike NaN) also round-trips cleanly into
+    # the generated Python stub. The defaults keep pre-existing aggregate
+    # initialisers (which omit these two) valid.
     dop: float = -1.0
     fix: int = -1
     def __init__(
@@ -36,6 +42,11 @@ class GPSSample:
 #  ------------------------------------------------------------------------
 #      <template specializations for class PointInTime>
 class PointInTime_GPSSample:  # Python specialization for PointInTime<GPSSample>
+    """A spatial value tagged with the time it was observed (seconds). `P` is the
+    spatial type, so one template covers both the GPS trace (P = GPSSample) and the
+    local-metres crossing interpolation (P = Point).
+    """
+
     point: GPSSample
     time: float
     def __init__(self, point: GPSSample = GPSSample(), time: float = float()) -> None:
@@ -46,13 +57,12 @@ class PointInTime_GPSSample:  # Python specialization for PointInTime<GPSSample>
 #  ------------------------------------------------------------------------
 
 class IMUSample:
-    """A timestamped 3-axis IMU sample (used for ACCL accelerometer m/s^2 and GRAV
-    gravity vector). `time` is on the MEDIA clock (seconds, same basis as the GPS
-    payload spans, so it syncs to the video; chapter offsets are applied by the
-    SequentialGPSSource chain just like GPS). The three axes are carried in the
-    GoPro stream's native element order (ACCL: Z,X,Y in m/s^2; GRAV: a unit
-    gravity-direction vector). The studio layer resolves the camera->kart frame
-    transform on top of these raw axes.
+    """One 3-axis IMU reading — ACCL (accelerometer, m/s^2) or GRAV (a unit gravity
+    direction). `time` is on the MEDIA clock (seconds), the same basis as the GPS
+    payload spans, so it lines up with the video; the SequentialGPSSource chain
+    applies the per-chapter offset exactly as it does for GPS. Axes are stored in
+    the GoPro stream's native order (ACCL: Z,X,Y); the studio layer applies the
+    camera->kart frame transform on top.
     """
 
     x: float = 0
@@ -66,9 +76,8 @@ class IMUSample:
         pass
 
 class QuatSample:
-    """A timestamped orientation quaternion (used for CORI camera-orientation,
-    w,x,y,z). `time` is on the MEDIA clock (seconds), same basis as IMUSample /
-    GPS.
+    """One orientation quaternion — CORI (camera orientation), components w,x,y,z.
+    `time` is media-clock seconds, matching IMUSample / GPS.
     """
 
     w: float = 1
@@ -87,11 +96,10 @@ class QuatSample:
 ####################    <generated_from:geometry.hpp>    ####################
 
 class Vec3f:
-    """A 3-axis geometry/coordinate vector (LOCAL metric space, used by
-    CoordinateSystem and the local<->global conversions below). Lives here next
-    to Point because it is a geometry vector, not a telemetry sample type. Keeps
-    the full pointwise/linear vector algebra (Global() divides it element-wise by
-    an axis-radius vector).
+    """A 3-component vector in the LOCAL metric frame, used by CoordinateSystem and the
+    local<->global conversions. It lives beside Point because it is a geometry
+    vector rather than a telemetry sample, and it keeps the full linear + pointwise
+    algebra (Global() divides one elementwise by a per-axis radius vector).
     """
 
     x: float = 0
@@ -110,6 +118,8 @@ class Vec3f:
         pass
 
 class Point:
+    """A 2D point / vector (local metres, or lon-lat degrees — the caller decides)."""
+
     x: float = 0
     y: float = 0
 
@@ -125,15 +135,18 @@ class Point:
         pass
 
     def rot(self) -> Point:
+        """90-degree left rotation: (x, y) -> (-y, x). Used to build the perpendicular
+        for the segment-crossing side test.
+        """
         pass
 
-# Local-metres -> Point (drops z for the Vec3 overload). Both inputs are
-# already in the LOCAL metric coordinate system, so the result is in metres.
+# Local metres -> Point (the Vec3 form keeps x/y and drops z). Both inputs are
+# already in the local metric frame, so the result is metres.
 
 def to_lon_lat(s: GPSSample) -> Point:
-    """GPS degrees -> Point{lon, lat}. Named distinctly from ToPoint so a degrees
-    sample can never be silently mixed with a local-metres Point behind one
-    overloaded name at a call site.
+    """GPS degrees -> Point{lon, lat}. Deliberately a different name from ToPoint so a
+    degrees sample can never be mixed with a local-metres point behind one
+    overload set at a call site.
     """
     pass
 
@@ -142,15 +155,14 @@ class Segment:
     second: Point
 
     def intersects(self, fst: Point, snd: Point, ratio: float) -> bool:
-        """True iff this segment and the segment fst->snd PROPERLY cross: both
-        straddle tests use strict inequalities, so a touch — any endpoint of either
-        segment lying exactly ON the other segment's supporting line — is NOT a
-        crossing (tests/test_geometry.cpp pins this, including the consequence that
-        a trace vertex exactly on a timing line yields no crossing from either
-        adjacent trace segment). On a True return, if `ratio` is non-null it
-        receives the crossing's fraction along fst->snd, i.e. fst * (1 - ratio) +
-        snd * ratio is the intersection point (Split uses it to interpolate the
-        crossing sample/time). `ratio` is left untouched on a False return.
+        """True iff this segment and fst->snd cross PROPERLY. Both straddle tests use
+        strict signs, so a touch — an endpoint of either segment lying exactly on the
+        other's supporting line — is NOT a crossing (pinned by tests/test_geometry,
+        including that a trace vertex sitting exactly on a timing line produces no
+        crossing from either adjacent segment). On a True return, if `ratio` is
+        non-null it gets the crossing's fraction along fst->snd, so
+        fst*(1-ratio) + snd*ratio is the intersection point (Split uses it to
+        interpolate the crossing sample/time). `ratio` is untouched on False.
         """
         pass
 
@@ -162,38 +174,24 @@ class Segment:
         pass
 
 class CoordinateSystem:
-    # Coordinate system maps GPS coordinates to local coordinates.
-    #  N.B. All local coordinates measured in meters.
+    # Maps GPS coordinates to a local metric frame (metres). The forward map is an
+    # ECEF-style projection with a height-compensation factor h_c = 1 + alt/R_eq:
     #
-    # I employ following formulas:
-    #   x = h_c * R_equator * cos(lat) * cos(lon)
-    #   y = h_c * R_equator * cos(lat) * sin(lon)
+    #   x = h_c * R_eq * cos(lat) * cos(lon)
+    #   y = h_c * R_eq * cos(lat) * sin(lon)
     #   z = h_c * R_pole * sin(lat)
     #
-    # Where h_c is the height compenstaion factor:
-    #   h_c = 1 + altitude / R_equator
-    #
-    # Basis for resulting coordinate system is almost normalised gradients along
-    # lon/lat/altiude coordinates: only altitude slightly differs to have
-    # ortogonal system:
-    #  dx = (-R_equator cos(lat) sin(lon), R_equator cos(lat) cos(lon), 0)
-    #  dy = (-R_equator sin(lat) cos(lon), -R_equator sin(lat) sin(lon),
-    #        R_pole cos(lat))
-    #  dz = (R_pole cos(lat) cos(lon), R_pole cos(lat) sin(lon),
-    #        R_equator sin(lat))
-    #
-    # This is most likely not the best way to do this, but it works for now.
+    # The local basis is the (almost) normalised gradient of that map along
+    # lon / lat / altitude, orthogonalised by the radius choice. Good enough for a
+    # single track; not a survey-grade datum.
 
-    # Default frame: IDENTITY basis (dx/dy/dz = the ECEF unit axes, origin at the
-    # geocentre), i.e. Local() returns the point's raw ECEF position in metres
-    # and Distance() the True 3D chord. WHY: the members used to default to
-    # all-zero, so a default-constructed CoordinateSystem made every
-    # Local()/Distance() silently return 0 — a trap for new code that forgot
-    # SetCoordinateSystem/CoordinateSystem(origin). Every real pipeline still
-    # installs a track-centred CoordinateSystem(origin) before any distance is
-    # read (verified: byte-identical lap times + trace on the real session), so
-    # this only changes what FORGOTTEN initialization yields: real metres instead
-    # of silent zeros.
+    # The default frame is the IDENTITY basis (dx/dy/dz = the ECEF unit axes, origin
+    # at the geocentre), so Local() of a default-constructed system returns the raw
+    # ECEF position in metres and Distance() the True 3D chord — rather than the
+    # silent zeros an all-zero basis used to yield for code that forgot to install a
+    # real CoordinateSystem(origin). Every real pipeline still sets a track-centred
+    # origin before any distance is read (verified byte-identical on a real
+    # session), so this only changes what FORGOTTEN initialisation produces.
     @overload
     def __init__(self) -> None:
         pass
@@ -203,13 +201,11 @@ class CoordinateSystem:
         pass
 
     def local(self, point: GPSSample) -> Vec3f:
-        """/ Converts point to local coordinate system."""
+        """/ GPS sample -> local-frame point."""
         pass
 
     def global_(self, point: Vec3f) -> GPSSample:
-        """/ Maps local-coordinate point back to gps sample.
-        / N.B. Speed is not preserved.
-        """
+        """/ Local-frame point -> GPS sample. N.B. speed is not recovered."""
         pass
 
     def distance(self, from_: GPSSample, to: GPSSample) -> float:
@@ -220,6 +216,11 @@ class CoordinateSystem:
 ####################    <generated_from:laps.hpp>    ####################
 
 class Lap:
+    """One materialised lap: the GPS points it covers (interpolated start crossing +
+    interior track points + interpolated finish crossing) and the matching
+    per-point cumulative odometer.
+    """
+
     points: List[PointInTime[GPSSample]]
     cum_distances: List[float]
 
@@ -241,12 +242,11 @@ class Lap:
         pass
 
 class Sectors:
-    """The INPUT timing-line geometry: the start line + the intermediate sector
-    lines, in local metres. NOTE (confusion trap): the studio does NOT compute
-    per-lap sector SPLITS from the C++ crossing list these lines produce — it
-    projects each sector line onto the lap's odometer by DISTANCE in Python
-    (studio/session.py, lap_sector_splits), because a short line can miss a
-    geometric crossing on some laps.
+    """The INPUT timing geometry in local metres: the start line plus the intermediate
+    sector lines. Confusion trap: the studio does NOT take per-lap sector splits
+    from the C++ crossing list these produce — it projects each sector line onto a
+    lap's odometer by DISTANCE in Python (studio/session.py, lap_sector_splits),
+    because a short line can geometrically miss a crossing on some laps.
     """
 
     start_line: Segment
@@ -260,22 +260,17 @@ class Sectors:
         pass
 
 class LapArrays:
-    """A lap's per-point columns as parallel arrays, for a SINGLE Python<->C++
-    crossing per lap. The studio layer used to cross the binding once PER POINT
-    (cs.local(p.point), p.point.full_speed, p.time, cum_distances[i] in loops
-    over hundreds of points) to build the map/plot/g-meter arrays; LapColumns
-    returns them all at once. Every member has the SAME length as the
-    materialized lap (Lap::Count(): the interpolated start crossing + the
-    interior track points + the interpolated finish crossing), so the columns are
-    mutually index-aligned.
-      times          media-clock seconds of each point (== Lap::points[i].time)
-      xs, ys         LOCAL metres (CoordinateSystem::Local of each point, x/y)
-                     in the laps' OWN coordinate system (the one set via
-                     SetCoordinateSystem)
-      full_speed     raw 3D GPS speed (m/s) of each point (the studio layer
-                     scales to km/h)
-      cum_distances  the lap's per-point odometer (== Lap::cum_distances),
-                     gap-aware
+    """A lap's per-point data as parallel columns, so the studio layer crosses the
+    binding ONCE per lap instead of once per point (it used to call cs.local /
+    read full_speed / time / cum_distances in loops over hundreds of points). Every
+    column has the same length as the materialised lap (Lap::Count(): start
+    crossing + interior points + finish crossing) and they are mutually index-
+    aligned:
+      times          media-clock seconds (== Lap::points[i].time)
+      xs, ys         LOCAL metres — CoordinateSystem::Local(point).x|y in the laps'
+                     own coordinate system (the one set via SetCoordinateSystem)
+      full_speed     raw 3D GPS speed m/s (the studio scales to km/h)
+      cum_distances  the lap's gap-aware per-point odometer (== Lap::cum_distances)
     """
 
     times: List[float]
@@ -296,12 +291,12 @@ class LapArrays:
 
 class Laps:
     def update(self) -> None:
-        """/ Updates all laps given updated start_line and sector_lines"""
+        """/ Re-segment the trace against the current start_line / sector_lines."""
         pass
 
     def pick_random_start(self) -> Segment:
-        """/ Picks a starting point for start_line.
-        / Default implementation builds segment perpendicular to median segment.
+        """/ A default start line: perpendicular to the local direction near the median
+        / point. Used when no start line has been chosen yet.
         """
         pass
     # ---------------------------- PRESENTATION -------------------------------//
@@ -310,9 +305,7 @@ class Laps:
         pass
 
     def min_max(self) -> Tuple[Point, Point]:
-        """/ Gets bounding box for entire thing, might be cached
-        / as depends on points only.
-        """
+        """/ Bounding box (min/max lon-lat) over all raw points."""
         pass
     # -------------------------------- LAPS -----------------------------------//
 
@@ -345,11 +338,9 @@ class Laps:
         pass
 
     def lap_columns(self, lap: int) -> LapArrays:
-        """/ A lap's per-point columns (times, local-metre xs/ys, full_speed,
-        / cum_distances) as parallel arrays, so the studio layer builds its
-        / map/plot/g-meter arrays in ONE binding crossing instead of one per point.
-        / Identical (to float round-off) to materializing GetLap(lap) and then
-        / taking p.time / cs.Local(p.point).x|y / p.point.full_speed /
+        """/ A lap's per-point columns (see LapArrays) in ONE binding crossing instead of
+        / one per point. Equal (to float round-off) to materialising GetLap(lap) and
+        / reading p.time / cs.Local(p.point).x|y / p.point.full_speed /
         / cum_distances[i] per point, where cs is the laps' own coordinate system.
         / Out-of-range lap -> all-empty arrays.
         """
@@ -366,21 +357,15 @@ class Laps:
         pass
 
     def sector_time(self, sector: int) -> float:
-        """/ Throws std::out_of_range (Python: IndexError) if sector >=
-        / RecordedSectors().
-        """
+        """/ Throws std::out_of_range (Python: IndexError) if sector >= RecordedSectors()."""
         pass
 
     def sector_start_timestamp(self, sector: int) -> float:
-        """/ Throws std::out_of_range (Python: IndexError) if sector >=
-        / RecordedSectors().
-        """
+        """/ Throws std::out_of_range (Python: IndexError) if sector >= RecordedSectors()."""
         pass
 
     def sector_entry_speed(self, sector: int) -> float:
-        """/ Throws std::out_of_range (Python: IndexError) if sector >=
-        / RecordedSectors().
-        """
+        """/ Throws std::out_of_range (Python: IndexError) if sector >= RecordedSectors()."""
         pass
     # ------------------------------ RAW POINTS -------------------------------//
 
@@ -397,20 +382,14 @@ class Laps:
         pass
 
     def track_columns(self) -> LapArrays:
-        """/ The WHOLE raw point track's per-point columns (times, local-metre xs/ys,
-        / full_speed, cum_distances) as parallel arrays — LapColumns' bulk idiom
-        / over the full trace instead of one lap, so the studio layer builds its
-        / full-trace arrays in ONE binding crossing instead of one GetPoint +
-        / cs.local crossing per point. Exactly as GetPoint: times[i] / xs[i] / ys[i]
-        / / full_speed[i] equal GetPoint(i).time, cs.Local(GetPoint(i).point).x|y
-        / and GetPoint(i).point.full_speed for every i in [0, PointCount()), where
-        / cs is the laps' own coordinate system (the one set via
-        / SetCoordinateSystem). cum_distances[i] is the track's gap-aware cumulative
-        / odometer from point 0 to point i (the same cached prefix sum GetLap's
-        / interior distances are sliced from; see PointTrack). All five columns have
-        / length PointCount(); an empty track yields all-empty arrays (the
-        / odometer's internal {0} seed is an implementation detail and never becomes
-        / a row).
+        """/ The WHOLE raw track as parallel columns (see LapArrays) — the LapColumns
+        / idiom over the full trace, so the studio builds its full-trace arrays in ONE
+        / crossing rather than a GetPoint + cs.local per point. times[i] / xs[i] /
+        / ys[i] / full_speed[i] equal GetPoint(i).time, cs.Local(GetPoint(i).point).x|y
+        / and GetPoint(i).point.full_speed for every i in [0, PointCount()), and
+        / cum_distances[i] is the gap-aware odometer from point 0 to point i (the same
+        / cached prefix sum GetLap slices interior distances from). All five columns
+        / have length PointCount(); an empty track yields all-empty arrays.
         """
         pass
 
@@ -423,18 +402,16 @@ class Laps:
 ####################    <generated_from:gps-source.hpp>    ####################
 
 class RawGPSSource:
-    """Base class for raw GPS source.
+    """Abstract source of raw GPS / IMU samples — "raw" meaning it hands back fixes
+    without imposing a meaningful global timeline of its own.
 
-    Being raw in this context means that it does not provide any meaningful
-    timestamps to work with.
-
-    RETURN-CODE CONVENTION: every uint32_t-returning method (ReadSamples, Seek)
-    uses GoPro GPMF-parser error codes — 0 (GPMF_OK) is success, any nonzero
-    value is a GPMF_ERROR_* diagnostic (e.g. GPMFSource::ReadSamples returns
-    GPMF_ERROR_MEMORY == 1 when the current index has no payload). Callers only
-    distinguish zero from nonzero — no caller branches on a specific error code —
-    so sources implemented outside the parser (tests, Python subclasses) can
-    simply return 0 for success and any nonzero value for "nothing here".
+    Return-code convention: the uint32_t-returning methods (ReadSamples, Seek)
+    follow the GoPro GPMF parser's codes — 0 (GPMF_OK) is success and any nonzero
+    value is some GPMF_ERROR_* diagnostic (GPMFSource::ReadSamples returns
+    GPMF_ERROR_MEMORY == 1 when the cursor sits on an empty index). No caller ever
+    branches on a particular nonzero code — only zero vs nonzero — so a source
+    written outside the parser (a test, a Python subclass) may return 0 for
+    success and any nonzero value for "nothing here".
     """
 
     def __init__(self) -> None:
@@ -443,34 +420,29 @@ class RawGPSSource:
     def read_samples(  # overridable
         self, on_sample: Callable[[GPSSample, int, int], None]
     ) -> int:
-        """Main interface to take samples from current GPS source.
+        """Decode the GPS payload the cursor currently sits on (Seek/Next move it),
+        calling on_sample(sample, current_index, total_records) once per fix. Returns
+        0 on success or a nonzero code (e.g. no payload here).
 
-        Invokes `on_sample(sample, current_index, total_records)` once per GPS fix
-        decoded from the payload the cursor is currently on (Seek/Next position
-        it). Returns 0 on success, a nonzero error code otherwise (e.g. no payload
-        at the current index).
-
-        Virtual via std::function — the same idiom as ReadAccl/ReadGrav/ReadCori —
-        so a Python-implemented RawGPSSource can override it through the binding
-        trampoline and feed GPS samples into the engine (e.g. as a child of a C++
-        SequentialGPSSource chain). The former raw data-pointer + function-pointer
-        `Samples` virtual could not be trampolined, so Python overrides silently
-        emitted nothing. Default (RawGPSSource) emits nothing and returns 0;
-        GPMFSource / SequentialGPSSource override.
+        It is a std::function virtual — the same shape as ReadAccl/ReadGrav/ReadCori
+        — so a Python subclass can override it through the binding trampoline and
+        feed GPS into the engine (for instance as a child of a C++
+        SequentialGPSSource). The earlier raw-pointer + function-pointer `Samples`
+        virtual could not be trampolined, so Python overrides silently produced
+        nothing. The base implementation emits nothing and returns 0; GPMFSource and
+        SequentialGPSSource override it.
         """
         pass
-    # Reads the timestamped IMU streams (accelerometer / gravity vector) for the
-    # WHOLE source. Each sample carries a `time` on the MEDIA clock (seconds),
-    # interpolated across the payload span like the research `dump_imu.c` does,
-    # so it lines up with the GPS payload spans and the video. Multi-chapter
-    # sources shift later chapters by the cumulative duration (see
-    # SequentialGPSSource), so the times come out on one continuous global clock.
-    # Default (RawGPSSource) is a no-op; GPMFSource / SequentialGPSSource
-    # override.
+    # Read the timestamped IMU streams (accelerometer / gravity) across the WHOLE
+    # source. Each sample's `time` is on the MEDIA clock (seconds), spread across
+    # the payload span so it lines up with the GPS spans and the video; a
+    # multi-chapter source shifts later chapters by the cumulative duration (see
+    # SequentialGPSSource) onto one continuous global clock. The base is a no-op;
+    # GPMFSource / SequentialGPSSource override.
     #
-    # ACCL: 3-axis accelerometer in m/s^2 (native order Z,X,Y).
-    # GRAV: gravity unit vector (native order; permuted vs ACCL — resolved in the
-    # studio layer).
+    # ACCL is a 3-axis accelerometer in m/s^2 (native order Z,X,Y); GRAV is a unit
+    # gravity vector (native order, permuted vs ACCL — the studio layer resolves
+    # that).
     def read_accl(self, param_0: Callable[[IMUSample], None]) -> None:  # overridable
         pass
 
@@ -478,43 +450,37 @@ class RawGPSSource:
         pass
 
     def read_cori(self, param_0: Callable[[QuatSample], None]) -> None:  # overridable
-        """CORI: camera-orientation quaternion (w,x,y,z), ~60 Hz, media-clock time."""
+        """CORI is the camera-orientation quaternion (w,x,y,z), ~60 Hz, media-clock time."""
         pass
 
     def seek(self, target: float) -> int:  # overridable (pure virtual)
-        """Seeks to data chunk covering target."""
+        """Move the cursor to the chunk covering `target`."""
         pass
 
     def next(self) -> None:  # overridable (pure virtual)
-        """Proceeds to next piece of data."""
+        """Advance to the next chunk."""
         pass
 
     def is_end(self) -> bool:  # overridable (pure virtual)
-        """Checks whenever we already reachend end of the stream."""
+        """Has the cursor run past the last chunk?"""
         pass
 
     def current_time_span(self) -> Tuple[float, float]:  # overridable (pure virtual)
-        """Returns current samples' time span."""
+        """Time span of the chunk under the cursor."""
         pass
 
     def get_total_duration(self) -> float:  # overridable (pure virtual)
-        """Gets total MP4 duration."""
+        """Total media duration."""
         pass
 
 class GPMFSource(RawGPSSource):
-    """Handler for GPMF track inside MP4 container.
-
-    Allows for traversing media file and getting GPS data out of it.
-
-    TODO: Provide even more low-level access to underlying samples,
-          might be useful to keep buffer for data in some sort of iterator
-          with option to iterate over GPSSample-s on top of it.
+    """A RawGPSSource backed by the GPMF metadata track of an MP4 container: opens the
+    file and walks its GPS / IMU / orientation streams.
     """
 
-    # C++-ONLY: adopt an already-opened gpmf-parser MP4 handle. Excluded from the
-    # Python bindings (generate-bindings.py fn_exclude_by_name_and_signature) — a
-    # junk integer from Python would be dereferenced as a raw mp4 object pointer
-    # and segfault the process.
+    # C++ ONLY: take ownership of an already-opened gpmf-parser MP4 handle. Kept out
+    # of the Python bindings (see generate-bindings.py) because a stray integer
+    # from Python would be reinterpreted as an mp4-object pointer and crash.
     def __init__(self, filename: str) -> None:
         pass
 
@@ -532,26 +498,27 @@ class GPMFSource(RawGPSSource):
         pass
 
     def seek(self, target: float) -> int:
-        """Seeks to data chunk covering target."""
         pass
 
     def next(self) -> None:
-        """Proceeds to next piece of data."""
         pass
 
     def is_end(self) -> bool:
-        """Checks whenever we already reachend end of the stream."""
         pass
 
     def current_time_span(self) -> Tuple[float, float]:
-        """Returns current samples' time span."""
         pass
 
     def get_total_duration(self) -> float:
-        """Gets total MP4 duration."""
         pass
 
 class SequentialGPSSource(RawGPSSource):
+    """Concatenates two sources end to end (chapter chaining): the right child's
+    timeline is shifted by the left child's duration so the pair reads as one
+    continuous recording. `left` may itself be a SequentialGPSSource, so chains of
+    any length nest.
+    """
+
     def __init__(self, left: RawGPSSource, right: RawGPSSource) -> None:
         pass
 
@@ -580,7 +547,6 @@ class SequentialGPSSource(RawGPSSource):
         pass
 
     def current_time_span(self) -> Tuple[float, float]:
-        """Returns current samples' time span."""
         pass
 
 ####################    </generated_from:gps-source.hpp>    ####################
